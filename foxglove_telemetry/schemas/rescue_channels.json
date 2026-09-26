@@ -1,0 +1,16 @@
+{
+  "description": "Read-only rescue telemetry channels for Foxglove/Lichtblick.",
+  "channels": [
+    {"topic": "/camera/image", "encoding": "json", "message": "foxglove.CompressedImage"},
+    {"topic": "/detections", "encoding": "json", "message": "rescue.Detections"},
+    {"topic": "/fsm/state", "encoding": "json", "message": "rescue.FsmState"},
+    {"topic": "/fsm/events", "encoding": "json", "message": "rescue.FsmEvent"},
+    {"topic": "/sensors/imu", "encoding": "json", "message": "foxglove.Imu"},
+    {"topic": "/sensors/tof", "encoding": "json", "message": "rescue.TofArray"},
+    {"topic": "/safezone/pose", "encoding": "json", "message": "foxglove.PoseInFrame"},
+    {"topic": "/camera/calibration", "encoding": "json", "message": "foxglove.CameraCalibration"},
+    {"topic": "/system/health", "encoding": "json", "message": "rescue.SystemHealth"}
+  ],
+  "client_publish": false,
+  "playback_control": false
+}

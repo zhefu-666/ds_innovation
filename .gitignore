@@ -1,0 +1,42 @@
+# CMake and compiled outputs
+/build/
+/build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/Makefile
+/cmake_install.cmake
+/install_manifest.txt
+
+# Local binaries and runtime model artifacts
+/rescue_upper_host
+/benchmark_results/
+*.rknn
+*.onnx
+*.so
+
+# Runtime telemetry, recordings and temporary snapshots
+/telemetry_logs/
+*.log
+*.mcap
+*.mp4
+*.avi
+*.pid
+/dev/shm/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local tools and editor state
+.vscode/
+.idea/
+
+# Backups and generated reports
+*.tar.gz
+/reports/
+
+# Large reference documents kept outside source control
+/intelligence20260617.pdf
