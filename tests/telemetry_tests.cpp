@@ -25,7 +25,14 @@ int main() {
         detection.box = {1, 2, 30, 40};
         rescue::PushObservation observation;
         rescue::PushOutput output;
-        publisher.submit(frame, {detection}, observation, output, 1790000000123456789ULL, 5, 25, 20, 5);
+        rescue::ImuSnapshot imu;
+        imu.connected = imu.fresh = imu.sample.measurements_valid = true;
+        imu.sample.sequence = 100;
+        imu.sample.received_us = 123456789;
+        imu.sample.status = 0x2323;
+        imu.sample.angular_velocity_rps = {0.1f, 0.2f, 0.3f};
+        imu.sample.body_angular_velocity_rps = {0.1f, -0.2f, -0.3f};
+        publisher.submit(frame, {detection}, observation, output, 1790000000123456789ULL, 5, 25, 20, 5, imu);
         // Changing main's image must not race with or change the published snapshot.
         frame.setTo(cv::Scalar(0, 0, 0));
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -48,6 +55,13 @@ int main() {
         assert(static_cast<int>(data["detections"][0]["track_id"]) == 42);
         assert(static_cast<std::string>(data["detections"][0]["model_label"]) == detection.model_label);
         assert(static_cast<int>(data["motion"]["hardware_output_enabled"]) == 0);
+        assert(static_cast<int>(data["imu"]["sequence"]) == 100);
+        assert(static_cast<int>(data["imu"]["attitude_valid_for_control"]) == 0);
+        assert(static_cast<int>(data["imu"]["status_raw"]) == 0x2323);
+        assert(static_cast<double>(data["imu"]["received_monotonic_us"]) == 123456789);
+        assert(std::abs(static_cast<double>(data["imu"]["angular_velocity_rps"][1]) - 0.2) < 1e-6);
+        assert(static_cast<std::string>(data["imu"]["body_frame_id"]) == "base_link");
+        assert(std::abs(static_cast<double>(data["imu"]["body_angular_velocity_rps"][2]) + 0.3) < 1e-6);
         auto image = cv::imdecode(jpeg, cv::IMREAD_COLOR);
         assert(image.cols == 640 && image.rows == 360);
         assert(cv::mean(image)[2] > 190); // Owned source pixels, not the black reused frame.

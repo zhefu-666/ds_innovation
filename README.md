@@ -2,7 +2,7 @@
 
 本文说明从 GitHub 下载 `ds_innovation` 后，如何在 LubanCat/RK3588S 这类 ARM64 板子上完成编译，并通过网页或 Foxglove 查看主程序的实时检测画面。
 
-当前版本的主程序是**检测预览模式**：它会采集相机、运行 RKNN 检测、绘制检测框并输出任务状态；底盘运动输出仍关闭。IMU、ToF 和真实运动闭环尚未接入。
+当前版本的主程序是**检测预览模式**：它会采集相机、运行 RKNN 检测、绘制检测框并输出任务状态；底盘运动输出仍关闭。可通过 `--imu` 接收 HiPNUC HI91 数据并在终端/网页查看；安装坐标和状态位尚未确认，IMU姿态尚未用于运动控制。ToF 和真实运动闭环尚未接入。
 
 ## 1. 获取代码
 
@@ -339,7 +339,7 @@ ctest --test-dir build-arm64 --output-on-failure
 | `tests/fixtures/push_delivery.json` | 单件普通物资完整交付回放 |
 | `src/detector.cpp` | ONNX/RKNN 检测后端；RKNN 运行时动态加载 |
 | `src/tracker.cpp`、`camera_calibration.cpp`、`sensor_fusion.cpp` | 可复用跟踪、标定、安全组件，需接入新主链路 |
-| `src/uart_controller.cpp` | 10字节浮点运动包发送、4字节A6执行器反馈；尚未接入任务运动主链路 |
+| `src/uart_controller.cpp` | 15字节浮点运动包（夹爪+动作编号+相机pitch+CRC16）发送、8字节A6执行器反馈（含换行帧尾）；尚未接入任务运动主链路 |
 | `src/rescue_state_machine.cpp` | 先前的十四状态原型，仅保留用于原有组件测试，不是当前主入口 |
 | `src/controller.cpp` | 历史抓取控制器，当前主入口不使用 |
 
@@ -351,6 +351,70 @@ ctest --test-dir build-arm64 --output-on-failure
 
 ## 2026-09-25 电控接口更新
 
-上位机发送 `56 + float32 vx(m/s) + float32 wz(rad/s) + uint8 gripper_closed`，固定10字节、小端、无CRC；下位机反馈 `A6 + uint8 gripper_done + CRC16/Modbus`，固定4字节，CRC覆盖字节0..1。ToF字段保留注释，IMU状态独立。
+上位机发送 `56 + float32 vx(m/s) + float32 wz(rad/s) + uint8 gripper_open(0关闭/1张开) + uint8 gripper_action_id + int16 camera_pitch_cdeg(0.01°，0平视、正值向下) + CRC16/Modbus`，固定15字节、小端，CRC覆盖字节0..12；下位机反馈 `A6 + gripper_done + gripper_action_id + int16 camera_pitch_cdeg(读回) + CRC16/Modbus`，固定8字节（末尾0x0A换行），CRC覆盖字节0..4；上位机用 `gripperActionResult()` 按编号确认夹爪完成，用 `cameraPitchResult()` 按读回角确认相机到位。ToF字段保留注释，IMU状态独立。
 
-调用 `UARTController::sendMotion(command)` 发送，使用 `latestActuatorFeedback()` 读取反馈。旧无参数 `execute()` 不再发送13字节协议。详情见 [速度协议](VELOCITY_PROTOCOL.md) 和 [反馈协议](SENSOR_PROTOCOL.md)。本次接口改动不开放主程序实车模式，也不构成执行器动作闭环。
+调用 `UARTController::sendMotion(command)` 发送，使用 `latestActuatorFeedback()` 读取反馈。旧无参数 `execute()` 不再发送旧双电机/双舵机协议。详情见 [速度协议](VELOCITY_PROTOCOL.md) 和 [反馈协议](SENSOR_PROTOCOL.md)。本次接口改动不开放主程序实车模式，也不构成执行器动作闭环。
+
+
+### 终端手动控制下位机（不启动主程序）
+
+夹爪开关可直接用脚本，自动读取当前动作编号并加1，重复发送直到下位机报完成（默认3s超时）：
+
+```bash
+tools/gripper/gripper_status.sh   # 查看当前动作编号/完成标志/pitch
+tools/gripper/gripper_open.sh     # 张开
+tools/gripper/gripper_close.sh    # 合上
+```
+
+可加 `--dry-run` 只打印将发送的包、`--port`/`--baud`/`--timeout` 修改参数。需要同时控制速度或相机时用下面的通用脚本。
+
+先断开网页串口助手等占用 `/dev/ttyACM0` 的程序。参数依次为：vx(m/s)、wz(rad/s)、夹爪(0关/1开)、动作编号(1..255)、pitch(0.01°，正值向下，舵机限位±2500)。脚本只发一包并打印下位机回包；速度非0时车只动一下，200ms后下位机超时停车。
+
+```bash
+python3 - 0 0 1 1 0 <<'EOF'
+import os, sys, struct, termios, tty, time
+vx, wz = float(sys.argv[1]), float(sys.argv[2])
+g, gid, pitch = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+pitch = max(-2500, min(2500, pitch))  # 舵机限位±25°
+def crc(b):
+    c = 0xFFFF
+    for x in b:
+        c ^= x
+        for _ in range(8): c = (c >> 1) ^ 0xA001 if c & 1 else c >> 1
+    return c
+b = struct.pack('<BffBBh', 0x56, vx, wz, g, gid, pitch)
+pkt = b + struct.pack('<H', crc(b))
+print('TX', pkt.hex(' ').upper())
+fd = os.open('/dev/ttyACM0', os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+tty.setraw(fd); a = termios.tcgetattr(fd); a[4] = a[5] = termios.B115200; termios.tcsetattr(fd, termios.TCSANOW, a)
+os.write(fd, pkt); time.sleep(0.3)
+try: print('RX', os.read(fd, 64).hex(' ').upper())
+except BlockingIOError: print('RX 无数据')
+os.close(fd)
+EOF
+```
+
+只需改第一行参数。夹爪每次换状态动作编号都要加1，编号不变下位机按重复包忽略。
+
+| 第一行参数 | 效果 | 对应字节 |
+|---|---|---|
+| `0 0 1 1 0` | 夹爪张开，编号1 | `56 00 00 00 00 00 00 00 00 01 01 00 00 9A 41` |
+| `0 0 0 2 0` | 夹爪合上，编号2 | `56 00 00 00 00 00 00 00 00 00 02 00 00 6B BD` |
+| `0 0 0 2 2000` | 夹爪保持合上，相机向下20° | — |
+| `0 0 0 2 -2000` | 相机向上20° | — |
+
+回包 `A6 <done> <编号> <pitch低> <pitch高> <CRC低> <CRC高> 0A`，done=1且编号等于最新编号才表示夹爪动作完成。
+
+## HiPNUC IMU 接收（2026-09-26）
+
+已接入 HI91 接收、CRC 校验、SI 单位转换、新鲜度检查及网页/Foxglove 数据显示。详细包格式、数据接口和故障边界见 [HIPNUC_IMU.md](HIPNUC_IMU.md)。
+
+```bash
+# 只看IMU，无需相机/模型，不发送控制字节
+./build-arm64-telemetry/rescue_imu_monitor /dev/ttyUSB0 115200 30
+
+# 在真实相机预览中接收IMU，网页增加IMU数据卡片
+python3 tools/remote_camera_telemetry/manage_project.py start --imu --imu-port /dev/ttyUSB0 --imu-baud 115200
+```
+
+两个命令二选一，不能同时读取同一个IMU串口。已运行预览时，先执行管理脚本的 `stop` 再带上述参数启动。默认不启用IMU，避免未接设备时影响原有预览。`--dry-run --imu` 只允许IMU接收，不启用下位机运动输出。

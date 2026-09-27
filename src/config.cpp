@@ -48,7 +48,7 @@ void printUsage(const char *program) {
         << "  --rknn-library PATH Runtime library (default benchmark_results/librknnrt.so)\n"
         << "  --push-replay PATH  Replay validated task observations without camera or serial\n"
         << "  --model PATH        Model path, default benchmark_results/best_fp16.rknn\n"
-        << "  --port PATH         Serial port, default /dev/ttyUSB0\n"
+        << "  --port PATH         MCU serial port, default /dev/ttyACM0\n"
         << "  --baud N            Baudrate, default 115200\n"
         << "  --team red|blue     Team color, default red\n"
         << "  --camera N          Camera index, default 0\n"
@@ -60,11 +60,15 @@ void printUsage(const char *program) {
         << "  --nms X             NMS threshold, default 0.45\n"
         << "  --cuda              Use OpenCV DNN CUDA backend\n"
         << "  --no-show           Do not open display window\n"
+        << "  --imu               Receive HiPNUC HI91 in preview (device axes, no motion output)\n"
+        << "  --imu-port PATH     IMU serial port, default /dev/ttyUSB0\n"
+        << "  --imu-baud N        IMU baudrate, default 115200\n"
+        << "  --imu-timeout-ms N  IMU freshness limit, default 200 (1..10000)\n"
         << "  --telemetry         Publish observations to the local Foxglove bridge\n"
         << "  --telemetry-fps N   Preview rate limit, default 10 (1..30)\n"
         << "  --telemetry-file P  Snapshot in tmpfs, default /dev/shm/rescue-telemetry.bin\n"
         << "  --save              Save annotated video to output_cpp.mp4\n"
-        << "  --dry-run           Skip serial open, useful for vision debugging\n"
+        << "  --dry-run           Disable motion output; --imu may open IMU input\n"
         << "  --auto-run          Start in run command state instead of pause\n"
         << "  --require-masks     Reject box-only detections (safety mode)\n"
         << "  --sensor-timeout-ms N  Sensor freshness timeout, default 200\n"
@@ -140,6 +144,16 @@ Config parseArgs(int argc, char **argv) {
             config.class_names = splitCsv(needValue(arg));
         } else if (arg == "--cuda") {
             config.use_cuda = true;
+        } else if (arg == "--imu") {
+            config.imu = true;
+        } else if (arg == "--imu-port") {
+            config.imu_port = needValue(arg);
+        } else if (arg == "--imu-baud") {
+            config.imu_baud = std::stoi(needValue(arg));
+        } else if (arg == "--imu-timeout-ms") {
+            const int value = std::stoi(needValue(arg));
+            if (value < 1 || value > 10000) throw std::runtime_error("IMU timeout must be 1..10000 ms");
+            config.imu_timeout_ms = static_cast<uint32_t>(value);
         } else if (arg == "--telemetry") {
             config.telemetry = true;
         } else if (arg == "--telemetry-fps") {
@@ -182,6 +196,11 @@ Config parseArgs(int argc, char **argv) {
         config.telemetry_file.find("..") != std::string::npos) {
         throw std::runtime_error("Telemetry requires 1..30 FPS and an absolute /dev/shm/ snapshot path");
     }
+    if (config.imu_port.empty() || (config.imu_baud != 9600 && config.imu_baud != 115200 &&
+        config.imu_baud != 230400 && config.imu_baud != 460800 && config.imu_baud != 921600))
+        throw std::runtime_error("Invalid IMU port or unsupported baudrate");
+    if (config.imu && (!config.push_replay.empty() || !config.detect_image.empty()))
+        throw std::runtime_error("--imu is supported in live preview only");
     return config;
 }
 

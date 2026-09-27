@@ -40,3 +40,5 @@ venv/
 
 # Large reference documents kept outside source control
 /intelligence20260617.pdf
+calibration_runs/
+/build_*/

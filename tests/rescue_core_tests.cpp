@@ -71,32 +71,78 @@ int main() {
     }
 
     {
+        using Bytes = std::vector<uint8_t>;
+        // 金向量：15字节帧（夹爪动作编号 + int16相机pitch + CRC16/Modbus覆盖0..12，低字节在前）。
+        assert((UARTController::buildMotionPacket(MotionCommand{}, 0) ==
+                Bytes{0x56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xCA, 0x7D}));
+        MotionCommand opened;
+        opened.gripper_open = 1;
+        assert((UARTController::buildMotionPacket(opened, 1) ==
+                Bytes{0x56, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x01, 0x00, 0x00, 0x9A, 0x41}));
+        MotionCommand tilted;
+        tilted.camera_pitch_cdeg = 3000; // 向下30°
+        assert((UARTController::buildMotionPacket(tilted, 1) ==
+                Bytes{0x56, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x01, 0xB8, 0x0B, 0xA8, 0x7A}));
+        tilted.camera_pitch_cdeg = 12000; // 超过±90°限幅
+        assert((UARTController::buildMotionPacket(tilted, 1) ==
+                Bytes{0x56, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x01, 0x28, 0x23, 0xC4, 0x64}));
+        tilted.camera_pitch_cdeg = -12000;
+        assert((UARTController::buildMotionPacket(tilted, 1) ==
+                Bytes{0x56, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x01, 0xD8, 0xDC, 0xC0, 0x24}));
+
         MotionCommand command;
         command.vx_mps = 0.1f;
         command.wz_rps = -0.25f;
-        auto packet = UARTController::buildMotionPacket(command);
-        assert((packet == std::vector<uint8_t>{0x56, 0xCD, 0xCC, 0xCC, 0x3D,
-                                               0x00, 0x00, 0x80, 0xBE, 0}));
-        command.gripper_closed = 1;
-        packet = UARTController::buildMotionPacket(command);
-        assert(packet.size() == 10 && packet[9] == 1);
+        auto packet = UARTController::buildMotionPacket(command, 1);
+        assert((packet == Bytes{0x56, 0xCD, 0xCC, 0xCC, 0x3D, 0x00, 0x00, 0x80, 0xBE,
+                                0x00, 0x01, 0x00, 0x00, 0x48, 0x35}));
+        command.gripper_open = 7; // 非0值统一归一为1
+        command.camera_pitch_cdeg = 4550;
+        packet = UARTController::buildMotionPacket(command, 2);
+        assert((packet == Bytes{0x56, 0xCD, 0xCC, 0xCC, 0x3D, 0x00, 0x00, 0x80, 0xBE,
+                                0x01, 0x02, 0xC6, 0x11, 0x2A, 0x65}));
+        assert(packet.size() == MotionPacket::kSize);
+        const auto ids = UARTController::buildMotionPacket(command, 255);
+        assert(ids[10] == 0xFF);
+        command.gripper_open = 1;
+
+        // 编号1..255循环，跳过0
+        assert(UARTController::nextGripperActionId(0) == 1);
+        assert(UARTController::nextGripperActionId(1) == 2);
+        assert(UARTController::nextGripperActionId(255) == 1);
+
+        // CRC自洽，且任意单bit翻转都会被检出
+        auto crcOk = [](const Bytes &b) {
+            const uint16_t crc = UARTController::calculateCRC16(b.data(), 0, 12);
+            return b[13] == (crc & 0xFF) && b[14] == (crc >> 8);
+        };
+        assert(crcOk(packet));
+        for (size_t byte = 0; byte < 13; ++byte) {
+            for (int bit = 0; bit < 8; ++bit) {
+                Bytes corrupted = packet;
+                corrupted[byte] ^= static_cast<uint8_t>(1u << bit);
+                assert(!crcOk(corrupted));
+            }
+        }
+
         command.vx_mps = std::numeric_limits<float>::infinity();
-        packet = UARTController::buildMotionPacket(command);
+        packet = UARTController::buildMotionPacket(command, 1);
         for (int i = 1; i <= 8; ++i) assert(packet[i] == 0);
+        assert(packet[11] == 0xC6 && packet[12] == 0x11 && crcOk(packet)); // 速度非法不影响相机pitch
         command.vx_mps = 0.1f;
         command.wz_rps = std::numeric_limits<float>::quiet_NaN();
-        packet = UARTController::buildMotionPacket(command);
+        packet = UARTController::buildMotionPacket(command, 1);
         for (int i = 1; i <= 8; ++i) assert(packet[i] == 0);
-        command.vx_mps = -0.25f; command.wz_rps = 0; command.gripper_closed = 0;
-        packet = UARTController::buildMotionPacket(command);
-        assert((packet == std::vector<uint8_t>{0x56, 0x00, 0x00, 0x80, 0xBE,
-                                               0, 0, 0, 0, 0}));
-        packet = UARTController::buildMotionPacket(MotionCommand{});
-        assert(packet.size() == 10 && packet[0] == 0x56);
-        for (int i = 1; i <= 9; ++i) assert(packet[i] == 0);
+        assert(crcOk(packet));
+        command.vx_mps = -0.25f; command.wz_rps = 0; command.gripper_open = 0; command.camera_pitch_cdeg = 0;
+        packet = UARTController::buildMotionPacket(command, 1);
+        assert((packet == Bytes{0x56, 0x00, 0x00, 0x80, 0xBE, 0, 0, 0, 0, 0, 0x01, 0x00, 0x00, 0xE5, 0xF2}));
+        command.vx_mps = 0.1f; command.wz_rps = -0.25f; command.camera_pitch_cdeg = -1500; // 负值向上
+        packet = UARTController::buildMotionPacket(command, 3);
+        assert((packet == Bytes{0x56, 0xCD, 0xCC, 0xCC, 0x3D, 0x00, 0x00, 0x80, 0xBE, 0, 0x03, 0x24, 0xFA, 0x72, 0xB6}));
         command.header = 0x55;
         bool rejected = false;
-        try { UARTController::buildMotionPacket(command); }
+        try { UARTController::buildMotionPacket(command, 1); }
         catch (const std::invalid_argument &) { rejected = true; }
         assert(rejected);
     }

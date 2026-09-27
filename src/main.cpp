@@ -1,4 +1,5 @@
 #include "rescue/config.hpp"
+#include "rescue/hipnuc_imu.hpp"
 #include "rescue/detector.hpp"
 #include "rescue/push_task.hpp"
 #include "rescue/perception_adapter.hpp"
@@ -81,6 +82,12 @@ int main(int argc, char **argv) {
         if (!config.dry_run)
             throw std::runtime_error("Push hardware output is not connected yet. Use --dry-run "
                 "for perception or --push-replay PATH for task verification. No serial port was opened.");
+        std::unique_ptr<HipnucImu> imu;
+        if (config.imu) {
+            imu = std::make_unique<HipnucImu>(config.imu_port, config.imu_baud, config.imu_timeout_ms);
+            std::cout << "[IMU] " << config.imu_port << " @ " << config.imu_baud
+                      << " HI91; body axes via roll-180 mounting (2026-09-27), firmware status unverified\n";
+        }
         auto detector = makeDetector(config);
         VisionLogic vision(config);
         NearestNeighborTracker tracker;
@@ -134,6 +141,10 @@ int main(int argc, char **argv) {
             input.run = config.auto_run;
             // Raw boxes do not establish metric distance, route safety or delivery.
             // Keep unconnected evidence invalid; never synthesize successful observations.
+            const auto imu_data = imu ? imu->snapshot() : ImuSnapshot{};
+            // IMU absence/fault can veto permission; it never establishes geometry or route safety.
+            if (imu) input.safety_ok = input.safety_ok && imu_data.fresh && imu_data.sample.measurements_valid;
+            // Device axes are not robot axes: do not populate SensorState until mounting is calibrated.
             const auto out = task.update(input);
             previous = out;
             ++frame_sequence; ++rate_frames;
@@ -147,6 +158,13 @@ int main(int argc, char **argv) {
                 report(out);
                 std::cout << "[PERF] loop_fps=" << loop_fps << " inference_ms=" << inference_ms
                           << " capture_ms=" << capture_ms << " detections=" << detections.size() << "\n";
+                if (imu) {
+                    const auto& p = imu_data.sample;
+                    std::cout << "[IMU] fresh=" << imu_data.fresh << " age_ms=" << imu_data.age_ms
+                              << " numeric_ok=" << p.measurements_valid << " seq=" << p.sequence
+                              << " body_rpy_rad=" << p.body_rpy_rad[0] << "," << p.body_rpy_rad[1] << "," << p.body_rpy_rad[2]
+                              << " status=" << p.status << " crc_errors=" << imu_data.crc_errors << "\n";
+                }
                 last_report = now;
             }
             vision.drawDetections(frame, detections);
@@ -154,7 +172,7 @@ int main(int argc, char **argv) {
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, {0,255,255}, 2);
 #ifdef RESCUE_ENABLE_TELEMETRY
             if (telemetry) telemetry->submit(frame, detections, input, out, epoch_ns,
-                                             frame_sequence, loop_fps, inference_ms, capture_ms);
+                                             frame_sequence, loop_fps, inference_ms, capture_ms, imu_data);
 #endif
             if (writer.isOpened()) writer.write(frame);
             if (config.show) {

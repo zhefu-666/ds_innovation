@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 import websockets
 from websockets.server import serve
-from project_bridge import Source, read_packet, client
+from project_bridge import Source, read_packet, client, imu_view
 
 
 def packet(stamp=None):
@@ -28,6 +28,22 @@ class PacketTests(unittest.TestCase):
         self.path = Path(self.tmp.name) / 'snapshot'
     def tearDown(self):
         self.tmp.cleanup()
+    def test_imu_uses_own_freshness_not_camera_freshness(self):
+        data = {'imu': {'enabled': 1, 'connected': 1, 'measurements_valid': 1,
+                        'received_monotonic_us': time.monotonic_ns() / 1000,
+                        'timeout_ms': 200, 'rpy_rad': [0.1, 0.2, 0.3]}}
+        view = imu_view(data, True)
+        self.assertTrue(view['valid'])
+        self.assertFalse(view['attitude_valid_for_control'])
+        self.assertFalse(imu_view(data, False)['valid'])
+        data['imu']['received_monotonic_us'] -= 300000
+        self.assertFalse(imu_view(data, True)['fresh'])
+        data['imu']['received_monotonic_us'] = time.monotonic_ns() / 1000
+        data['imu']['measurements_valid'] = 0
+        self.assertTrue(imu_view(data, True)['fresh'])
+        self.assertFalse(imu_view(data, True)['valid'])
+        data['imu']['connected'] = 0
+        self.assertFalse(imu_view(data, True)['fresh'])
     def test_corruption_and_size_limits(self):
         for raw in [b'', packet()[:-1], packet()+b'X', b'RSTEL001'+struct.pack('<II', 2**31, 4)]:
             self.path.write_bytes(raw)
@@ -62,22 +78,23 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
     async def connect(self):
         ws = await websockets.connect(self.url, subprotocols=['foxglove.websocket.v1'])
         info = json.loads(await ws.recv()); self.assertEqual(info['capabilities'], [])
-        ad = json.loads(await ws.recv()); self.assertEqual(len(ad['channels']), 6)
+        ad = json.loads(await ws.recv()); self.assertEqual(len(ad['channels']), 7)
         return ws
     async def test_all_channels_and_timestamp(self):
         ws = await self.connect()
         try:
-            await ws.send(json.dumps({'op':'subscribe','subscriptions':[{'id':x,'channelId':x} for x in range(1,7)]}))
+            await ws.send(json.dumps({'op':'subscribe','subscriptions':[{'id':x,'channelId':x} for x in range(1,8)]}))
             received = {}
-            while len(received) < 6:
+            while len(received) < 7:
                 raw = await asyncio.wait_for(ws.recv(), 2)
                 op, sid, stamp = struct.unpack('<BIQ', raw[:13]); self.assertEqual(op,1)
                 received[sid] = json.loads(raw[13:])
-                if sid != 2: self.assertEqual(stamp, self.source.timestamp)
+                if sid not in (2,7): self.assertEqual(stamp, self.source.timestamp)
             self.assertTrue(received[2]['robot_data_connected'])
             self.assertEqual(received[4]['name'], 'WAIT_START')
             self.assertTrue(received[4]['valid'])
             self.assertEqual(received[5]['hardware_output_enabled'], 0)
+            self.assertFalse(received[7]['valid'])
         finally:
             await ws.close()
     async def test_reject_control_and_reconnect(self):

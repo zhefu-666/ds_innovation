@@ -56,7 +56,7 @@ TelemetryPublisher::~TelemetryPublisher() {
 void TelemetryPublisher::submit(const cv::Mat& frame,
     const std::vector<SegDetection>& detections, const PushObservation& observation,
     const PushOutput& output, uint64_t epoch_ns, uint64_t sequence, double loop_fps,
-    double inference_ms, double capture_ms) noexcept {
+    double inference_ms, double capture_ms, const ImuSnapshot& imu) noexcept {
     try {
         const auto now = std::chrono::steady_clock::now();
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
@@ -68,6 +68,7 @@ void TelemetryPublisher::submit(const cv::Mat& frame,
         snapshot.frame = frame.clone();
         snapshot.detections = detections;
         for (auto& d : snapshot.detections) d.mask.release();
+        snapshot.imu = imu;
         snapshot.observation = observation; snapshot.output = output;
         snapshot.epoch_ns = epoch_ns; snapshot.sequence = sequence;
         snapshot.loop_fps = loop_fps; snapshot.inference_ms = inference_ms;
@@ -140,7 +141,42 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
       << "requested_fps" << config_.fps << "confidence" << config_.confidence
       << "nms" << config_.nms << "input_size" << config_.input_size
       << "team" << config_.team << "model" << config_.model_path
-      << "dry_run" << static_cast<int>(config_.dry_run) << "}";
+      << "dry_run" << static_cast<int>(config_.dry_run)
+      << "imu_enabled" << static_cast<int>(config_.imu) << "imu_port" << config_.imu_port
+      << "imu_baud" << config_.imu_baud << "}";
+    const auto& imu = s.imu;
+    const auto& p = imu.sample;
+    // Carry host monotonic receive time; the local bridge recomputes freshness on every read.
+    f << "imu" << "{" << "enabled" << static_cast<int>(config_.imu)
+      << "connected" << static_cast<int>(imu.connected) << "fresh" << static_cast<int>(imu.fresh)
+      << "measurements_valid" << static_cast<int>(p.measurements_valid)
+      << "attitude_valid_for_control" << 0 << "frame_id" << "imu_device"
+      << "received_monotonic_us" << static_cast<double>(p.received_us)
+      << "timeout_ms" << static_cast<int>(imu.timeout_ms) << "age_ms" << imu.age_ms
+      << "sequence" << static_cast<double>(p.sequence) << "device_time_ms" << static_cast<double>(p.device_time_ms)
+      << "status_raw" << static_cast<int>(p.status) << "temperature_c" << p.temperature_c
+      << "pressure_pa" << finite(p.pressure_pa)
+      << "bytes" << static_cast<double>(imu.bytes) << "valid_frames" << static_cast<double>(imu.valid_frames)
+      << "crc_errors" << static_cast<double>(imu.crc_errors) << "invalid_frames" << static_cast<double>(imu.invalid_frames)
+      << "duplicate_times" << static_cast<double>(imu.duplicate_times) << "backward_times" << static_cast<double>(imu.backward_times)
+      << "io_errors" << static_cast<double>(imu.io_errors);
+    const auto vector = [&](const char* name, const auto& values) {
+        f << name << "[";
+        for (float value : values) f << finite(value);
+        f << "]";
+    };
+    vector("acceleration_mps2", p.acceleration_mps2);
+    vector("angular_velocity_rps", p.angular_velocity_rps);
+    vector("magnetic_ut", p.magnetic_ut);
+    vector("rpy_rad", p.rpy_rad);
+    vector("quaternion_wxyz", p.quaternion_wxyz);
+    // Mounting-corrected copies; raw fields above stay in imu_device for diagnosis.
+    f << "body_frame_id" << "base_link";
+    vector("body_acceleration_mps2", p.body_acceleration_mps2);
+    vector("body_angular_velocity_rps", p.body_angular_velocity_rps);
+    vector("body_rpy_rad", p.body_rpy_rad);
+    vector("body_quaternion_wxyz", p.body_quaternion_wxyz);
+    f << "}";
     const auto metadata = f.releaseAndGetString();
     if (metadata.size() > 1024 * 1024 || jpeg.size() > 8 * 1024 * 1024)
         throw std::runtime_error("Telemetry snapshot exceeds size limit");

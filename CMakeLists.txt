@@ -12,6 +12,7 @@ find_package(OpenCV REQUIRED)
 
 add_executable(rescue_upper_host
     src/main.cpp
+    src/hipnuc_imu.cpp
     src/push_task.cpp
     src/config.cpp
     src/types.cpp
@@ -112,4 +113,17 @@ if(BUILD_TESTING AND RESCUE_ENABLE_TELEMETRY)
     target_compile_options(rescue_telemetry_tests PRIVATE -UNDEBUG)
     add_test(NAME rescue_telemetry_tests COMMAND rescue_telemetry_tests)
     set_tests_properties(rescue_telemetry_tests PROPERTIES TIMEOUT 10)
+endif()
+
+add_executable(rescue_imu_monitor src/imu_monitor.cpp src/hipnuc_imu.cpp src/utils.cpp)
+target_include_directories(rescue_imu_monitor PRIVATE include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rescue_imu_monitor PRIVATE ${OpenCV_LIBS} pthread)
+if(BUILD_TESTING)
+    add_executable(rescue_imu_tests tests/imu_tests.cpp src/hipnuc_imu.cpp src/config.cpp)
+    target_include_directories(rescue_imu_tests PRIVATE include)
+    target_link_libraries(rescue_imu_tests PRIVATE pthread)
+    target_compile_options(rescue_imu_tests PRIVATE -UNDEBUG)
+    target_compile_definitions(rescue_imu_tests PRIVATE IMU_FIXTURE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/hi91-capture.bin")
+    add_test(NAME rescue_imu_tests COMMAND rescue_imu_tests)
+    set_tests_properties(rescue_imu_tests PROPERTIES TIMEOUT 10)
 endif()

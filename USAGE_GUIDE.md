@@ -48,8 +48,8 @@ ctest --test-dir build-arm64 --output-on-failure
 
 ## 电控接口（2026-09-25）
 
-发送入口为 `UARTController::sendMotion(const MotionCommand&)`，序列化为10字节小端浮点包；禁止直接发送普通业务结构体的内存大小。速度单位保持m/s和rad/s，无乘1000转换。旧 `execute()` 返回false，不再发送历史13字节包。
+发送入口为 `UARTController::sendMotion(const MotionCommand&)`，序列化为15字节小端浮点包（夹爪/相机档位及各自动作编号 + CRC16/Modbus覆盖字节0..12），需与下位机固件同步升级；禁止直接发送普通业务结构体的内存大小。速度单位保持m/s和rad/s，无乘1000转换。旧 `execute()` 返回false，不再发送历史双电机/双舵机包。
 
-接收使用 `latestActuatorFeedback()`，返回 `timestamp_us/gripper_done/valid`；仅校验4字节A6执行器反馈，不提供IMU数据。ToF仍未安装，字段保留注释。协议字段与CRC样例见 `SENSOR_PROTOCOL.md`、`VELOCITY_PROTOCOL.md`。
+接收使用 `latestActuatorFeedback()`，返回 `timestamp_us/gripper_done/gripper_action_id/camera_pitch_cdeg/valid`；仅校验8字节A6执行器反馈（末尾0x0A）。夹爪是否完成用 `gripperActionResult()` 判断，相机是否到位用 `cameraPitchResult(容差)` 判断，不提供IMU数据。ToF仍未安装，字段保留注释。协议字段与CRC样例见 `SENSOR_PROTOCOL.md`、`VELOCITY_PROTOCOL.md`。
 
 虚拟串口测试包含精确收发字节、CRC错误恢复、拆包/粘包与反馈过期，不会打开实际设备。实车主入口仍等待几何、安全和动作流程接入。

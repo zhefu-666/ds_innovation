@@ -1,5 +1,6 @@
 #pragma once
 #include "rescue/config.hpp"
+#include "rescue/hipnuc_imu.hpp"
 #include "rescue/push_task.hpp"
 #include <opencv2/core.hpp>
 #include <atomic>
@@ -21,13 +22,14 @@ public:
     void submit(const cv::Mat& annotated, const std::vector<SegDetection>& detections,
                 const PushObservation& observation, const PushOutput& output,
                 uint64_t epoch_ns, uint64_t sequence, double loop_fps,
-                double inference_ms, double capture_ms) noexcept;
+                double inference_ms, double capture_ms, const ImuSnapshot& imu = {}) noexcept;
 private:
     struct Snapshot {
         cv::Mat frame;
         std::vector<SegDetection> detections;
         PushObservation observation;
         PushOutput output;
+        ImuSnapshot imu;
         uint64_t epoch_ns = 0, sequence = 0;
         double loop_fps = 0, inference_ms = 0, capture_ms = 0;
     };

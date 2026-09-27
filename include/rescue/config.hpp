@@ -21,7 +21,7 @@ struct Config {
     std::string detect_image;
     std::string rknn_library = "./benchmark_results/librknnrt.so";
     std::string model_path = "./benchmark_results/best_fp16.rknn";
-    std::string uart_port = "/dev/ttyUSB0";
+    std::string uart_port = "/dev/ttyACM0"; // 下位机MCU（USB CDC）；IMU见imu_port
     std::string team = "red";
     int baudrate = 115200;
     int camera_index = 0;
@@ -36,6 +36,10 @@ struct Config {
     bool show = true;
     bool save_output = false;
     bool dry_run = false;
+    bool imu = false;
+    std::string imu_port = "/dev/ttyUSB0";
+    int imu_baud = 115200;
+    uint32_t imu_timeout_ms = 200;
     bool telemetry = false;
     int telemetry_fps = 10;
     std::string telemetry_file = "/dev/shm/rescue-telemetry.bin";
