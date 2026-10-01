@@ -6,11 +6,11 @@ PushObservation makePushObservation(const std::vector<SegDetection> &detections,
     PushObservation in;in.now_us=now;
     const SegDetection *best=nullptr;
     for(const auto &d:detections) {
-        const bool allowed=d.label=="ordinary_supply" ||
-            (first && (d.label=="core_supply" || d.label=="injured_person"));
+        const bool allowed=targetSelectable(d.label,first);
         if(!allowed||d.track_id<0||!std::isfinite(d.confidence)||d.confidence<threshold||
            d.timestamp_us==0||now<d.timestamp_us||now-d.timestamp_us>200000||d.box.width<=0||d.box.height<=0)continue;
-        if(!best||d.confidence>best->confidence)best=&d;
+        // Nearest by image bottom when metric geometry is unavailable at this stage.
+        if(!best||d.box.br().y>best->box.br().y||(d.box.br().y==best->box.br().y&&d.confidence>best->confidence))best=&d;
     }
     if(best){in.target_valid=true;in.target_id=best->track_id;in.label=best->label;}
     return in;

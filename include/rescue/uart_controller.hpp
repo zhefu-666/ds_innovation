@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include "rescue/types.hpp"
+#include "rescue/frame_sensors.hpp"
 
 namespace rescue {
 
@@ -38,6 +40,9 @@ public:
     virtual ~UARTController();
 
     void initUART(const std::string &port, int baudrate, bool dry_run, bool auto_run);
+    // Opens O_RDONLY and blocks sendMotion even if accidentally called. No TX bytes.
+    void initFeedbackOnly(const std::string &port, int baudrate);
+    FrameSensors feedbackAt(uint64_t capture_us) const;
     void closePort();
 
     uint8_t getLatestCmd() const;
@@ -58,6 +63,13 @@ public:
     // 当前动作：id为0表示尚未发送过。
     uint8_t gripperActionId() const;
     ActionResult gripperActionResult() const;
+    // 首包前以下位机当前编号为基准，使第一包用“当前编号+1”：主程序重启时下位机可能仍停在
+    // 上次的编号，若沿用1会被当作重复包而误报完成。等待有效A6反馈至多timeout，超时返回false且不改编号。
+    bool syncGripperActionId(std::chrono::milliseconds timeout);
+    // 夹爪确认：同一把锁内读取结果与对应目标，避免发送线程在两次读取之间换目标。
+    // target为-1表示尚未发送，0关闭，1张开；result为Done时target即已完成的目标状态。
+    struct GripperAck { ActionResult result = ActionResult::Idle; int target = -1; };
+    GripperAck gripperAck() const;
     // 最近一次下发的相机pitch目标（限幅后），0.01°。
     int16_t cameraPitchTarget() const;
     // 读回角与目标之差不超过tolerance_cdeg为Done；读回无效为NoFeedback。
@@ -86,6 +98,8 @@ private:
     std::string port_ = "/dev/ttyACM0";
     int baudrate_ = 115200;
     bool dry_run_ = false;
+    bool feedback_only_ = false;
+    PitchHistory pitch_history_;
     std::array<int, 2> motor_speeds_{0, 0};
     std::array<int, 2> servo_angles_{0, 0};
     std::atomic<uint8_t> latest_cmd_{0xAA};
@@ -94,7 +108,8 @@ private:
     mutable std::mutex io_mutex_;
     ActuatorFeedback actuator_feedback_;
     // 以下受io_mutex_保护
-    uint8_t gripper_action_id_ = 0;
+    uint8_t gripper_action_id_ = 0; // 已发送时为当前编号；同步后未发送时为下位机编号
+    bool gripper_sent_ = false;
     uint8_t gripper_target_ = 0; // 0关闭，1张开
     bool camera_sent_ = false;
     int16_t camera_pitch_target_ = 0; // 0.01°，已限幅

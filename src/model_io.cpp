@@ -7,10 +7,10 @@
 #include <stdexcept>
 namespace rescue {
 std::string taskLabel(const std::string &s) {
+    // blocks_v* colours (rules: light-blue danger, orange injured, green ordinary, black core).
     static const std::map<std::string,std::string> names{
-        {"core","core_supply"},{"wounded","injured_person"},{"red","red_safe_zone"},
-        {"dangerous","dangerous_object"},{"normal","ordinary_supply"},
-        {"main","unmapped_main"},{"blue","blue_safe_zone"}};
+        {"blue","dangerous_object"},{"orange","injured_person"},
+        {"green","ordinary_supply"},{"black","core_supply"}};
     auto it=names.find(s);
     return it==names.end()?"unmapped_"+s:it->second;
 }

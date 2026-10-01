@@ -42,12 +42,23 @@ std::vector<std::string> makeTargetAreas(const std::string &team) {
 void printUsage(const char *program) {
     std::cout
         << "Usage: " << program << " [options]\n\n"
-        << "Ground-pushing task (hardware adapter pending)\n"
+        << "Ground-pushing task\n"
         << "Options:\n"
         << "  --detect-image PATH Infer one image without camera or serial\n"
         << "  --rknn-library PATH Runtime library (default benchmark_results/librknnrt.so)\n"
         << "  --push-replay PATH  Replay validated task observations without camera or serial\n"
-        << "  --model PATH        Model path, default benchmark_results/best_fp16.rknn\n"
+        << "  --geometry-replay P Pixel/IMU/pitch geometry replay; no devices or model\n"
+        << "  --calibration PATH Validated camera ground calibration, bound to actual pitch\n"
+        << "  --zone-geometry P  Fixed landmark schema (default config/zone_geometry.json)\n"
+        << "  --pitch-feedback   Open MCU feedback read-only for synchronized ground mapping\n"
+        << "  --keypoints-file P Optional atomic same-frame landmark JSON (no box-derived points)\n"
+        << "  --model PATH        Detector model, default models/detect_fp.rknn\n"
+        << "  --pose-model PATH   Safe-zone YOLOv8-pose RKNN (zone_left/zone_right, 4 kpts); replaces --keypoints-file\n"
+        << "  --pose-conf X       Safe-zone half score threshold, default 0.25\n"
+        << "  --pose-kpt-conf X   Safe-zone keypoint visibility threshold, default 0.5\n"
+        << "  --detect-core N     RKNN core mask for detector (0 auto, 1, 2, 4)\n"
+        << "  --pose-core N       RKNN core mask for pose (0 auto, 1, 2, 4)\n"
+        << "  --parallel-infer    Run detector and pose concurrently\n"
         << "  --port PATH         MCU serial port, default /dev/ttyACM0\n"
         << "  --baud N            Baudrate, default 115200\n"
         << "  --team red|blue     Team color, default red\n"
@@ -55,12 +66,12 @@ void printUsage(const char *program) {
         << "  --width N           Capture width, default 1280\n"
         << "  --height N          Capture height, default 720\n"
         << "  --fps N             Capture FPS, default 60\n"
-        << "  --input-size N      YOLO input size, default 448\n"
+        << "  --input-size N      Model input size (both models), default 640\n"
         << "  --conf X            Confidence threshold, default 0.5\n"
         << "  --nms X             NMS threshold, default 0.45\n"
         << "  --cuda              Use OpenCV DNN CUDA backend\n"
         << "  --no-show           Do not open display window\n"
-        << "  --imu               Receive HiPNUC HI91 in preview (device axes, no motion output)\n"
+        << "  --imu               Receive HiPNUC HI91 in preview (body axes; stale/over-tilt vetoes safety, no motion output)\n"
         << "  --imu-port PATH     IMU serial port, default /dev/ttyUSB0\n"
         << "  --imu-baud N        IMU baudrate, default 115200\n"
         << "  --imu-timeout-ms N  IMU freshness limit, default 200 (1..10000)\n"
@@ -69,11 +80,15 @@ void printUsage(const char *program) {
         << "  --telemetry-file P  Snapshot in tmpfs, default /dev/shm/rescue-telemetry.bin\n"
         << "  --save              Save annotated video to output_cpp.mp4\n"
         << "  --dry-run           Disable motion output; --imu may open IMU input\n"
+        << "  --hardware          Send PushTask motion/gripper/pitch to the MCU (25 Hz, zero velocity on stall/exit);\n"
+        << "                      needs --imu, reads gripper and pitch feedback from the same port\n"
         << "  --auto-run          Start in run command state instead of pause\n"
         << "  --require-masks     Reject box-only detections (safety mode)\n"
         << "  --sensor-timeout-ms N  Sensor freshness timeout, default 200\n"
         << "  --tof-stop-m X      ToF emergency-stop distance, default 0.18\n"
-        << "  --imu-tilt-deg X    Maximum trusted pitch/roll, default 12\n"
+        << "  --imu-tilt-deg X    Body pitch/roll stop limit, default 12 (ground mapping uses its own tighter limit)\n"
+        << "  --pitch-presets F,T,N  Camera FAR,TRACK,NEAR presets in 0.01 deg, positive down, default 0,2500,2500\n"
+        << "                      (MCU firmware currently has only -2500/0/2500); needs -3500<=F<=T<=N<=3500\n"
         << "  --classes CSV       Raw model class names in tensor order\n"
         << "  --help              Show this help\n";
 }
@@ -112,8 +127,30 @@ Config parseArgs(int argc, char **argv) {
             config.rknn_library = needValue(arg);
         } else if (arg == "--push-replay") {
             config.push_replay = needValue(arg);
+        } else if (arg == "--geometry-replay") {
+            config.geometry_replay = needValue(arg);
+        } else if (arg == "--calibration") {
+            config.calibration_file = needValue(arg);
+        } else if (arg == "--zone-geometry") {
+            config.zone_geometry_file = needValue(arg);
+        } else if (arg == "--pitch-feedback") {
+            config.pitch_feedback = true;
+        } else if (arg == "--keypoints-file") {
+            config.keypoints_file = needValue(arg);
         } else if (arg == "--model") {
             config.model_path = needValue(arg);
+        } else if (arg == "--pose-model") {
+            config.pose_model_path = needValue(arg);
+        } else if (arg == "--pose-conf") {
+            config.pose_confidence = std::stof(needValue(arg));
+        } else if (arg == "--pose-kpt-conf") {
+            config.pose_keypoint_confidence = std::stof(needValue(arg));
+        } else if (arg == "--detect-core") {
+            config.detect_core_mask = std::stoi(needValue(arg));
+        } else if (arg == "--pose-core") {
+            config.pose_core_mask = std::stoi(needValue(arg));
+        } else if (arg == "--parallel-infer") {
+            config.parallel_inference = true;
         } else if (arg == "--port") {
             config.uart_port = needValue(arg);
         } else if (arg == "--baud") {
@@ -140,6 +177,18 @@ Config parseArgs(int argc, char **argv) {
             config.tof_stop_distance_m = std::stof(needValue(arg));
         } else if (arg == "--imu-tilt-deg") {
             config.imu_tilt_limit_deg = std::stof(needValue(arg));
+        } else if (arg == "--pitch-presets") {
+            const auto items = splitCsv(needValue(arg));
+            if (items.size() != 3) throw std::runtime_error("--pitch-presets needs FAR,TRACK,NEAR");
+            for (size_t k = 0; k < 3; ++k) {
+                size_t used = 0;
+                const int v = std::stoi(items[k], &used);
+                if (used != items[k].size() || v < -3500 || v > 3500)
+                    throw std::runtime_error("--pitch-presets values must be integers in -3500..3500 (0.01 deg)");
+                config.pitch_presets_cdeg[k] = static_cast<int16_t>(v);
+            }
+            const auto &p = config.pitch_presets_cdeg;
+            if (p[0] > p[1] || p[1] > p[2]) throw std::runtime_error("--pitch-presets needs FAR <= TRACK <= NEAR");
         } else if (arg == "--classes") {
             config.class_names = splitCsv(needValue(arg));
         } else if (arg == "--cuda") {
@@ -166,6 +215,8 @@ Config parseArgs(int argc, char **argv) {
             config.save_output = true;
         } else if (arg == "--dry-run") {
             config.dry_run = true;
+        } else if (arg == "--hardware") {
+            config.hardware = true;
         } else if (arg == "--auto-run") {
             config.auto_run = true;
         } else if (arg == "--require-masks") {
@@ -184,9 +235,17 @@ Config parseArgs(int argc, char **argv) {
     if (config.input_size <= 0 || !std::isfinite(config.confidence) || config.confidence < 0 || config.confidence > 1 ||
         !std::isfinite(config.nms) || config.nms < 0 || config.nms > 1)
         throw std::runtime_error("Invalid model size or confidence/NMS thresholds");
-    if (config.class_names.size() != 7) {
-        throw std::runtime_error("This model profile requires exactly seven classes");
-    }
+    if (config.class_names.empty()) throw std::runtime_error("--classes must name at least one class");
+    auto validThreshold = [](float v) { return std::isfinite(v) && v >= 0 && v <= 1; };
+    if (!validThreshold(config.pose_confidence) || !validThreshold(config.pose_keypoint_confidence))
+        throw std::runtime_error("Pose thresholds must be in [0,1]");
+    auto validCore = [](int m) { return m == -1 || m == 0 || m == 1 || m == 2 || m == 4; };
+    if (!validCore(config.detect_core_mask) || !validCore(config.pose_core_mask))
+        throw std::runtime_error("Core mask must be 0, 1, 2 or 4");
+    if (!config.pose_model_path.empty() && !config.keypoints_file.empty())
+        throw std::runtime_error("Use either --pose-model or --keypoints-file");
+    if (config.parallel_inference && config.pose_model_path.empty())
+        throw std::runtime_error("--parallel-infer requires --pose-model");
     if (config.sensor_timeout_ms == 0 ||
         config.tof_stop_distance_m <= 0.0f || config.imu_tilt_limit_deg <= 0.0f) {
         throw std::runtime_error("Safety timing and distance limits must be positive");
@@ -199,6 +258,28 @@ Config parseArgs(int argc, char **argv) {
     if (config.imu_port.empty() || (config.imu_baud != 9600 && config.imu_baud != 115200 &&
         config.imu_baud != 230400 && config.imu_baud != 460800 && config.imu_baud != 921600))
         throw std::runtime_error("Invalid IMU port or unsupported baudrate");
+    const int modes = int(!config.push_replay.empty()) + int(!config.detect_image.empty()) + int(!config.geometry_replay.empty());
+    if (modes > 1) throw std::runtime_error("Select only one replay/image mode");
+    if ((!config.geometry_replay.empty() || !config.keypoints_file.empty()) && config.calibration_file.empty())
+        throw std::runtime_error("Geometry input requires --calibration");
+    if (config.hardware && config.dry_run) throw std::runtime_error("Use either --dry-run or --hardware");
+    if (config.hardware && modes) throw std::runtime_error("--hardware is live-loop only");
+    if (config.hardware && config.pitch_feedback)
+        throw std::runtime_error("--hardware already reads MCU feedback; drop --pitch-feedback");
+    if (config.hardware && !config.imu) throw std::runtime_error("--hardware requires --imu (tilt/staleness veto)");
+    if (config.pitch_feedback && config.calibration_file.empty())
+        throw std::runtime_error("Pitch feedback preview requires --calibration");
+    if (!config.calibration_file.empty() && (!config.push_replay.empty() || !config.detect_image.empty()))
+        throw std::runtime_error("Use --geometry-replay or live preview with --calibration");
+    if (config.pitch_feedback && modes) throw std::runtime_error("Pitch receiver is live-preview only");
+    if (!config.geometry_replay.empty() && (!config.keypoints_file.empty() || config.imu))
+        throw std::runtime_error("Geometry replay must use recorded sensors/keypoints, no live sources");
+    if (!config.calibration_file.empty() && modes==0 && (!config.imu || !(config.pitch_feedback || config.hardware)))
+        throw std::runtime_error("Live ground mapping requires --imu and --pitch-feedback (or --hardware)");
+    if ((config.pitch_feedback || config.hardware) && config.imu && config.uart_port==config.imu_port)
+        throw std::runtime_error("MCU feedback and IMU must use different serial ports");
+    if (!std::isfinite(config.tof_stop_distance_m) || !std::isfinite(config.imu_tilt_limit_deg))
+        throw std::runtime_error("Safety thresholds must be finite");
     if (config.imu && (!config.push_replay.empty() || !config.detect_image.empty()))
         throw std::runtime_error("--imu is supported in live preview only");
     return config;

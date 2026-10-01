@@ -2,6 +2,10 @@
 
 依赖：Python 3、OpenCV、NumPy。板子已有这些依赖。本工具不会操作电机，也不会改写当前生效配置；每次输出目录必须不存在。
 
+## 当前推荐流程
+
+本项目使用 9×6 对称圆点板（2026-09-29 起，替换旧 10×7 平板图案）。内参通过网页分步拍摄后，推荐直接按项目根目录的《相机圆点棋盘一体化标定操作指南》执行 `calibrate.py extrinsics --pattern circles`，一次完成外参、地面单应矩阵和独立地面点验收。下面的 `ground` 模式保留作已有测量点或特殊场景的手动映射备用流程，不是圆点棋盘一体化标定的必需步骤。
+
 ## 人工准备
 
 1. 使用 **9×6 内角点**棋盘（10×7 方格），打印后贴在平整硬板上。用尺实际量方格边长，示例假定 25 mm；不要直接相信打印比例。
@@ -66,6 +70,7 @@ python3 tools/camera_calibration/calibrate.py pick \
 python3 tools/camera_calibration/calibrate.py ground \
   --intrinsics calibration_runs/intrinsics_01/intrinsics.yaml \
   --points ground_points.json --max-error-mm 20 \
+  --camera-pitch-cdeg 2000 \
   --output calibration_runs/ground_01
 ```
 
@@ -74,6 +79,8 @@ python3 tools/camera_calibration/calibrate.py ground \
 ## 三、文件接入与限制
 
 输出 camera.yaml 包含 camera_matrix、dist_coeffs、ground_homography、图像尺寸和像素域标记，可由项目 CameraCalibration::load() 读取。C++ 组件已适配该标记，在像素到地面转换前先去畸变；旧无标记文件仍按旧的原图坐标变换处理。
+
+`--camera-pitch-cdeg` 必填：拍照时相机舵机的**读回**pitch（A6反馈，0.01°，正值向下；示例2000只是占位）。单应矩阵只在这个pitch下成立，文件记录为 `ground_camera_pitch_cdeg`，C++ 运行时舵机读回偏离超过 ±0.5°（默认 `ground_pitch_tolerance_cdeg: 50`）就拒绝换算；没有该字段的旧 camera.yaml 会被拒绝加载，需重新生成或手工补写实测值。extrinsics 模式同时写入 `pitch_model_reference_cdeg`，验收通过后 C++ 端可按读回pitch由内参+外参实时重算单应；可用范围 `pitch_model_min_cdeg`/`pitch_model_max_cdeg` 默认只含参考角，须在其他pitch下做独立地面点复核后再放宽：用 `calibrate.py pitch-range --camera camera.yaml --check 1200:checks_1200.json --check 3500:checks_3500.json --output 新目录`，各pitch误差都 ≤20 mm 且相邻验证角间隔 ≤15° 才写出放宽后的 camera.yaml（不改原文件）。地面映射的倾斜可信范围与车体12°停车阈值分开：固定单应默认2°，外参模型用IMU补偿默认8°，可用 `ground_tilt_limit_deg` 覆盖；倾斜以 `imu_reference_roll_rad`/`imu_reference_pitch_rad`（标定时静止姿态，默认0）为零点。
 
 只有在**相同原图分辨率、焦点、镜头、安装姿态**下才可以使用地面映射。当前组件不会自动检查调用者的图像尺寸，接入者必须验证。测量范围外尤其地平线附近不能盲目外推。
 
@@ -89,9 +96,11 @@ python3 tools/camera_calibration/test_calibrate.py
 
 测试覆盖合成棋盘检测、已知内参恢复、畸变下地面映射和独立检查失败时拒绝输出。合成测试不替代真实相机标定。
 
-## 四、新增：用棋盘标定外参（extrinsics）
+## 四、用棋盘或圆点板标定外参（extrinsics）
 
-此模式自动识别棋盘全部内角点，用平面 PnP 求棋盘到相机的位姿，再根据你测量的棋盘摆放位置，换算为机器人与相机之间的完整 4×4 变换。相机必须已完成内参标定并固定在最终位置。棋盘必须**平放、水平**，不能手持倾斜来求这一步的机器人外参。
+此模式自动识别方格棋盘内角点或对称圆点阵列，用平面 PnP 求标定板到相机的位姿，再根据你测量的标定板摆放位置，换算为机器人与相机之间的完整 4×4 变换，同时计算地面单应矩阵。相机必须已完成内参标定并固定在最终位置。标定板必须**平放、水平**，不能手持倾斜来求这一步的机器人外参。
+
+使用当前 9×6 圆点板时，指定 `--pattern circles --cols 9 --rows 6`。圆点间距就是 `--square-mm`，应使用实际测量值。默认 `--pattern chessboard` 保持原有方格棋盘流程不变。
 
 ### 需要人工测量的参数
 
@@ -113,7 +122,21 @@ python3 tools/camera_calibration/calibrate.py extrinsics \
   --intrinsics calibration_runs/intrinsics_01/intrinsics.yaml \
   --image ground_board.png --cols 9 --rows 6 --square-mm 25 \
   --origin-x -0.10 --origin-y 0.55 --yaw-deg 0 --board-height-mm 4 \
+  --camera-pitch-cdeg 2000 \
   --output calibration_runs/extrinsics_candidate_01
+```
+
+圆点板示例：
+
+```bash
+python3 tools/camera_calibration/calibrate.py extrinsics \
+  --pattern circles --cols 9 --rows 6 \
+  --intrinsics calibration_runs/circles_01/intrinsics.yaml \
+  --image ground_board.png --square-mm 实测圆心间距 \
+  --origin-x -0.10 --origin-y 0.55 --yaw-deg 0 --board-height-mm 4 \
+  --confirm-order --check-points extrinsics_checks.json --max-error-mm 20 \
+  --camera-pitch-cdeg 2000 \
+  --output calibration_runs/extrinsics_circles_candidate_01
 ```
 
 输出 `corners_numbered.png`，请人工打开核对：
@@ -128,7 +151,7 @@ python3 tools/camera_calibration/calibrate.py extrinsics \
 | 文件/字段 | 含义 |
 |---|---|
 | `camera_candidate.yaml` | 内参、畸变、地面 H、坐标变换；未通过现场独立验证，不能直接部署 |
-| `extrinsics.json` | 棋盘参数、角点方向设置、重投影 RMS、平面 PnP 候选误差及验证状态 |
+| `extrinsics.json` | 标定板类型、参数、角点方向设置、重投影 RMS、平面 PnP 候选误差及验证状态 |
 | `rvec_board_to_camera` / `tvec_board_to_camera_m` | 棋盘坐标到相机坐标的旋转向量和平移 |
 | `T_camera_from_robot` | 机器人点转换到相机坐标 |
 | `T_robot_from_camera` | 相机点转换到机器人坐标，和前项互逆 |
@@ -138,7 +161,7 @@ python3 tools/camera_calibration/calibrate.py extrinsics \
 
 ### 独立验收与生成正式文件
 
-棋盘外另测至少 3 个地面点（应分布在近远左右，不能全部挤在一起），不要拿拟合棋盘角点充当独立验收点。按照原有 pick 模式选点即可；world 文件可以只包含空 fit 和至少三个 check：
+标定板外另测至少 3 个地面点（应分布在近远左右，不能全部挤在一起），不要拿标定板角点充当独立验收点。按照原有 pick 模式选点即可；world 文件可以只包含空 fit 和至少三个 check：
 
 ```json
 {
@@ -167,6 +190,7 @@ python3 tools/camera_calibration/calibrate.py extrinsics \
   --image ground_board.png --cols 9 --rows 6 --square-mm 25 \
   --origin-x -0.10 --origin-y 0.55 --yaw-deg 0 --board-height-mm 4 \
   --confirm-order --check-points extrinsics_checks.json --max-error-mm 20 \
+  --camera-pitch-cdeg 2000 \
   --output calibration_runs/extrinsics_validated_01
 ```
 
@@ -174,4 +198,4 @@ python3 tools/camera_calibration/calibrate.py extrinsics \
 
 验收后，可备份原配置再将生成的 `camera.yaml` 放入项目 `config/camera.yaml`。无需手抄矩阵；现有 C++ 标定组件读取其中 K/D/H 并先去畸变。完整三维变换保存在文件中，供后续传感器/机器人坐标适配使用。主程序的实车标定接入和运动输出仍需后续工作。
 
-本模式不支持倾斜棋盘的完整已知六自由度摆放描述；需要它时应扩展 board→robot 参数，而不能假装棋盘水平。平面 PnP 存在姿态歧义，报告列出候选误差，实际仍应结合测量的相机高度/朝向和独立检查点核验。
+本模式不支持倾斜标定板的完整已知六自由度摆放描述；需要它时应扩展 board→robot 参数，而不能假装标定板水平。平面 PnP 存在姿态歧义，报告列出候选误差，实际仍应结合测量的相机高度/朝向和独立检查点核验。

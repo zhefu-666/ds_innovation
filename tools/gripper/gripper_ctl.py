@@ -9,7 +9,7 @@
 import argparse, os, struct, sys, termios, time, tty
 
 INVALID_PITCH = -32768
-PITCH_LIMIT = 2500  # 舵机限位±25°
+PITCH_LIMIT = 2500  # 暂时±25°：固件只有-25/0/+25三档；固件支持任意角后改回3500
 
 
 def crc16(data):

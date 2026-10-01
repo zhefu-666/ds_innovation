@@ -1,4 +1,7 @@
 #include "rescue/uart_controller.hpp"
+#include "rescue/motion_link.hpp"
+#include <cstring>
+#include <vector>
 #include "rescue/utils.hpp"
 #include <cassert>
 #include <fcntl.h>
@@ -209,4 +212,91 @@ int main() {
     assert(!uart.latestActuatorFeedback().valid);
     assert(!uart.sendMotion(command));
     close(master);
+
+    {
+        // MotionLink on a fresh PTY: id sync with a restarted host, resend, stall -> zero, stop.
+        int mcu=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
+        assert(mcu>=0 && grantpt(mcu)==0 && unlockpt(mcu)==0);
+        const std::string path=ptsname(mcu);
+        UARTController link_uart;
+        link_uart.initUART(path,115200,false,false);
+        {
+            // 独占：第二个进程/对象不能同时打开同一串口。
+            UARTController second; bool owned=false;
+            try { second.initUART(path,115200,false,false); } catch(const std::runtime_error&) { owned=true; }
+            assert(owned);
+        }
+        auto report=[&](uint8_t done,uint8_t id,int16_t pitch) {
+            Frame f{}; packFeedback(f.data(),done,id,pitch);
+            assert(write(mcu,f.data(),f.size())==8);
+        };
+        // Collect host->MCU packets for a while; returns complete 15-byte frames.
+        auto collect=[&](int ms) {
+            std::vector<uint8_t> bytes; uint8_t buf[256];
+            const auto until=Clock::now()+Ms(ms);
+            while(Clock::now()<until) {
+                const auto n=read(mcu,buf,sizeof(buf));
+                if(n>0) bytes.insert(bytes.end(),buf,buf+n); else std::this_thread::sleep_for(Ms(2));
+            }
+            assert(bytes.size()%15==0);
+            std::vector<Out> frames(bytes.size()/15);
+            for(size_t i=0;i<frames.size();++i) std::memcpy(frames[i].data(),bytes.data()+15*i,15);
+            return frames;
+        };
+        auto vx=[](const Out& o){float v; std::memcpy(&v,o.data()+1,4); return v;};
+        auto pitch=[](const Out& o){return int16_t(o[11]|(o[12]<<8));};
+        // 下位机已停在上次运行的编号7且“已完成”：重启后的第一包必须用8，否则会被当成重复包。
+        report(1,7,1200);
+        assert(link_uart.syncGripperActionId(Ms(500)));
+        assert(link_uart.gripperActionId()==0 && link_uart.gripperAck().result==R::Idle && link_uart.gripperAck().target==-1);
+        MotionLink link(link_uart,{40,150});
+        assert(collect(120).empty());                         // nothing is sent before the first command
+        assert(!link.healthy());
+        MotionCommand drive; drive.vx_mps=0.1f; drive.wz_rps=0.2f; drive.gripper_open=1; drive.camera_pitch_cdeg=1200;
+        link.submit(drive);
+        auto frames=collect(100);
+        assert(frames.size()>=2);                             // immediate write plus periodic resend
+        for(const auto& f:frames) {
+            assert(f[0]==0x56 && std::abs(vx(f)-0.1f)<1e-6f && f[9]==1 && f[10]==8 && pitch(f)==1200);
+            const uint16_t c=UARTController::calculateCRC16(f.data(),0,12);
+            assert(f[13]==(c&0xFF) && f[14]==(c>>8));
+        }
+        link.submit(drive);                                   // next task frame, same command
+        report(1,7,1200);                                     // old id: not an acknowledgement
+        std::this_thread::sleep_for(Ms(20));
+        assert(link.healthy() && link_uart.gripperAck().result==R::NotDone && link_uart.gripperAck().target==1);
+        report(1,8,1200);
+        std::this_thread::sleep_for(Ms(20));
+        assert(link_uart.gripperAck().result==R::Done && link_uart.gripperAck().target==1);
+        // Stalled task loop: after 150 ms the resend becomes zero velocity, gripper/pitch kept.
+        frames=collect(250);
+        assert(!frames.empty() && vx(frames.back())==0.0f && frames.back()[9]==1 && frames.back()[10]==8 &&
+               pitch(frames.back())==1200);
+        assert(link.stats().stale>0 && link.stats().failed==0);
+        assert(!link.healthy());                              // no fresh command within the timeout
+        // A new command resumes motion immediately; closing the gripper takes id 9.
+        drive.gripper_open=0; link.submit(drive);
+        frames=collect(60);
+        assert(!frames.empty() && std::abs(vx(frames.front())-0.1f)<1e-6f && frames.front()[9]==0 && frames.front()[10]==9);
+        link.stop();
+        frames=collect(120);                                  // a resend may precede the final stop packet
+        assert(!frames.empty() && frames.size()<=2 && vx(frames.back())==0.0f && frames.back()[9]==0 && frames.back()[10]==9);
+        assert(!link.healthy());
+        link.submit(drive);                                   // ignored after stop
+        assert(collect(80).empty());
+        link_uart.closePort();
+        close(mcu);
+    }
+    {
+        // No A6 feedback: sync fails and leaves the id untouched.
+        int mcu=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
+        assert(mcu>=0 && grantpt(mcu)==0 && unlockpt(mcu)==0);
+        UARTController silent;
+        silent.initUART(ptsname(mcu),115200,false,false);
+        const auto t0=Clock::now();
+        assert(!silent.syncGripperActionId(Ms(100)));
+        assert(Clock::now()-t0>=Ms(100) && silent.gripperActionId()==0);
+        silent.closePort();
+        close(mcu);
+    }
 }

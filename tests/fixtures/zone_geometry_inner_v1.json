@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "source": "LEGACY v1 test fixture: landmarks = inner floor corners (z=0). Production uses config/zone_geometry.json v2.",
+  "coordinate_convention": "origin=front inner floor boundary at divider centre; x=right facing entry, y=into zone, z=up; metres",
+  "keypoint_ids": ["front_left", "front_divider", "front_right", "rear_left", "rear_divider", "rear_right"],
+  "divider_note": "The 20 mm section-view annotation is NOT a divider-width dimension. Exclusion half-width below is a conservative configurable policy, not a dimension measurement.",
+  "zones": [
+    {"label":"red_safe_zone", "geometry_id":"rescue2027-inner-v1-red", "inner_width_m":0.6, "inner_depth_m":0.3, "divider_exclusion_half_width_m":0.02, "supply_side":"left", "confirmed":1},
+    {"label":"blue_safe_zone", "geometry_id":"rescue2027-inner-v1-blue", "inner_width_m":0.6, "inner_depth_m":0.3, "divider_exclusion_half_width_m":0.02, "supply_side":"left", "confirmed":1}
+  ]
+}

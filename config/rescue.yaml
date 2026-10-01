@@ -1,6 +1,8 @@
 # Development configuration. Hardware-specific ports and calibration files
 # must be supplied per robot; never assume a serial protocol or camera mount.
-model_path: ./benchmark_results/best_fp16.rknn
+# Reference values only: main does not load this file yet; pass the CLI flags.
+# Detector: blocks_v1 yolov8n 640, output [1,8,8400], classes in model order.
+model_path: ./models/detect_fp.rknn
 camera_index: 0
 frame_width: 1280
 frame_height: 720
@@ -12,9 +14,17 @@ command_valid_ms: 100
 tof_stop_distance_m: 0.18
 imu_tilt_limit_deg: 12.0
 pnp_max_reprojection_error_px: 4.0
-input_size: 448
+input_size: 640
 rknn_library: ./benchmark_results/librknnrt.so
-classes: core,wounded,red,dangerous,normal,main,blue
+classes: blue,orange,green,black
+# blue=dangerous_object (never carried), orange=injured_person, green=ordinary_supply, black=core_supply
+# Safe-zone pose: zone_pose_v2 yolov8n-pose 640, [1,18,8400], zone_left/zone_right x 4 corners.
+pose_model_path: ./models/zone_pose_fp.rknn
+pose_confidence: 0.25
+pose_keypoint_confidence: 0.5
+detect_core_mask: 1   # NPU core 0
+pose_core_mask: 2     # NPU core 1
+parallel_inference: false
 
 # Load with CameraCalibration::load() after generating a real calibration file.
 calibration_file: ./config/camera.yaml

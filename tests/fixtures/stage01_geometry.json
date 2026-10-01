@@ -1,0 +1,292 @@
+{
+  "note": "synthetic pixel and sensor replay, not field data",
+  "frames": [
+    {
+      "frame_id": 1,
+      "capture_us": 1000000,
+      "now_us": 1010000,
+      "zone_label": "red_safe_zone",
+      "geometry_id": "rescue2027-inner-v1-red",
+      "image_width": 1280,
+      "image_height": 720,
+      "points": [
+        {
+          "id": 0,
+          "pixel": [
+            394.51580646891205,
+            400.0635973621933
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 1,
+          "pixel": [
+            686.8186636346239,
+            367.76409964899636
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 2,
+          "pixel": [
+            927.1808589716525,
+            341.2040507534564
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 3,
+          "pixel": [
+            389.89067785593886,
+            314.31655294242813
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 4,
+          "pixel": [
+            612.4788783569566,
+            296.1157125794123
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 5,
+          "pixel": [
+            804.3398059909393,
+            280.4274141525139
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        }
+      ],
+      "imu": {
+        "received_us": 990000,
+        "valid": 1,
+        "body_rpy_rad": [
+          0,
+          0,
+          0
+        ]
+      },
+      "pitch_samples": [
+        {
+          "received_us": 800000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 825000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 850000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 875000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 900000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 925000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 950000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 975000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 1000000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        }
+      ],
+      "expected_stop": {
+        "target_id": 1,
+        "body_m": [
+          -0.1376285043680418,
+          0.94897244236964
+        ],
+        "radius_m": 0.02
+      },
+      "expect_valid": 1,
+      "expect_subzone": "supply"
+    },
+    {
+      "frame_id": 2,
+      "capture_us": 1050000,
+      "now_us": 1060000,
+      "zone_label": "red_safe_zone",
+      "geometry_id": "rescue2027-inner-v1-red",
+      "image_width": 1280,
+      "image_height": 720,
+      "points": [
+        {
+          "id": 0,
+          "pixel": [
+            394.51580646891205,
+            400.0635973621933
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 2,
+          "pixel": [
+            927.1808589716525,
+            341.2040507534564
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        }
+      ],
+      "imu": {
+        "received_us": 1040000,
+        "valid": 1,
+        "body_rpy_rad": [
+          0,
+          0,
+          0
+        ]
+      },
+      "pitch_samples": [
+        {
+          "received_us": 1025000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 1050000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        }
+      ],
+      "expected_stop": {
+        "target_id": 1,
+        "body_m": [
+          -0.1376285043680418,
+          0.94897244236964
+        ],
+        "radius_m": 0.02
+      },
+      "expect_valid": 1,
+      "expect_subzone": "supply"
+    },
+    {
+      "frame_id": 3,
+      "capture_us": 1100000,
+      "now_us": 1110000,
+      "zone_label": "red_safe_zone",
+      "geometry_id": "rescue2027-inner-v1-red",
+      "image_width": 1280,
+      "image_height": 720,
+      "points": [
+        {
+          "id": 0,
+          "pixel": [
+            394.51580646891205,
+            400.0635973621933
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 1,
+          "pixel": [
+            686.8186636346239,
+            367.76409964899636
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 2,
+          "pixel": [
+            927.1808589716525,
+            341.2040507534564
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 3,
+          "pixel": [
+            389.89067785593886,
+            314.31655294242813
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 4,
+          "pixel": [
+            612.4788783569566,
+            296.1157125794123
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        },
+        {
+          "id": 5,
+          "pixel": [
+            804.3398059909393,
+            280.4274141525139
+          ],
+          "confidence": 0.95,
+          "visible": 1
+        }
+      ],
+      "imu": {
+        "received_us": 1000000,
+        "valid": 1,
+        "body_rpy_rad": [
+          0,
+          0,
+          0
+        ]
+      },
+      "pitch_samples": [
+        {
+          "received_us": 1075000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        },
+        {
+          "received_us": 1100000,
+          "pitch_cdeg": 2000,
+          "valid": 1
+        }
+      ],
+      "expected_stop": {
+        "target_id": 1,
+        "body_m": [
+          -0.1376285043680418,
+          0.94897244236964
+        ],
+        "radius_m": 0.02
+      },
+      "expect_valid": 0,
+      "expect_subzone": "unavailable"
+    }
+  ]
+}

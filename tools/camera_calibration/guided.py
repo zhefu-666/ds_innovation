@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Browser-guided 10 x 7 symmetric-circle camera intrinsics calibration."""
+"""Browser-guided 9 x 6 symmetric-circle camera intrinsics calibration."""
 import argparse
 import errno
 from datetime import datetime
@@ -19,7 +19,9 @@ import calibrate
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-PATTERN = (10, 7)
+# Circle board: 9 columns x 6 rows of circle centers (54 points).
+PATTERN = (9, 6)
+CIRCLES = PATTERN[0] * PATTERN[1]
 STEPS = [
     '中央，正对相机，中等距离',
     '左上区域，完整保留所有圆点', '上方中央，完整保留所有圆点',
@@ -46,16 +48,16 @@ STEPS = [
 
 
 def spacing_from_spans(horizontal, vertical):
-    """Measured first-to-last CENTER spans: 9 horizontal / 6 vertical intervals."""
-    x, y = float(horizontal) / 9, float(vertical) / 6
+    """Measured first-to-last CENTER spans: 8 horizontal / 5 vertical intervals."""
+    x, y = float(horizontal) / (PATTERN[0]-1), float(vertical) / (PATTERN[1]-1)
     if not all(math.isfinite(v) and 0.5 <= v <= 100 for v in (x, y)):
-        raise ValueError('尺寸无效：请填写毫米数，横向量第 1 到第 10 个圆心，纵向量第 1 到第 7 个圆心。')
+        raise ValueError('尺寸无效：请填写毫米数，横向量第 1 到第 9 个圆心，纵向量第 1 到第 6 个圆心。')
     if abs(x-y) / ((x+y)/2) > .01:
         raise ValueError('横纵圆心间距相差超过 1%，请检查量尺位置或平板是否拉伸了 PDF。')
     return (x+y)/2
 
 
-def detect_circles(frame):
+def detect_circles(frame, pattern=PATTERN):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
     params = cv2.SimpleBlobDetector_Params()
     params.filterByColor = True; params.blobColor = 0
@@ -66,17 +68,25 @@ def detect_circles(frame):
     detector = cv2.SimpleBlobDetector_create(params)
     # Detect subpixel blob centers at ORIGINAL resolution. Limit graph matching to
     # plausible candidates so a cluttered scene cannot monopolize detection.
+    expected = pattern[0] * pattern[1]
     blobs = detector.detect(gray)
-    if not 70 <= len(blobs) <= 180:
+    if not expected <= len(blobs) <= expected * 18 // 7:
         return None
-    found, centers = cv2.findCirclesGrid(gray, PATTERN,
+    found, centers = cv2.findCirclesGrid(gray, pattern,
         flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=detector)
-    return centers if found and len(centers) == 70 else None
+    if not found or len(centers) != expected:
+        return None
+    # Reject a subgrid of a larger (e.g. retired 10 x 7) board.
+    return None if calibrate.has_extra_grid_blobs(blobs, centers, pattern) else centers
+
+
+def session_pattern(measurement):
+    return (int(measurement.get('cols', PATTERN[0])), int(measurement.get('rows', PATTERN[1])))
 
 
 def quality(frame, centers):
     if centers is None:
-        return '还未识别全部 70 个圆点：请调整距离、反光和倾角。'
+        return f'还未识别全部 {CIRCLES} 个圆点：请调整距离、反光和倾角。'
     h, w = frame.shape[:2]
     p = centers.reshape(-1, 2)
     if p[:, 0].min() < 12 or p[:, 1].min() < 12 or p[:, 0].max() > w-12 or p[:, 1].max() > h-12:
@@ -107,9 +117,11 @@ def calculate(session, observations, size, measurement):
     if len(observations) != len(STEPS):
         raise ValueError('需要按提示完成 25 张照片；原图已保留。')
     spacing = measurement['spacing_mm'] / 1000
+    # Sessions record their own board, so older 10 x 7 runs still recalculate correctly.
+    pattern = session_pattern(measurement)
     # Last three poses are held out: they are never used to fit intrinsics.
-    rms, k, d, errors = calibrate.solve_intrinsics(observations[:22], size, PATTERN, spacing)
-    obj = calibrate.object_grid(PATTERN, spacing)
+    rms, k, d, errors = calibrate.solve_intrinsics(observations[:22], size, pattern, spacing)
+    obj = calibrate.object_grid(pattern, spacing)
     checks = []
     for centers in observations[22:]:
         ok, r, t = cv2.solvePnP(obj, centers, k, d)
@@ -141,7 +153,7 @@ def calculate(session, observations, size, measurement):
         '无需手抄 fx、fy、cx、cy 或畸变系数，intrinsics.yaml 已按 OpenCV 格式保存。\n'
         'tools/camera_calibration/calibrate.py 的 ground/extrinsics 模式：\n'
         f'  --intrinsics {session}/intrinsics.yaml\n'
-        '注意：原 extrinsics 模式仅检测方格棋盘；圆点板请用 ground 模式的实测地面点流程。\n'
+        f'extrinsics 模式支持方格棋盘和对称圆点板；本次圆点板需增加 --pattern circles --cols {pattern[0]} --rows {pattern[1]}。\n'
         '完成并验收地面标定后，才将生成的完整 camera.yaml 放在 config/camera.yaml。\n'
         'config/rescue.yaml 对应字段为 calibration_file: ./config/camera.yaml。\n'
         '当前主程序尚未读取该 YAML，填写路径不会自动启用距离计算。\n'
@@ -192,7 +204,7 @@ class Wizard:
             (session/'samples').mkdir(parents=True, exist_ok=False)
             (session/'detected').mkdir()
             measurement = dict(horizontal_mm=float(values['horizontal_mm']), vertical_mm=float(values['vertical_mm']),
-                spacing_mm=spacing, cols=10, rows=7, image_size=list(self.size), camera=self.args.camera)
+                spacing_mm=spacing, cols=PATTERN[0], rows=PATTERN[1], image_size=list(self.size), camera=self.args.camera)
             save_json(session/'session.json', dict(measurement=measurement, steps=STEPS, captured=0))
             self.session, self.measurement = session, measurement
 
@@ -431,7 +443,7 @@ def handler_for(wizard):
         def do_GET(self):
             path = self.path.split('?')[0]
             if path == '/': self.send((HERE/'guided.html').read_bytes(), 'text/html; charset=utf-8')
-            elif path == '/board.pdf': self.send((HERE/'assets/circles_10x7.pdf').read_bytes(), 'application/pdf')
+            elif path == '/board.pdf': self.send((HERE/'assets/circles_9x6.pdf').read_bytes(), 'application/pdf')
             elif path == '/api/state': self.send(json.dumps(wizard.state(), ensure_ascii=False).encode(), 'application/json')
             elif path == '/stream.mjpg':
                 self.send_response(200)
@@ -535,7 +547,7 @@ def main():
         for i in range(1, 26):
             frame = cv2.imread(str(session/'samples'/f'{i:03d}.png'))
             if frame is None or (frame.shape[1], frame.shape[0]) != size: parser.error(f'Invalid image {i}')
-            centers = detect_circles(frame)
+            centers = detect_circles(frame, session_pattern(measurement))
             if centers is None: parser.error(f'Circle detection failed on image {i}')
             observations.append(centers)
         print(json.dumps(calculate(session, observations, size, measurement), ensure_ascii=False, indent=2))

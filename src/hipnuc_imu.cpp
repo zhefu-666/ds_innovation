@@ -154,6 +154,20 @@ ImuSnapshot HipnucImu::snapshot() const {
     result.fresh = result.connected && result.age_ms >= 0 && result.age_ms <= result.timeout_ms;
     return result;
 }
+ImuSnapshot HipnucImu::snapshotAt(uint64_t capture_us, uint32_t max_skew_ms) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto result = state_;
+    result.sample = {}; result.sampled_at_us = capture_us;
+    result.fresh = false; result.age_ms = -1;
+    for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+        if (it->received_us > capture_us) continue;
+        result.sample = *it;
+        result.age_ms = (capture_us - it->received_us) / 1000.0;
+        result.fresh = result.connected && result.age_ms <= std::min(max_skew_ms, result.timeout_ms);
+        break;
+    }
+    return result;
+}
 void HipnucImu::readLoop() {
     Hi91Parser parser;
     uint8_t bytes[4096];
@@ -181,6 +195,8 @@ void HipnucImu::readLoop() {
             }
             // Bad numeric data replaces the last sample, so healthy cached values never mask a fault.
             state_.sample = sample;
+            history_.push_back(sample);
+            while (history_.size() > 512) history_.pop_front();
         }
         state_.valid_frames = parser.valid_frames;
         state_.crc_errors = parser.crc_errors;

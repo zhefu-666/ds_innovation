@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "source": "intelligence20260617.pdf p.35/p.37; inner 600x300 mm, outer 660x360 mm, fence 30 mm wide x 20 mm high, field-facing fence is a right-triangle ramp (20 mm at inner edge, 0 at outer edge)",
+  "coordinate_convention": "origin=front inner floor boundary at divider centre; x=right facing entry, y=into zone, z=up; metres",
+  "keypoint_ids": ["front_left", "front_divider", "front_right", "rear_left", "rear_divider", "rear_right"],
+  "landmark_note": "v2 matches zone_pose labels (checked 2026-10-01): front points on the ramp ridge (y=0, z=0.02), rear points on the rear fence outer top edge (y=0.33, z=0.02), outer points at the side fence outer edge (x=+-0.33). inner_* stay the delivery bounds.",
+  "divider_note": "Divider width is not dimensioned in the PDF. Exclusion half-width below is a conservative configurable policy, not a measurement.",
+  "zones": [
+    {"label":"red_safe_zone", "geometry_id":"rescue2027-fence-top-v2-red", "inner_width_m":0.6, "inner_depth_m":0.3,
+     "landmark_width_m":0.66, "landmark_depth_m":0.33, "landmark_height_m":0.02,
+     "divider_exclusion_half_width_m":0.02, "supply_side":"left", "confirmed":1},
+    {"label":"blue_safe_zone", "geometry_id":"rescue2027-fence-top-v2-blue", "inner_width_m":0.6, "inner_depth_m":0.3,
+     "landmark_width_m":0.66, "landmark_depth_m":0.33, "landmark_height_m":0.02,
+     "divider_exclusion_half_width_m":0.02, "supply_side":"left", "confirmed":1}
+  ]
+}

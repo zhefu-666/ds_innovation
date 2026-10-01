@@ -16,10 +16,10 @@ import numpy as np
 import guided as g
 
 
-def board():
+def board(cols=9, rows=6):
     image = np.full((600, 800, 3), 255, np.uint8)
-    for y in range(7):
-        for x in range(10): cv2.circle(image, (100+x*60, 120+y*60), 12, (0, 0, 0), -1)
+    for y in range(rows):
+        for x in range(cols): cv2.circle(image, (100+x*60, 120+y*60), 12, (0, 0, 0), -1)
     return image
 
 
@@ -74,21 +74,25 @@ class GuidedTests(unittest.TestCase):
                 self.assertIsNone(wizard.session)
                 self.assertFalse(wizard.state()['ready'])
                 with self.assertRaises(ValueError):wizard.capture(0)
-                wizard.start(dict(horizontal_mm=108,vertical_mm=72,confirmed=True))
+                wizard.start(dict(horizontal_mm=96,vertical_mm=60,confirmed=True))
                 factory.assert_called_once()
                 self.assertTrue(wizard.session.is_dir())
                 self.assertEqual(wizard.measurement['spacing_mm'],12)
 
     def test_measurement_and_scale_validation(self):
-        self.assertEqual(g.spacing_from_spans(108, 72), 12)
-        self.assertEqual(g.spacing_from_spans(162, 108), 18)
-        for x, y in [(120, 72), (0, 0), (float('nan'), 72), (108, float('inf'))]:
+        self.assertEqual(g.PATTERN, (9, 6))
+        self.assertEqual(g.spacing_from_spans(96, 60), 12)
+        self.assertEqual(g.spacing_from_spans(144, 90), 18)
+        for x, y in [(108, 60), (0, 0), (float('nan'), 60), (96, float('inf'))]:
             with self.assertRaises(ValueError): g.spacing_from_spans(x, y)
 
     def test_real_circle_detection_and_blur(self):
         frame = board(); centers = g.detect_circles(frame)
         self.assertIsNotNone(centers)
-        self.assertEqual(len(centers), 70)
+        self.assertEqual(len(centers), 54)
+        # The retired 10 x 7 board must not be mistaken for the new 9 x 6 board.
+        self.assertIsNone(g.detect_circles(board(10, 7)))
+        self.assertEqual(len(g.detect_circles(board(10, 7), (10, 7))), 70)
         self.assertEqual(g.quality(frame, centers), '')
         self.assertTrue(g.duplicate(centers[::-1], [centers]))
         self.assertFalse(g.duplicate(centers+20, [centers]))
@@ -118,6 +122,17 @@ class GuidedTests(unittest.TestCase):
             bad = g.calculate(root, observations, (1280,720), {'spacing_mm':12})
             self.assertEqual(bad['status'], 'needs_recapture')
             np.testing.assert_allclose(bad['camera_matrix'], report['camera_matrix'])
+
+    def test_legacy_10x7_session_recalculates_with_its_own_pattern(self):
+        k = np.array([[900., 0, 640], [0, 910., 360], [0, 0, 1]])
+        obj = g.calibrate.object_grid((10, 7), .012)
+        rng = np.random.default_rng(5)
+        observations = [cv2.projectPoints(obj, rng.uniform(-.6,.6,3),
+            np.array([rng.uniform(-.14,.07),rng.uniform(-.10,.04),rng.uniform(.25,.4)]), k, np.zeros(5))[0]
+            for _ in range(25)]
+        with tempfile.TemporaryDirectory() as tmp:
+            report = g.calculate(Path(tmp), observations, (1280,720), {'spacing_mm':12,'cols':10,'rows':7})
+            np.testing.assert_allclose(report['camera_matrix'], k, atol=.1)
 
     def test_capture_freshness_original_undo_and_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,7 +179,7 @@ class GuidedTests(unittest.TestCase):
                 cap = factory.return_value;cap.isOpened.return_value=True
                 cap.read.return_value=(True,board());cap.get.return_value=60
                 with self.assertRaises(ValueError):
-                    wizard.start(dict(horizontal_mm=108,vertical_mm=72,confirmed=True))
+                    wizard.start(dict(horizontal_mm=96,vertical_mm=60,confirmed=True))
                 cap.release.assert_called_once()
                 self.assertIsNone(wizard.session)
             root=Path(tmp);(root/'samples').mkdir();(root/'detected').mkdir()

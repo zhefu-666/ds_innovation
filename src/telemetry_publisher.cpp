@@ -114,7 +114,12 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
     for (const auto& d : s.detections) {
         f << "{" << "track_id" << d.track_id << "class_id" << d.class_id
           << "label" << d.label << "model_label" << d.model_label
-          << "confidence" << finite(d.confidence) << "box" << "{"
+          << "confidence" << finite(d.confidence)
+          << "ground_position_valid" << static_cast<int>(d.ground_position_valid)
+          << "ground_contact_valid" << static_cast<int>(d.ground_contact_valid)
+          << "ground_contact_reason" << d.ground_contact_reason
+          << "body_x_m" << finite(d.body_xy_m.x) << "body_y_m" << finite(d.body_xy_m.y)
+          << "image_frame_id" << static_cast<double>(d.frame_id) << "box" << "{"
           << "x" << d.box.x << "y" << d.box.y << "width" << d.box.width
           << "height" << d.box.height << "}" << "}";
     }
@@ -122,13 +127,29 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
     f << "]" << "state" << "{" << "name" << PushTask::name(s.output.state)
       << "batch_size" << s.output.batch_size << "delivered_total" << s.output.delivered_total
       << "first_ordinary_delivered" << static_cast<int>(s.output.first_ordinary_delivered)
+      << "reason" << s.output.reason << "rule_verdict" << verdictName(s.output.verdict)
+      << "gripper_open_cmd" << static_cast<int>(s.output.motion.gripper_open)
+      << "camera_pitch_cmd_cdeg" << static_cast<int>(s.output.motion.camera_pitch_cdeg)
+      << "camera_pitch_cdeg" << static_cast<int>(in.camera_pitch_cdeg)
+      << "camera_pitch_stable" << static_cast<int>(in.camera_pitch_stable)
+      << "hold_observable" << static_cast<int>(in.hold_observable)
+      << "captured" << static_cast<int>(in.captured) << "held_complete" << static_cast<int>(in.held_complete)
+      << "held_total" << in.held.total() << "corridor_complete" << static_cast<int>(in.corridor_complete)
+      << "corridor_total" << in.corridor.total()
       << "run_requested" << static_cast<int>(in.run)
       << "target_valid" << static_cast<int>(in.target_valid)
       << "target_id" << in.target_id << "target_label" << in.label
       << "geometry_valid" << static_cast<int>(in.geometry_valid)
       << "path_safe" << static_cast<int>(in.path_safe)
       << "safety_ok" << static_cast<int>(in.safety_ok)
-      << "zone_valid" << static_cast<int>(in.zone_valid) << "}"
+      << "zone_valid" << static_cast<int>(in.zone_valid)
+      << "zone_quality_valid" << static_cast<int>(in.zone_estimate.trusted(in.now_us))
+      << "zone_reason" << in.zone_estimate.reason
+      << "zone_inliers" << static_cast<int>(in.zone_estimate.inlier_ids.size())
+      << "zone_residual_m" << finite(in.zone_estimate.residual_m)
+      << "zone_position_sigma_m" << finite(in.zone_estimate.position_sigma_m)
+      << "zone_yaw_sigma_rad" << finite(in.zone_estimate.yaw_sigma_rad)
+      << "zone_predicted_distance_m" << finite(in.zone_estimate.predicted_distance_m) << "}"
       << "motion" << "{" << "vx_mps" << finite(s.output.motion.vx_mps)
       << "wz_rps" << finite(s.output.motion.wz_rps) << "hardware_output_enabled" << 0 << "}"
       << "health" << "{" << "loop_fps" << finite(s.loop_fps)

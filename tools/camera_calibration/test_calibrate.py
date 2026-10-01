@@ -38,8 +38,10 @@ class CalibrationTests(unittest.TestCase):
             for key,ids in [('fit',indices),('check',checks)]:
                 data[key]=[dict(pixel=pixels[i,0].tolist(),world_m=world[i].tolist()) for i in ids]
             (root/'p.json').write_text(json.dumps(data))
-            args=SimpleNamespace(intrinsics=root/'i.yaml',points=root/'p.json',output=root/'good',max_error_mm=20)
+            args=SimpleNamespace(intrinsics=root/'i.yaml',points=root/'p.json',output=root/'good',max_error_mm=20,camera_pitch_cdeg=1500)
             c.ground(args);self.assertTrue((root/'good/camera.yaml').exists())
+            fs=cv2.FileStorage(str(root/'good/camera.yaml'),cv2.FILE_STORAGE_READ)
+            self.assertEqual(int(fs.getNode('ground_camera_pitch_cdeg').real()),1500);fs.release()
             data['check'][0]['world_m'][0]+=.2;(root/'p.json').write_text(json.dumps(data));args.output=root/'bad'
             with self.assertRaises(ValueError):c.ground(args)
             self.assertFalse((root/'bad/camera.yaml').exists())
@@ -67,19 +69,86 @@ class CalibrationTests(unittest.TestCase):
             (root/'check.json').write_text(json.dumps(data))
             args=SimpleNamespace(intrinsics=root/'i.yaml',image=str(root/'board.png'),cols=9,rows=6,square_mm=25.,
                 origin_x=origin[0],origin_y=origin[1],yaw_deg=np.degrees(angle),board_height_mm=4.,
-                max_rms=.5,max_error_mm=20,flip_cols=False,flip_rows=False,confirm_order=False,check_points=None,output=root/'candidate')
+                max_rms=.5,max_error_mm=20,camera_pitch_cdeg=2000,flip_cols=False,flip_rows=False,confirm_order=False,check_points=None,output=root/'candidate')
             with patch.object(c,'detect',return_value=corners):
                 c.extrinsics(args)
                 self.assertTrue((root/'candidate/camera_candidate.yaml').exists())
                 self.assertFalse((root/'candidate/camera.yaml').exists())
                 args.output=root/'validated';args.confirm_order=True;args.check_points=root/'check.json'
                 c.extrinsics(args);self.assertTrue((root/'validated/camera.yaml').exists())
+                fs=cv2.FileStorage(str(root/'validated/camera.yaml'),cv2.FILE_STORAGE_READ)
+                self.assertEqual(int(fs.getNode('pitch_model_reference_cdeg').real()),2000)
+                self.assertEqual(int(fs.getNode('extrinsics_validated').real()),1);fs.release()
                 args.origin_x+=.1;args.output=root/'wrong_origin'
                 with self.assertRaises(ValueError):c.extrinsics(args)
                 self.assertFalse((root/'wrong_origin/camera.yaml').exists())
                 args.origin_x=origin[0];args.flip_cols=True;args.output=root/'wrong_order'
                 with self.assertRaises(ValueError):c.extrinsics(args)
                 self.assertFalse((root/'wrong_order/camera.yaml').exists())
+
+    def test_circle_board_extrinsics_writes_validated_camera(self):
+        k=np.array([[500.,0,320],[0,500,240],[0,0,1]])
+        d=np.array([.1,-.03,0,0,0.])
+        r=cv2.Rodrigues(np.array([2.4,0.,0.]))[0]
+        center=np.array([.02,-.1,.8]);t=-r@center
+        angle=.25;origin=(-.1,.55);height=.004
+        rb=np.array([[np.cos(angle),-np.sin(angle),0],[np.sin(angle),np.cos(angle),0],[0,0,1]])
+        obj=c.object_grid((9,6),.018)
+        rv=cv2.Rodrigues(r@rb)[0];tv=r@np.array([*origin,height])+t
+        centers,_=cv2.projectPoints(obj,rv,tv,k,d)
+        ground=np.array([[-.2,.4,0],[.2,.6,0],[0,1.,0]],np.float32)
+        pixels,_=cv2.projectPoints(ground,cv2.Rodrigues(r)[0],t,k,d)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);c.write_yaml(root/'i.yaml',k,d,(640,480))
+            cv2.imwrite(str(root/'board.png'),np.zeros((480,640,3),np.uint8))
+            data={'image_size':[640,480], 'check':[
+                dict(pixel=p.tolist(),world_m=w[:2].tolist())
+                for p,w in zip(pixels[:,0],ground)]}
+            (root/'check.json').write_text(json.dumps(data))
+            args=SimpleNamespace(intrinsics=root/'i.yaml',image=str(root/'board.png'),
+                pattern='circles',cols=9,rows=6,square_mm=18.,
+                origin_x=origin[0],origin_y=origin[1],yaw_deg=np.degrees(angle),
+                board_height_mm=4.,max_rms=.5,max_error_mm=20,camera_pitch_cdeg=2000,flip_cols=False,
+                flip_rows=False,confirm_order=True,check_points=root/'check.json',
+                output=root/'validated')
+            with patch.object(c,'detect_circle_grid',return_value=centers):
+                c.extrinsics(args)
+            self.assertTrue((root/'validated/camera.yaml').exists())
+            report=json.loads((root/'validated/extrinsics.json').read_text())
+            self.assertEqual(report['board_type'],'symmetric_circles')
+            self.assertTrue(report['validated'])
+
+    def test_pitch_range_validates_servo_model(self):
+        k=np.array([[800.,0,640],[0,800,360],[0,0,1]]);d=np.zeros(5)
+        def camera(deg):
+            a=np.radians(deg);return np.array([[1,0,0],[0,-np.sin(a),-np.cos(a)],[0,np.cos(a),-np.sin(a)]])
+        centre=np.array([0,.05,.30]);r=camera(22);T=np.eye(4);T[:3,:3]=r;T[:3,3]=-r@centre
+        ground=np.array([[-.25,.5,0],[.25,.7,0],[0,1.1,0],[.1,.6,0]])
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);c.write_yaml(root/'camera.yaml',k,d,(1280,720),np.eye(3),2200)
+            fs=cv2.FileStorage(str(root/'camera.yaml'),cv2.FILE_STORAGE_APPEND)
+            fs.write('T_camera_from_robot',T);fs.write('extrinsics_validated',1)
+            for key in ('reference','min','max'):fs.write(f'pitch_model_{key}_cdeg',2200)
+            fs.release()
+            def checks(deg,name,shift=0.):
+                # Truth: the camera itself pitched to deg (independent of the servo model).
+                rr=camera(deg);px,_=cv2.projectPoints(ground,cv2.Rodrigues(rr)[0],-rr@centre,k,d)
+                data={'image_size':[1280,720],'check':[dict(pixel=p.tolist(),world_m=[w[0]+shift,w[1]]) for p,w in zip(px[:,0],ground)]}
+                (root/name).write_text(json.dumps(data));return f'{int(deg*100)}:{root/name}'
+            args=lambda out,*items,gap=1500:SimpleNamespace(camera=root/'camera.yaml',check=list(items),
+                pivot_camera_m=[0.,0.,0.],max_error_mm=20,max_gap_cdeg=gap,output=root/out)
+            c.pitch_range(args('ok',checks(12,'a.json'),checks(35,'b.json')))
+            report=json.loads((root/'ok/pitch_range.json').read_text())
+            self.assertTrue(report['passed']);self.assertEqual(report['valid_range_cdeg'],[1200,3500])
+            self.assertLess(max(max(r['errors_mm']) for r in report['checks']),.5)
+            out=cv2.FileStorage(str(root/'ok/camera.yaml'),cv2.FILE_STORAGE_READ)
+            self.assertEqual(int(out.getNode('pitch_model_min_cdeg').real()),1200)
+            self.assertEqual(int(out.getNode('pitch_model_max_cdeg').real()),3500);out.release()
+            # A wrong measurement fails, and an untested gap is never widened over.
+            with self.assertRaises(ValueError):c.pitch_range(args('bad',checks(12,'c.json',.05)))
+            self.assertFalse((root/'bad/camera.yaml').exists())
+            with self.assertRaises(ValueError):c.pitch_range(args('gap',checks(35,'d.json'),gap=1000))
+            self.assertFalse((root/'gap/camera.yaml').exists())
 
     def test_detect_board(self):
         board=np.full((400,550),255,np.uint8)

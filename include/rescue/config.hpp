@@ -18,9 +18,19 @@ struct RectArea {
 
 struct Config {
     std::string push_replay;
+    std::string geometry_replay, calibration_file, keypoints_file;
+    std::string zone_geometry_file = "./config/zone_geometry.json";
+    bool pitch_feedback = false; // O_RDONLY MCU receive; no actuator commands
     std::string detect_image;
     std::string rknn_library = "./benchmark_results/librknnrt.so";
-    std::string model_path = "./benchmark_results/best_fp16.rknn";
+    std::string model_path = "./models/detect_fp.rknn";
+    // Optional YOLOv8-pose safe-zone model (zone_left/zone_right, 4 kpts each), own RKNN context.
+    std::string pose_model_path;
+    float pose_confidence = 0.25f;     // per-half box score
+    float pose_keypoint_confidence = 0.5f; // per-keypoint visibility
+    int detect_core_mask = -1;         // -1 leaves the runtime default; 0 auto, 1 core0, 2 core1, 4 core2
+    int pose_core_mask = -1;
+    bool parallel_inference = false;   // run detect and pose concurrently on separate contexts
     std::string uart_port = "/dev/ttyACM0"; // 下位机MCU（USB CDC）；IMU见imu_port
     std::string team = "red";
     int baudrate = 115200;
@@ -29,13 +39,15 @@ struct Config {
     int frame_height = 720;
     int fps = 60;
     int detect_interval = 1;
-    int input_size = 448;
+    int input_size = 640;
     float confidence = 0.5f;
     float nms = 0.45f;
     bool use_cuda = false;
     bool show = true;
     bool save_output = false;
     bool dry_run = false;
+    // Live MCU link: one exclusive RDWR port for motion output and A6 feedback (implies feedback).
+    bool hardware = false;
     bool imu = false;
     std::string imu_port = "/dev/ttyUSB0";
     int imu_baud = 115200;
@@ -62,10 +74,13 @@ struct Config {
     RectArea cross_center_region{170.0f, 430.0f, 480.0f, 460.0f};
     std::array<int, 2> catch_angle{90, 90};
     std::array<int, 2> release_angle{0, 0};
+    // PushTask camera presets FAR,TRACK,NEAR in 0.01 deg (positive down), overriding TaskTuning.
+    // Temporary (2026-10): the MCU firmware only has the -25/0/+25 deg presets, so the default
+    // uses 0 and +25 deg; restore the measured 1200/2200/3500 once the firmware takes any angle.
+    std::array<int16_t, 3> pitch_presets_cdeg{0, 2500, 2500};
 
-    std::vector<std::string> class_names{
-        "core", "wounded", "red", "dangerous", "normal", "main", "blue"
-    };
+    // blocks detector tensor order; taskLabel() maps colours to task semantics.
+    std::vector<std::string> class_names{"blue", "orange", "green", "black"};
 };
 
 void printUsage(const char *program);

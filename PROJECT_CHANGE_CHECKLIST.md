@@ -1,3 +1,7 @@
+# 2026-10-01 阶段 0/1 更新
+
+已实现的六点规范、帧传感器接口、ZoneEstimate、IPPE 和半区坐标判定以 [STAGE01_IMPLEMENTATION.md](STAGE01_IMPLEMENTATION.md) 为准。以下历史清单中的 FRONT/完整隔板视角门控不再代表当前实现。阶段 2/3 和实车标定验收仍未完成。
+
 # ds_innovation 文件改动清单
 
 > **2026-09-25 后续更新：** 已按电控确认将发送改为10字节浮点包、接收改为4字节执行器反馈，修复协议编译阻塞；远端最新ARM64完整构建及5项CTest通过。已提供新发送接口，主程序实车闭环尚未开放。详见[接口调整记录](/home/liu/ds_innovation/reports/protocol-update-2026-09-25/REPORT.md)。下文保留此前核查时的状态与改动建议。
@@ -25,7 +29,7 @@
 | `VELOCITY_PROTOCOL.md` | 与接收协议统一动作含义、到位条件及命令关联限制 | 如果只有单个 `done` 位，必须写明其无法单独证明“本次命令完成” |
 | `CMakeLists.txt` | 根据类型/模块拆分更新目标依赖，并给仍依赖 `assert` 的核心测试启用有效断言 | 干净 ARM64 构建及已有 5 项 CTest 可执行；不能引用旧二进制作为验证 |
 
-如果保留现有 `SensorState` 作为独立 IMU 业务结构，姿态消费者可以暂时保持接口；如果重命名或拆分它，还必须联动检查 `camera_calibration.*`、`sensor_fusion.*`、`logger.*`、`include/rescue/rescue_state_machine.hpp`、`tests/rescue_core_tests.cpp`。这些是接口迁移的影响范围，并非都要在第一批重写算法。
+如果保留现有 `SensorState` 作为独立 IMU 业务结构，姿态消费者可以暂时保持接口；如果重命名或拆分它，还必须联动检查 `camera_calibration.*`、`sensor_fusion.*`、`logger.*`、`tests/rescue_core_tests.cpp`。这些是接口迁移的影响范围，并非都要在第一批重写算法。
 
 依据：[类型冲突](/home/liu/ds_innovation/reports/audit-2026-09-24/remote-source/include/rescue/types.hpp:45)、[旧接收解析](/home/liu/ds_innovation/reports/audit-2026-09-24/remote-source/src/uart_controller.cpp:45)、[监视器调用](/home/liu/ds_innovation/reports/audit-2026-09-24/remote-source/src/sensor_monitor.cpp:24)。
 
@@ -155,7 +159,7 @@
 ## 8. 暂不直接改动的部分与实施前待落实事项
 
 - `src/controller.cpp`、`include/rescue/controller.hpp` 是旧抓取控制器，不是当前正式任务入口；不建议在其上另造第二套正式控制链路。
-- `src/rescue_state_machine.cpp`、`include/rescue/rescue_state_machine.hpp` 是历史原型。公共类型改变时维护其测试兼容；是否后续删除/迁移应另行明确，不与新任务状态机并行驱动底盘。
+- 2026-09-29：历史原型 `rescue_state_machine.*` 已删除，`PushTask` 是唯一任务状态机。
 - `REMOTE_REPAIR_REPORT.md`、历史审计快照和历史基准报告保留原始记录；新验证另附日期和版本，不能改写旧结果使其看起来已覆盖新代码。
 - `build/`、`build-arm64/`、根目录 `rescue_upper_host` 是构建产物，通过重新构建生成，不手工修改。
 - `turtle-crane/` 与救援程序改进无关。

@@ -7,7 +7,7 @@
 | 0 | uint8 start_of_frame | 固定 0xA6 |
 | 1 | uint8 gripper_done | 夹爪动作是否执行完成：0未完成，1已完成 |
 | 2 | uint8 gripper_action_id | 该标志对应的夹爪动作编号；0=上电后未收到动作 |
-| 3–4 | int16 camera_pitch_cdeg | 相机舵机读回的实际pitch，0.01°，0平视、正值向下，低字节在前；正常范围±2500（舵机限位±25°）；`00 80`(-32768)表示读回无效 |
+| 3–4 | int16 camera_pitch_cdeg | 相机舵机读回的实际pitch，0.01°，0平视、正值向下，低字节在前；正常范围±3500（舵机限位±35°）；`00 80`(-32768)表示读回无效 |
 | 5–6 | uint16 crc16 | CRC16/Modbus，低字节在前 |
 | 7 | uint8 newline | 固定0x0A（`\n`），不参与CRC |
 

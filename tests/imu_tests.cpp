@@ -101,6 +101,10 @@ int main() {
         assert(write(master,frame.data()+17,65)==65);
         waitUntil([&]{return imu.snapshot().fresh;});
         auto first=imu.snapshot();assert(first.sample.measurements_valid);
+        assert(!imu.snapshotAt(first.sample.received_us-1).fresh); // no future samples
+        const auto at_capture=imu.snapshotAt(first.sample.received_us);
+        assert(at_capture.fresh&&at_capture.sample.sequence==first.sample.sequence);
+        assert(!imu.snapshotAt(first.sample.received_us+60000,50).fresh);
         uint8_t output;assert(read(master,&output,1)<0); // Reader sends no commands.
         assert(write(master,frame.data(),82)==82);
         waitUntil([&]{return imu.snapshot().duplicate_times==1;});
@@ -124,5 +128,33 @@ int main() {
     auto config=parseArgs(7,const_cast<char**>(args));assert(config.imu&&config.imu_timeout_ms==150);
     const char* wrong[]={"test","--imu-timeout-ms","-1"};bool rejected=false;
     try{parseArgs(3,const_cast<char**>(wrong));}catch(...){rejected=true;}assert(rejected);
+    const auto invalidConfig=[](std::vector<const char*> args) {
+        bool threw=false;try{parseArgs(int(args.size()),const_cast<char**>(args.data()));}catch(...){threw=true;}
+        assert(threw);
+    };
+    invalidConfig({"test","--geometry-replay","record.json","--imu","--calibration","camera.yaml"});
+    invalidConfig({"test","--calibration","camera.yaml","--dry-run"});
+    invalidConfig({"test","--pitch-feedback"});
+    invalidConfig({"test","--keypoints-file","points.json"});
+    invalidConfig({"test","--geometry-replay","record.json","--push-replay","push.json","--calibration","camera.yaml"});
+    invalidConfig({"test","--hardware"});                                         // no IMU veto
+    invalidConfig({"test","--hardware","--imu","--dry-run"});
+    invalidConfig({"test","--hardware","--imu","--pitch-feedback","--calibration","camera.yaml"});
+    invalidConfig({"test","--hardware","--imu","--push-replay","push.json"});
+    invalidConfig({"test","--hardware","--imu","--port","/dev/ttyUSB0"});         // same port as the IMU
+    invalidConfig({"test","--pitch-presets","0,2500"});                           // FAR,TRACK,NEAR
+    invalidConfig({"test","--pitch-presets","2500,0,2500"});                      // not ordered
+    invalidConfig({"test","--pitch-presets","0,2500,4000"});                      // beyond the servo
+    invalidConfig({"test","--pitch-presets","0,25.5,2500"});                      // integers only
+    {
+        const char* none[]={"test","--dry-run"};
+        assert((parseArgs(2,const_cast<char**>(none)).pitch_presets_cdeg==std::array<int16_t,3>{0,2500,2500}));
+        const char* p[]={"test","--dry-run","--pitch-presets","1200,2200,3500"};
+        assert((parseArgs(4,const_cast<char**>(p)).pitch_presets_cdeg==std::array<int16_t,3>{1200,2200,3500}));
+    }
+    {
+        const char* hw[]={"test","--hardware","--imu","--calibration","camera.yaml"};
+        const auto c=parseArgs(5,const_cast<char**>(hw));assert(c.hardware&&!c.dry_run&&!c.pitch_feedback);
+    }
     std::cout<<"HI91 real fixture, mounting to base_link, CRC, recovery, SI, PTY freshness, duplicate/backward timestamps, disconnect and configuration passed\n";
 }

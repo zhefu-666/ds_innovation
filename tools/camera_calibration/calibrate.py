@@ -20,6 +20,51 @@ def detect(frame, pattern):
                            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 40, .001))
 
 
+def has_extra_grid_blobs(blobs, centers, pattern):
+    """True if unmatched blobs sit on/next to the grid, e.g. a larger board seen as a subgrid."""
+    grid = centers.reshape(pattern[1], pattern[0], 2)
+    pitch = min(np.linalg.norm(np.diff(grid, axis=1), axis=2).min(),
+                np.linalg.norm(np.diff(grid, axis=0), axis=2).min())
+    hull = cv2.convexHull(centers.reshape(-1, 1, 2).astype(np.float32))
+    points = centers.reshape(-1, 2)
+    for blob in blobs:
+        p = np.array(blob.pt, np.float32)
+        if np.linalg.norm(points - p, axis=1).min() < .4 * pitch:
+            continue
+        # Positive inside the hull, negative outside; one pitch outside still counts as the board.
+        if cv2.pointPolygonTest(hull, (float(p[0]), float(p[1])), True) > -1.5 * pitch:
+            return True
+    return False
+
+
+def detect_circle_grid(frame, pattern):
+    """Detect a symmetric circle grid using the same model as guided.py."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    params = cv2.SimpleBlobDetector_Params()
+    params.filterByColor = True
+    params.blobColor = 0
+    params.filterByArea = True
+    params.minArea = 12
+    params.maxArea = gray.size * .015
+    params.filterByCircularity = False
+    params.filterByConvexity = True
+    params.minConvexity = .75
+    params.filterByInertia = True
+    params.minInertiaRatio = .15
+    detector = cv2.SimpleBlobDetector_create(params)
+    blobs = detector.detect(gray)
+    expected = pattern[0] * pattern[1]
+    if not expected <= len(blobs) <= max(expected * 2, expected + 10):
+        return None
+    found, centers = cv2.findCirclesGrid(
+        gray, pattern, flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=detector)
+    if not found or centers is None or len(centers) != expected:
+        return None
+    if has_extra_grid_blobs(blobs, centers, pattern):
+        return None
+    return centers
+
+
 def signature(corners, size):
     p = corners.reshape(-1, 2) / np.array(size)
     # Center, apparent size and orientation distinguish views.
@@ -47,7 +92,7 @@ def solve_intrinsics(corners, size, pattern, square):
     return rms, k, d, errors
 
 
-def write_yaml(path, k, d, size, h=None):
+def write_yaml(path, k, d, size, h=None, pitch_cdeg=None):
     fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
     if not fs.isOpened():
         raise ValueError(f'Cannot write {path}')
@@ -56,8 +101,11 @@ def write_yaml(path, k, d, size, h=None):
     fs.write('image_width', size[0]); fs.write('image_height', size[1])
     fs.write('ground_coordinates', 'x_right_y_forward_metres')
     fs.write('ground_pixel_domain', 'undistorted_pixels')
-    fs.write('imu_tilt_limit_deg', 12.)
     if h is not None:
+        # The homography is only valid at the camera servo pitch it was measured at.
+        if pitch_cdeg is None or not -9000 <= int(pitch_cdeg) <= 9000:
+            raise ValueError('Ground mapping requires the measured camera pitch (0.01 deg)')
+        fs.write('ground_camera_pitch_cdeg', int(pitch_cdeg))
         fs.write('ground_homography', h)
     fs.release()
 
@@ -207,7 +255,7 @@ def ground(args):
         max_allowed_mm=args.max_error_mm,valid_region='Only measured ground region; no extrapolation guarantee')
     (out/'ground_report.json').write_text(json.dumps(report,indent=2))
     if not passed:raise ValueError(f'Ground validation failed; report in {out}; camera.yaml not written')
-    write_yaml(out/'camera.yaml',k,d,size,h)
+    write_yaml(out/'camera.yaml',k,d,size,h,args.camera_pitch_cdeg)
     print(f'Saved {out}/camera.yaml; independent maximum error {errors.max()*1000:.1f} mm')
 
 
@@ -309,9 +357,16 @@ def extrinsics(args):
     image = cv2.imread(args.image)
     if image is None or (image.shape[1], image.shape[0]) != size:
         raise ValueError('Image missing or resolution differs from intrinsics')
-    corners = detect(image, (args.cols, args.rows))
+    pattern = (args.cols, args.rows)
+    board_pattern = getattr(args, 'pattern', 'chessboard')
+    if board_pattern == 'circles':
+        corners = detect_circle_grid(image, pattern)
+        board_type = 'symmetric_circles'
+    else:
+        corners = detect(image, pattern)
+        board_type = 'chessboard'
     if corners is None:
-        raise ValueError('Complete chessboard not detected')
+        raise ValueError(f'Complete {board_pattern} calibration board not detected')
     grid = corners.reshape(args.rows, args.cols, 2)
     if args.flip_cols: grid = grid[:, ::-1]
     if args.flip_rows: grid = grid[::-1]
@@ -328,9 +383,10 @@ def extrinsics(args):
         cv2.putText(annotated, text, end, cv2.FONT_HERSHEY_SIMPLEX, .4, color, 1)
     if not cv2.imwrite(str(out/'corners_numbered.png'), annotated):
         raise ValueError('Cannot save corner inspection image')
-    report, h = solve_board_pose(k, d, corners, (args.cols, args.rows), args.square_mm/1000.,
+    report, h = solve_board_pose(k, d, corners, pattern, args.square_mm/1000.,
         (args.origin_x, args.origin_y), args.yaw_deg, args.board_height_mm/1000.)
-    report.update(image_size=size, board_pattern=[args.cols, args.rows], square_mm=args.square_mm,
+    report.update(image_size=size, board_type=board_type, board_pattern=[args.cols, args.rows],
+        square_mm=args.square_mm,
         flip_cols=args.flip_cols, flip_rows=args.flip_rows, corner_order_confirmed=args.confirm_order,
         robot_axes='x right, y forward, z up; metres; right-handed',
         camera_axes='x image right, y image down, z optical forward',
@@ -361,17 +417,102 @@ def extrinsics(args):
     if not good_pose:
         raise ValueError('Pose failed RMS/above-ground check; inspect corner order and report')
     filename = 'camera.yaml' if report['validated'] else 'camera_candidate.yaml'
-    write_yaml(out/filename, k, d, size, h)
+    write_yaml(out/filename, k, d, size, h, args.camera_pitch_cdeg)
     fs = cv2.FileStorage(str(out/filename), cv2.FILE_STORAGE_APPEND)
     for name in ('T_camera_from_robot', 'T_robot_from_camera', 'T_camera_from_board', 'T_robot_from_board'):
         fs.write(name, np.array(report[name]))
-    fs.write('extrinsics_validated', int(report['validated'])); fs.release()
+    fs.write('extrinsics_validated', int(report['validated']))
+    # Extrinsics at the reference pitch let the C++ side recompute H for other servo angles.
+    fs.write('pitch_model_reference_cdeg', int(args.camera_pitch_cdeg))
+    fs.write('pitch_model_min_cdeg', int(args.camera_pitch_cdeg)); fs.write('pitch_model_max_cdeg', int(args.camera_pitch_cdeg))
+    fs.release()
     print(f'Saved {out}/{filename}; reprojection RMS={report["rms_px"]:.3f} px')
     print('Inspect corners_numbered.png: 0=measured origin, 0->1=board X, 0->cols=board Y.')
     if not report['validated']:
         print('CANDIDATE ONLY: confirm corner order and supply independent measured ground checks before deployment.')
     if args.check_points and not passed:
         raise ValueError('Independent ground checks failed; final camera.yaml not generated')
+
+
+def rot_x(angle):
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+
+def pitch_model_transform(camera_from_robot, reference_cdeg, cdeg, pivot):
+    """Same servo model as CameraCalibration::cameraFromGroundAt (x-axis rotation, down positive)."""
+    servo = rot_x((cdeg - reference_cdeg) * math.pi / 18000.)
+    rotation = servo @ camera_from_robot[:3, :3]
+    translation = servo @ camera_from_robot[:3, 3] + pivot - servo @ pivot
+    return rotation, translation
+
+
+def pitch_range(args):
+    """Validate the dynamic pitch model at extra measured pitches before widening its range."""
+    fs = cv2.FileStorage(str(args.camera), cv2.FILE_STORAGE_READ)
+    if not fs.isOpened(): raise ValueError('Cannot open camera file')
+    k = fs.getNode('camera_matrix').mat(); d = fs.getNode('dist_coeffs').mat()
+    size = (int(fs.getNode('image_width').real()), int(fs.getNode('image_height').real()))
+    camera_from_robot = fs.getNode('T_camera_from_robot').mat()
+    validated = int(fs.getNode('extrinsics_validated').real()) if not fs.getNode('extrinsics_validated').empty() else 0
+    reference = int(fs.getNode('pitch_model_reference_cdeg').real())
+    has_pivot = not fs.getNode('pitch_pivot_camera_m').empty()
+    fs.release()
+    if validated != 1 or k is None or d is None or camera_from_robot is None or camera_from_robot.shape != (4, 4):
+        raise ValueError('Need a validated camera.yaml from the extrinsics step')
+    pivot = np.array(args.pivot_camera_m, np.float64)
+    if has_pivot or not np.isfinite(pivot).all() or np.linalg.norm(pivot) > .2:
+        raise ValueError('Pivot must be finite, within 0.2 m, and not already present in the camera file')
+    if not np.isfinite([args.max_error_mm, args.max_gap_cdeg]).all() or args.max_error_mm <= 0 or args.max_gap_cdeg <= 0:
+        raise ValueError('Invalid error or gap limit')
+    results = []
+    for item in args.check:
+        text, _, path = item.partition(':')
+        if not path or not text.lstrip('-').isdigit():
+            raise ValueError('Use --check PITCH_CDEG:checks.json')
+        cdeg = int(text)
+        if not -9000 <= cdeg <= 9000 or cdeg == reference or cdeg in [r['pitch_cdeg'] for r in results]:
+            raise ValueError('Each check pitch must be distinct, differ from the reference and lie within +-9000')
+        data = json.loads(Path(path).read_text())
+        if tuple(data['image_size']) != size or len(data['check']) < 3:
+            raise ValueError(f'{path}: need >=3 independent checks at the calibrated resolution')
+        pixels = np.array([p['pixel'] for p in data['check']], np.float32).reshape(-1, 1, 2)
+        world = np.array([p['world_m'] for p in data['check']], np.float64)
+        if world.shape != (len(pixels), 2) or not np.isfinite(world).all() or not np.isfinite(pixels).all():
+            raise ValueError(f'{path}: invalid check coordinates')
+        if np.linalg.matrix_rank(world - world.mean(axis=0)) < 2:
+            raise ValueError(f'{path}: check points must not be collinear')
+        if (pixels[:, 0] < 0).any() or (pixels[:, 0] >= np.array(size)).any():
+            raise ValueError(f'{path}: check pixels outside image')
+        rotation, translation = pitch_model_transform(camera_from_robot, reference, cdeg, pivot)
+        h = np.linalg.inv(k @ np.column_stack((rotation[:, 0], rotation[:, 1], translation)))
+        und = cv2.undistortPoints(pixels, k, d, P=k)
+        predicted = cv2.perspectiveTransform(und, h).reshape(-1, 2)
+        depth = (rotation @ np.column_stack((predicted, np.zeros(len(predicted)))).T + translation.reshape(3, 1))[2]
+        errors = np.linalg.norm(predicted - world, axis=1) * 1000
+        errors[depth <= 0] = np.inf  # above the horizon: the model cannot explain the point
+        results.append(dict(pitch_cdeg=cdeg, checks=str(path), errors_mm=errors.tolist(),
+                            passed=bool(np.isfinite(errors).all() and errors.max() <= args.max_error_mm)))
+    tested = sorted([reference] + [r['pitch_cdeg'] for r in results])
+    gaps = np.diff(tested)
+    passed = bool(results and all(r['passed'] for r in results) and (gaps <= args.max_gap_cdeg).all())
+    out = Path(args.output); out.mkdir(parents=True, exist_ok=False)
+    report = dict(reference_pitch_cdeg=reference, pivot_camera_m=pivot.tolist(), checks=results,
+                  tested_pitch_cdeg=tested, max_gap_cdeg=args.max_gap_cdeg, max_error_mm=args.max_error_mm,
+                  passed=passed, valid_range_cdeg=[tested[0], tested[-1]] if passed else [reference, reference])
+    (out/'pitch_range.json').write_text(json.dumps(report, indent=2))
+    if not passed:
+        raise ValueError(f'Pitch range validation failed (errors or untested gap); report in {out}; camera.yaml not written')
+    text = Path(args.camera).read_text()
+    import re
+    for key, value in (('pitch_model_min_cdeg', tested[0]), ('pitch_model_max_cdeg', tested[-1])):
+        text, count = re.subn(rf'^{key}: .*$', f'{key}: {value}', text, flags=re.M)
+        if count != 1: raise ValueError(f'Cannot update {key}')
+    (out/'camera.yaml').write_text(text)
+    if np.any(pivot):
+        fs = cv2.FileStorage(str(out/'camera.yaml'), cv2.FILE_STORAGE_APPEND)
+        fs.write('pitch_pivot_camera_m', pivot.reshape(3, 1)); fs.release()
+    print(f'Saved {out}/camera.yaml; validated pitch range {tested[0]}..{tested[-1]} cdeg')
 
 
 def main():
@@ -394,8 +535,11 @@ def main():
     p=sub.add_parser('ground',help='Fit ground mapping and verify independent measured points')
     p.add_argument('--intrinsics',required=True);p.add_argument('--points',required=True)
     p.add_argument('--max-error-mm',type=float,default=20);p.add_argument('--output',required=True);p.set_defaults(func=ground)
-    p=sub.add_parser('extrinsics',help='Chessboard pose in robot frame and ground homography')
+    p.add_argument('--camera-pitch-cdeg',type=int,required=True,help='Camera servo pitch readback during the photo, 0.01 deg, down positive')
+    p=sub.add_parser('extrinsics',help='Board pose in robot frame and ground homography')
     p.add_argument('--intrinsics',required=True);p.add_argument('--image',required=True)
+    p.add_argument('--pattern',choices=('chessboard','circles'),default='chessboard',
+                   help='Calibration board type; circles uses a symmetric circle grid')
     p.add_argument('--cols',type=int,default=9);p.add_argument('--rows',type=int,default=6)
     p.add_argument('--square-mm',type=float,required=True)
     p.add_argument('--origin-x',type=float,required=True,help='Corner 0 robot x in metres (right positive)')
@@ -406,7 +550,15 @@ def main():
     p.add_argument('--confirm-order',action='store_true',help='User has checked numbered corner orientation')
     p.add_argument('--check-points',help='Independent ground checks JSON with image_size and check array')
     p.add_argument('--max-rms',type=float,default=.5);p.add_argument('--max-error-mm',type=float,default=20)
+    p.add_argument('--camera-pitch-cdeg',type=int,required=True,help='Camera servo pitch readback during the photo, 0.01 deg, down positive')
     p.add_argument('--output',required=True);p.set_defaults(func=extrinsics)
+    p=sub.add_parser('pitch-range',help='Validate the pitch model at extra measured pitches and widen its range')
+    p.add_argument('--camera',required=True,help='Validated camera.yaml from the extrinsics step')
+    p.add_argument('--check',action='append',required=True,metavar='PITCH_CDEG:CHECKS_JSON',
+                   help='Servo pitch readback and independent ground checks picked at that pitch; repeat')
+    p.add_argument('--pivot-camera-m',type=float,nargs=3,default=[0.,0.,0.],help='Servo axis in reference camera frame, m')
+    p.add_argument('--max-error-mm',type=float,default=20);p.add_argument('--max-gap-cdeg',type=int,default=1500)
+    p.add_argument('--output',required=True);p.set_defaults(func=pitch_range)
     args=parser.parse_args()
     if args.mode=='intrinsics' and (args.cols<3 or args.rows<3 or args.square_mm<=0 or not math.isfinite(args.square_mm) or args.min_views<10 or args.views<args.min_views or args.timeout<=0):
         parser.error('Invalid board dimensions, view counts or timeout')

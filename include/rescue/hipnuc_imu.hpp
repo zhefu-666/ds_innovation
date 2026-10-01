@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <deque>
 
 namespace rescue {
 // HI91解析后的业务数据；不是可直接收发的串口打包结构体。
@@ -74,6 +75,7 @@ public:
     HipnucImu(const HipnucImu&) = delete;
     HipnucImu& operator=(const HipnucImu&) = delete;
     ImuSnapshot snapshot() const;
+    ImuSnapshot snapshotAt(uint64_t capture_us, uint32_t max_skew_ms = 50) const;
 private:
     void readLoop();
     int fd_ = -1;
@@ -81,5 +83,6 @@ private:
     std::thread reader_;
     mutable std::mutex mutex_;
     ImuSnapshot state_;
+    std::deque<ImuSample> history_;
 };
 }

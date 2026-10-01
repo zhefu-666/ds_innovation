@@ -9,6 +9,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <sys/select.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -84,6 +86,8 @@ UARTController::~UARTController() {
 
 void UARTController::initUART(const std::string &port, int baudrate,
                               bool dry_run, bool auto_run) {
+    if (running_ || fd_ >= 0) throw std::runtime_error("UART already initialized");
+    feedback_only_ = false;
     port_ = port;
     baudrate_ = baudrate;
     dry_run_ = dry_run;
@@ -91,6 +95,7 @@ void UARTController::initUART(const std::string &port, int baudrate,
     {
         std::lock_guard<std::mutex> guard(io_mutex_);
         actuator_feedback_ = {};
+        pitch_history_.clear();
     }
 
     if (dry_run_) {
@@ -104,6 +109,19 @@ void UARTController::initUART(const std::string &port, int baudrate,
     std::cout << "UART connected: " << port_ << "@" << baudrate_ << "bps\n";
 }
 
+void UARTController::initFeedbackOnly(const std::string &port, int baudrate) {
+    if (running_ || fd_ >= 0) throw std::runtime_error("UART already initialized");
+    port_ = port; baudrate_ = baudrate; dry_run_ = false; feedback_only_ = true;
+    { std::lock_guard<std::mutex> guard(io_mutex_); actuator_feedback_ = {}; pitch_history_.clear(); }
+    openPort(); running_ = true;
+    try { reader_ = std::thread(&UARTController::readLoop, this); }
+    catch (...) { running_ = false; closePort(); throw; }
+}
+FrameSensors UARTController::feedbackAt(uint64_t capture_us) const {
+    std::lock_guard<std::mutex> guard(io_mutex_);
+    if (!running_) return {};
+    return pitch_history_.at(capture_us);
+}
 void UARTController::closePort() {
     running_.store(false);
     if (reader_.joinable()) {
@@ -113,6 +131,7 @@ void UARTController::closePort() {
     std::lock_guard<std::mutex> guard(io_mutex_);
     actuator_feedback_.valid = false;
     if (fd_ >= 0) {
+        ::ioctl(fd_, TIOCNXCL);
         ::close(fd_);
         fd_ = -1;
         std::cout << "UART closed\n";
@@ -149,21 +168,28 @@ std::array<int, 2> UARTController::servoAngles() const {
     return servo_angles_;
 }
 
-ActuatorFeedback UARTController::latestActuatorFeedback() const {
-    std::lock_guard<std::mutex> guard(io_mutex_);
-    ActuatorFeedback state = actuator_feedback_;
+namespace {
+// 超过200ms无有效帧，返回无效快照；保留原始值但不将其当成新动作确认。
+ActuatorFeedback freshFeedback(ActuatorFeedback state) {
     const auto now_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
         Clock::now().time_since_epoch()).count());
-    // 超过200ms无有效帧，返回无效快照；保留原始值但不将其当成新动作确认。
     if (state.timestamp_us == 0 || now_us < state.timestamp_us ||
         now_us - state.timestamp_us > 200000) state.valid = false;
     return state;
+}
+} // namespace
+
+ActuatorFeedback UARTController::latestActuatorFeedback() const {
+    std::lock_guard<std::mutex> guard(io_mutex_);
+    return freshFeedback(actuator_feedback_);
 }
 
 void UARTController::publishActuatorFeedback(const ActuatorFeedback &state) {
     std::lock_guard<std::mutex> guard(io_mutex_);
     if (state.valid && state.timestamp_us != 0 &&
-        state.timestamp_us >= actuator_feedback_.timestamp_us) actuator_feedback_ = state;
+        state.timestamp_us >= actuator_feedback_.timestamp_us) {
+        actuator_feedback_ = state; pitch_history_.add(state);
+    }
 }
 
 bool UARTController::execute() {
@@ -177,7 +203,22 @@ uint8_t UARTController::nextGripperActionId(uint8_t id) {
 
 uint8_t UARTController::gripperActionId() const {
     std::lock_guard<std::mutex> guard(io_mutex_);
-    return gripper_action_id_;
+    return gripper_sent_ ? gripper_action_id_ : 0;
+}
+
+bool UARTController::syncGripperActionId(std::chrono::milliseconds timeout) {
+    const auto until = Clock::now() + timeout;
+    while (true) {
+        const auto fb = latestActuatorFeedback();
+        if (fb.valid) {
+            std::lock_guard<std::mutex> guard(io_mutex_);
+            if (gripper_sent_) return true; // 已经开始发送，编号由发送序列决定
+            gripper_action_id_ = fb.gripper_action_id;
+            return true;
+        }
+        if (Clock::now() >= until) return false;
+        std::this_thread::sleep_for(Ms(10));
+    }
 }
 
 int16_t UARTController::cameraPitchTarget() const {
@@ -199,9 +240,14 @@ int16_t clampPitch(int16_t cdeg) {
 } // namespace
 
 ActionResult UARTController::gripperActionResult() const {
-    const uint8_t id = gripperActionId();
-    const auto fb = latestActuatorFeedback();
-    return judgeAction(id, fb.valid, fb.gripper_action_id, fb.gripper_done);
+    return gripperAck().result;
+}
+
+UARTController::GripperAck UARTController::gripperAck() const {
+    std::lock_guard<std::mutex> guard(io_mutex_);
+    if (!gripper_sent_) return {};
+    const auto fb = freshFeedback(actuator_feedback_);
+    return {judgeAction(gripper_action_id_, fb.valid, fb.gripper_action_id, fb.gripper_done), gripper_target_};
 }
 
 ActionResult UARTController::cameraPitchResult(int16_t tolerance_cdeg) const {
@@ -222,11 +268,13 @@ ActionResult UARTController::cameraPitchResult(int16_t tolerance_cdeg) const {
 bool UARTController::sendMotion(const MotionCommand &command) {
     if (command.header != MotionPacket::kHeader) throw std::invalid_argument("Motion header must be 0x56");
     std::lock_guard<std::mutex> guard(io_mutex_);
+    if (feedback_only_) return false;
     // 夹爪首次发送或目标变化才算新动作；写失败后重发沿用同一编号。
     const uint8_t gripper = command.gripper_open ? 1 : 0;
-    if (gripper_action_id_ == 0 || gripper != gripper_target_) {
+    if (!gripper_sent_ || gripper != gripper_target_) {
         gripper_action_id_ = nextGripperActionId(gripper_action_id_);
         gripper_target_ = gripper;
+        gripper_sent_ = true;
     }
     camera_pitch_target_ = clampPitch(command.camera_pitch_cdeg);
     camera_sent_ = true;
@@ -292,7 +340,8 @@ std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand &comm
     MotionPacket packet;
     if (command.header != MotionPacket::kHeader) throw std::invalid_argument("Motion header must be 0x56");
     const bool valid = std::isfinite(command.vx_mps) && std::isfinite(command.wz_rps);
-    packet.vx_mps = valid ? command.vx_mps : 0.0f;
+    // 下位机对速度有限制：vx硬限幅，任何上层请求都不能超过±kMaxLinearSpeedMps。
+    packet.vx_mps = valid ? std::clamp(command.vx_mps, -kMaxLinearSpeedMps, kMaxLinearSpeedMps) : 0.0f;
     packet.wz_rps = valid ? command.wz_rps : 0.0f;
     packet.gripper_open = command.gripper_open ? 1 : 0;
     packet.gripper_action_id = gripper_action_id;
@@ -338,21 +387,26 @@ void UARTController::reopenPort() {
 
 void UARTController::openPort() {
     std::lock_guard<std::mutex> guard(io_mutex_);
-    fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
+    const speed_t speed = baudToTermios(baudrate_);
+    fd_ = ::open(port_.c_str(), (feedback_only_ ? O_RDONLY : O_RDWR) | O_NOCTTY | O_SYNC | O_CLOEXEC);
     if (fd_ < 0) {
         throw std::runtime_error("Failed to open " + port_ + ": " + std::strerror(errno));
     }
 
+    // 独占串口：发送与只读反馈都不允许第二个进程（夹爪脚本、串口助手、另一个主程序）同时打开。
+    if (::flock(fd_, LOCK_EX | LOCK_NB) < 0 || ::ioctl(fd_, TIOCEXCL) < 0) {
+        ::close(fd_); fd_ = -1; throw std::runtime_error("Serial port " + port_ + " is already owned");
+    }
     termios tty{};
     if (::tcgetattr(fd_, &tty) != 0) {
         const std::string msg = "tcgetattr failed: " + std::string(std::strerror(errno));
+        ::ioctl(fd_, TIOCNXCL);
         ::close(fd_);
         fd_ = -1;
         throw std::runtime_error(msg);
     }
 
     ::cfmakeraw(&tty);
-    const speed_t speed = baudToTermios(baudrate_);
     ::cfsetospeed(&tty, speed);
     ::cfsetispeed(&tty, speed);
 
@@ -367,6 +421,7 @@ void UARTController::openPort() {
 
     if (::tcsetattr(fd_, TCSANOW, &tty) != 0) {
         const std::string msg = "tcsetattr failed: " + std::string(std::strerror(errno));
+        ::ioctl(fd_, TIOCNXCL);
         ::close(fd_);
         fd_ = -1;
         throw std::runtime_error(msg);
@@ -416,6 +471,8 @@ void UARTController::readLoop() {
                 ActuatorFeedback state;
                 if (parser.consume(bytes[i], received_us, state)) publishActuatorFeedback(state);
             }
+        } else if (n == 0) {
+            break; // disconnected stream; do not spin while retaining stale feedback
         } else if (n < 0 && errno != EINTR && errno != EAGAIN) {
             std::cerr << "[ERR] UART read failed: " << std::strerror(errno) << "\n";
             break;
@@ -423,6 +480,7 @@ void UARTController::readLoop() {
     }
     std::lock_guard<std::mutex> guard(io_mutex_);
     actuator_feedback_.valid = false;
+    running_ = false;
 }
 
 } // namespace rescue

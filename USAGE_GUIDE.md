@@ -1,8 +1,10 @@
+阶段 0/1 新增参数及观测质量字段见 [实现说明](STAGE01_IMPLEMENTATION.md)。旧 push-replay 记录需补充 `zone_estimate` 质量证据；仅 `zone_valid=true` 不再允许推送。
+
 # 地面推行任务接入指南
 
 ## 运行方式
 
-先按 README 构建。`--push-replay PATH` 读取 JSON 中的 `frames` 数组，逐帧执行推行任务并打印状态、批次、已交付数及速度指令；不打开摄像头和串口。`--detect-image PATH` 在板子上执行单图 RKNN 推理并打印类别与原图像素框；`--dry-run` 仅进行检测预览。当前实车运动适配器未实现，无上述模式的启动会报错退出。
+先按 README 构建。`--push-replay PATH` 读取 JSON 中的 `frames` 数组，逐帧执行推行任务并打印状态、批次、已交付数及速度指令；不打开摄像头和串口。`--detect-image PATH` 在板子上执行单图 RKNN 推理并打印类别与原图像素框；`--dry-run` 仅进行检测预览。实车下发用 `--hardware --imu`（见 STAGE_HW1_SERIAL_OUTPUT.md）；既无 `--dry-run` 也无 `--hardware` 的实时启动会报错退出。
 
 之前的夹爪、抓球、释放和盲目前冲命令不再是主程序行为。不要用旧根目录或旧 build 中的二进制代替新构建。
 

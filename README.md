@@ -2,7 +2,9 @@
 
 本文说明从 GitHub 下载 `ds_innovation` 后，如何在 LubanCat/RK3588S 这类 ARM64 板子上完成编译，并通过网页或 Foxglove 查看主程序的实时检测画面。
 
-当前版本的主程序是**检测预览模式**：它会采集相机、运行 RKNN 检测、绘制检测框并输出任务状态；底盘运动输出仍关闭。可通过 `--imu` 接收 HiPNUC HI91 数据并在终端/网页查看；安装坐标和状态位尚未确认，IMU姿态尚未用于运动控制。ToF 和真实运动闭环尚未接入。
+当前版本的主程序是**感知预览模式**，底盘运动输出仍关闭。阶段 0/1 已加入 IMU→SensorState、只读实际 pitch 接收、帧时刻匹配的地面映射、关键点过滤、二维位姿拟合、ZoneEstimate 质量门控与 IPPE 交叉校验。关键点模型、投放规划和真实运动闭环仍待后续阶段。
+
+新增参数、六点标注规范、无硬件回放和真实标定要求见 [阶段 0/1 实现说明](STAGE01_IMPLEMENTATION.md)。
 
 ## 1. 获取代码
 
@@ -277,9 +279,10 @@ stat /dev/shm/rescue-telemetry.bin
 
 ## 11. 当前功能边界
 
-- `--dry-run` 模式不会打开串口，也不会向底盘发送运动命令。
+- `--dry-run` 不发送运动命令；显式 `--imu` 可打开 IMU 接收，显式 `--pitch-feedback` 可打开 MCU 只读反馈接收。
+- `--hardware` 打开 MCU 串口下发 `PushTask` 输出（必须同时带 `--imu`，不能与 `--dry-run`/`--pitch-feedback`/回放模式同用），25Hz重发，命令停更150ms改发零速，退出补发零速，详见 [速度协议](VELOCITY_PROTOCOL.md)“主程序下发”。
 - `hardware_output_enabled=0` 表示速度是算法计算值，不是底盘实测速度。
-- IMU、ToF、完整安全区几何和真实运动闭环尚未接入。
+- IMU 和安全区几何处理接口已接入；ToF、投放规划尚未接入；`--hardware` 已能下发，但 `safety_ok/path_safe/retreat_safe` 等证据尚无生产者（`ground_contact_valid` 已由 GeometryPipeline 生成，见 STAGE_HW2_GROUND_CONTACT.md，但需要验收过的 PITCH_MODEL 标定与真实 pitch 读回），实车上 `PushTask` 仍停在 WAIT_START。
 - 遥测只保留最新快照，不记录所有中间状态，也不自动生成 MCAP。
 - 查看服务断开不会阻塞主程序；主程序可以继续采集和推理。
 
@@ -333,14 +336,16 @@ ctest --test-dir build-arm64 --output-on-failure
 
 | 路径 | 用途 |
 |---|---|
-| `src/main.cpp` | 推行回放与相机预览入口，不发送电机/舵机包 |
+| `src/main.cpp` | 推行/像素几何回放与相机预览入口，不发送电机/舵机包 |
+| `src/geometry_pipeline.cpp` | 同帧传感器匹配、地面映射、关键点位姿与区域观测适配 |
+| `src/keypoint_filter.cpp`、`src/ground_pose_fitter.cpp` | 关键点过滤、固定尺度 SE(2) 拟合、两点先验及多帧重新捕获 |
 | `include/rescue/push_task.hpp`、`src/push_task.cpp` | 正式推行任务规则、观测和输出接口 |
 | `tests/push_task_tests.cpp` | 首单、批次、交付、目标丢失、超时和暂停等回归验证 |
 | `tests/fixtures/push_delivery.json` | 单件普通物资完整交付回放 |
 | `src/detector.cpp` | ONNX/RKNN 检测后端；RKNN 运行时动态加载 |
-| `src/tracker.cpp`、`camera_calibration.cpp`、`sensor_fusion.cpp` | 可复用跟踪、标定、安全组件，需接入新主链路 |
+| `src/tracker.cpp`、`camera_calibration.cpp`、`sensor_fusion.cpp` | 可复用跟踪、标定、安全组件；地面映射与相机读回pitch绑定，`SensorFusion`已在预览中否决`safety_ok` |
 | `src/uart_controller.cpp` | 15字节浮点运动包（夹爪+动作编号+相机pitch+CRC16）发送、8字节A6执行器反馈（含换行帧尾）；尚未接入任务运动主链路 |
-| `src/rescue_state_machine.cpp` | 先前的十四状态原型，仅保留用于原有组件测试，不是当前主入口 |
+| `src/imu_adapter.cpp` | HI91快照→`SensorState`（车体坐标姿态），供`SensorFusion`倾斜停车与地面映射倾斜判断 |
 | `src/controller.cpp` | 历史抓取控制器，当前主入口不使用 |
 
 输入字段和接入边界参见 [USAGE_GUIDE.md](USAGE_GUIDE.md)。`config/rescue.yaml` 是配置参考，当前 CLI 不读取该文件。
@@ -368,7 +373,20 @@ tools/gripper/gripper_close.sh    # 合上
 
 可加 `--dry-run` 只打印将发送的包、`--port`/`--baud`/`--timeout` 修改参数。需要同时控制速度或相机时用下面的通用脚本。
 
-先断开网页串口助手等占用 `/dev/ttyACM0` 的程序。参数依次为：vx(m/s)、wz(rad/s)、夹爪(0关/1开)、动作编号(1..255)、pitch(0.01°，正值向下，舵机限位±2500)。脚本只发一包并打印下位机回包；速度非0时车只动一下，200ms后下位机超时停车。
+相机pitch调整用 `tools/camera_pitch/`，夹爪保持张开。脚本先读A6反馈拿到当前动作编号，用“编号+1”发一次张开并等done=1，之后每包都沿用该编号和 `gripper_open=1`，调pitch不会再触发夹爪动作。角度单位为度，0平视、正值向下、负值向上，超出舵机限位时截断（下位机已放宽到±35°，脚本仍按±25°截断）：
+
+```bash
+tools/camera_pitch/pitch_status.sh     # 查看当前动作编号/完成标志/pitch读回（只读，不发包）
+tools/camera_pitch/pitch_set.sh 10     # 张开夹爪，相机转到向下10°，读回到位后退出
+tools/camera_pitch/pitch_set.sh -5     # 相机向上5°
+tools/camera_pitch/pitch_repl.sh       # 交互模式：终端输入角度实时调整
+```
+
+交互模式下直接输入角度（如 `10`、`-5`、`0`）即可转动，`s` 查看读回角，`x` 打印当前包，`q` 或 Ctrl+C 退出。后台以20Hz持续发当前目标，速度固定为0；退出后下位机200ms超时停车，相机保持当前角度。
+
+`pitch_set.sh` 在读回角进入容差（默认3°，`--tol` 修改）后再保持发送0.5s，`--timeout`（默认3s）内未到位则返回非0。同样支持 `--dry-run`、`--port`、`--baud`。读回精度约1~3°，不要把读回角当作精确外参使用，见 [速度协议](VELOCITY_PROTOCOL.md)“相机pitch”。
+
+先断开网页串口助手、`rescue_upper_host --hardware` 等占用 `/dev/ttyACM0` 的程序（主程序独占该串口）。参数依次为：vx(m/s)、wz(rad/s)、夹爪(0关/1开)、动作编号(1..255)、pitch(0.01°，正值向下，舵机限位±2500)。脚本只发一包并打印下位机回包；速度非0时车只动一下，200ms后下位机超时停车。
 
 ```bash
 python3 - 0 0 1 1 0 <<'EOF'
