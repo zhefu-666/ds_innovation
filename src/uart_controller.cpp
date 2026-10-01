@@ -68,9 +68,10 @@ bool SensorPacketParser::consume(uint8_t byte, uint64_t received_us, ActuatorFee
         }
         ActuatorFeedback decoded;
         decoded.timestamp_us = received_us;
-        decoded.gripper_done = packet.gripper_done;
+        decoded.gripper_open = packet.gripper_open;
         decoded.gripper_action_id = packet.gripper_action_id;
-        decoded.camera_pitch_cdeg = packet.camera_pitch_cdeg;
+        decoded.camera_pitch_cdeg = packet.camera_pitch_deg >= -40 && packet.camera_pitch_deg <= 40
+            ? static_cast<int16_t>(packet.camera_pitch_deg * 100) : kCameraPitchInvalid;
         decoded.valid = received_us != 0;
         // ToF尚未安装；IMU独立接入，不能用执行器反馈刷新姿态数据。
         state = decoded;
@@ -228,14 +229,14 @@ int16_t UARTController::cameraPitchTarget() const {
 
 namespace {
 // 编号不一致说明完成标志属于上一次动作，不能采信。
-ActionResult judgeAction(uint8_t id, bool feedback_valid, uint8_t feedback_id, uint8_t done) {
+ActionResult judgeAction(uint8_t id, bool feedback_valid, uint8_t feedback_id, uint8_t state, uint8_t target) {
     if (id == 0) return ActionResult::Idle;
     if (!feedback_valid) return ActionResult::NoFeedback;
-    return feedback_id == id && done == kActionDone ? ActionResult::Done : ActionResult::NotDone;
+    return feedback_id == id && state <= 1 && state == target ? ActionResult::Done : ActionResult::NotDone;
 }
 
 int16_t clampPitch(int16_t cdeg) {
-    return std::clamp<int16_t>(cdeg, -kCameraPitchLimitCdeg, kCameraPitchLimitCdeg);
+    return static_cast<int16_t>(std::round(std::clamp<int16_t>(cdeg, -kCameraPitchLimitCdeg, kCameraPitchLimitCdeg) / 100.0) * 100);
 }
 } // namespace
 
@@ -247,7 +248,7 @@ UARTController::GripperAck UARTController::gripperAck() const {
     std::lock_guard<std::mutex> guard(io_mutex_);
     if (!gripper_sent_) return {};
     const auto fb = freshFeedback(actuator_feedback_);
-    return {judgeAction(gripper_action_id_, fb.valid, fb.gripper_action_id, fb.gripper_done), gripper_target_};
+    return {judgeAction(gripper_action_id_, fb.valid, fb.gripper_action_id, fb.gripper_open, gripper_target_), gripper_target_};
 }
 
 ActionResult UARTController::cameraPitchResult(int16_t tolerance_cdeg) const {
@@ -345,7 +346,7 @@ std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand &comm
     packet.wz_rps = valid ? command.wz_rps : 0.0f;
     packet.gripper_open = command.gripper_open ? 1 : 0;
     packet.gripper_action_id = gripper_action_id;
-    packet.camera_pitch_cdeg = clampPitch(command.camera_pitch_cdeg);
+    packet.camera_pitch_deg = static_cast<int16_t>(std::round(clampPitch(command.camera_pitch_cdeg) / 100.0));
     std::vector<uint8_t> bytes(sizeof(packet));
     std::memcpy(bytes.data(), &packet, sizeof(packet));
     // CRC覆盖帧头到相机pitch，与A6反馈同一算法；按字节写入，低字节在前。

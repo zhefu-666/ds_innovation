@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
             if (s.timestamp_us != 0 && s.timestamp_us != last) {
                 last = s.timestamp_us;
                 std::cout << "rx_us=" << last << " feedback_valid=" << s.valid
-                    << " gripper_done=" << static_cast<unsigned>(s.gripper_done)
+                    << " gripper_open=" << static_cast<unsigned>(s.gripper_open)
                     << " gripper_action_id=" << static_cast<unsigned>(s.gripper_action_id)
                     << " camera_pitch_cdeg=" << s.camera_pitch_cdeg
                     << std::endl;

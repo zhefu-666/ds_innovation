@@ -83,8 +83,7 @@ struct Config {
     std::array<int, 2> catch_angle{90, 90};
     std::array<int, 2> release_angle{0, 0};
     // PushTask camera presets FAR,TRACK,NEAR in 0.01 deg (positive down), overriding TaskTuning.
-    // Temporary (2026-10): the MCU firmware only has the -25/0/+25 deg presets, so the default
-    // uses 0 and +25 deg; restore the measured 1200/2200/3500 once the firmware takes any angle.
+    // 预设保持现有0/25/25度；新限位±40度，不自动改变未标定工作角。
     std::array<int16_t, 3> pitch_presets_cdeg{0, 2500, 2500};
 
     // blocks detector tensor order; taskLabel() maps colours to task semantics.

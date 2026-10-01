@@ -376,9 +376,9 @@ tools/gripper/gripper_close.sh    # 合上
 相机pitch调整用 `tools/camera_pitch/`，夹爪保持张开。脚本先读A6反馈拿到当前动作编号，用“编号+1”发一次张开并等done=1，之后每包都沿用该编号和 `gripper_open=1`，调pitch不会再触发夹爪动作。角度单位为度，0平视、正值向下、负值向上，超出舵机限位时截断（下位机已放宽到±35°，脚本仍按±25°截断）：
 
 ```bash
-tools/camera_pitch/pitch_status.sh     # 查看当前动作编号/完成标志/pitch读回（只读，不发包）
-tools/camera_pitch/pitch_set.sh 10     # 张开夹爪，相机转到向下10°，读回到位后退出
-tools/camera_pitch/pitch_set.sh -5     # 相机向上5°
+tools/camera_pitch/pitch_status.sh     # 查看动作编号/夹爪开关状态/pitch读回（不发包）
+tools/camera_pitch/pitch_set.sh 20     # 张开夹爪，相机向下20°；直接输入真实角度
+tools/camera_pitch/pitch_set.sh -5     # 相机向上5°；限位±40°
 tools/camera_pitch/pitch_repl.sh       # 交互模式：终端输入角度实时调整
 ```
 

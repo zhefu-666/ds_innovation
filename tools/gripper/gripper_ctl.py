@@ -3,13 +3,18 @@
 
 用法：gripper_ctl.py {status|open|close} [--port /dev/ttyACM0] [--baud 115200] [--timeout 3] [--dry-run]
 先读A6反馈拿到下位机当前动作编号，新动作用“当前编号+1”（1..255循环，跳过0），
-以20Hz重复发送同一包直到反馈“编号一致且done=1”或超时。速度固定为0；
+以20Hz重复发送同一包直到反馈“编号一致且状态与目标匹配”或超时。速度固定为0；
 相机pitch沿用读回角，避免顺带转动相机。
+发送后逐帧打印通过CRC校验的原始8字节RX，以及编号/done/pitch。
 """
 import argparse, os, struct, sys, termios, time, tty
 
 INVALID_PITCH = -32768
-PITCH_LIMIT = 2500  # 暂时±25°：固件只有-25/0/+25三档；固件支持任意角后改回3500
+PITCH_LIMIT = 4000  # 内部cdeg；线上整数度，机械限位±40°
+
+
+def decode_pitch(deg):
+    return deg * 100 if -40 <= deg <= 40 else INVALID_PITCH
 
 
 def crc16(data):
@@ -22,7 +27,7 @@ def crc16(data):
 
 
 def motion_packet(gripper_open, action_id, pitch):
-    b = struct.pack('<BffBBh', 0x56, 0.0, 0.0, gripper_open, action_id, pitch)
+    b = struct.pack('<BffBBh', 0x56, 0.0, 0.0, gripper_open, action_id, max(-40, min(40, int(round(pitch / 100)))))
     return b + struct.pack('<H', crc16(b))
 
 
@@ -40,7 +45,7 @@ class Feedback:
                 continue
             f = bytes(self.buf[:8])
             if crc16(f[:5]) == struct.unpack('<H', f[5:7])[0] and f[7] == 0x0A:
-                frames.append((f[1], f[2], struct.unpack('<h', f[3:5])[0]))
+                frames.append((f[1], f[2], decode_pitch(struct.unpack('<h', f[3:5])[0]), f))
                 del self.buf[:8]
             else:
                 del self.buf[0]
@@ -74,6 +79,13 @@ def wait_feedback(fd, parser, timeout):
     return None
 
 
+def print_feedback(fb):
+    done, action_id, pitch, raw = fb
+    angle = '无效' if pitch == INVALID_PITCH else '%.2f°' % (pitch / 100)
+    print('RX: %s  | 编号=%d gripper_open=%d pitch=%s (%d cdeg)' %
+          (raw.hex(' ').upper(), action_id, done, angle, pitch), flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('action', choices=['status', 'open', 'close'])
@@ -92,9 +104,10 @@ def main():
         fb = wait_feedback(fd, parser, 0.5)
         if fb is None:
             sys.exit('0.5s内未收到A6反馈，检查下位机与串口')
-        done, cur_id, pitch = fb
+        done, cur_id, pitch, _ = fb
+        print_feedback(fb)
         pitch_txt = '无效' if pitch == INVALID_PITCH else '%.2f°' % (pitch / 100)
-        print('当前: 动作编号=%d done=%d pitch=%s' % (cur_id, done, pitch_txt))
+        print('当前: 动作编号=%d gripper_open=%d pitch=%s' % (cur_id, done, pitch_txt))
         if args.action == 'status':
             return
 
@@ -106,14 +119,18 @@ def main():
             return
 
         end = time.time() + args.timeout
+        last_fb = fb
         while time.time() < end:
             os.write(fd, pkt)
-            for done, fb_id, _ in read_frames(fd, parser):
-                if fb_id == new_id and done == 1:
+            for received in read_frames(fd, parser):
+                last_fb = received
+                print_feedback(received)
+                done, fb_id, _, _ = received
+                if fb_id == new_id and done == (1 if args.action == 'open' else 0):
                     print('完成: 编号%d' % new_id)
                     return
             time.sleep(0.05)
-        sys.exit('超时%.1fs未确认完成（最后反馈 编号=%d done=%d）' % (args.timeout, fb_id if 'fb_id' in dir() else cur_id, done))
+        sys.exit('超时%.1fs未确认完成（最后反馈 编号=%d gripper_open=%d）' % (args.timeout, last_fb[1], last_fb[0]))
     finally:
         os.close(fd)
 

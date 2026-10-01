@@ -12,20 +12,24 @@
 set/repl 下发后会在终端实时显示A6上传的pitch读回（变化时立即打印，不变时每0.5s一行），
 含原始cdeg值、目标的小端字节和整帧A6字节（pitch字节3–4用[]标出），便于核对下位机是否
 刷新该字段；结束时汇总读回出现过的值。
-A6帧：A6 | done | 编号 | pitch低 pitch高 | CRC低 CRC高 | 0A
+A6帧：A6 | gripper_open | 编号 | pitch低 pitch高 | CRC低 CRC高 | 0A
 运动包：56 | vx(4) | wz(4) | gripper_open | 编号 | pitch低 pitch高 | CRC低 CRC高
 
-角度单位为度：0平视，正值向下，负值向上；暂时限位±25°，超出会截断。
-下位机固件目前只有 -25/0/+25 三档（2026-10，电控未改完），其他角度会提示。
-启动时先读A6反馈拿到当前动作编号，用“当前编号+1”发一次张开并等done=1，
+角度单位为度：0平视，正值向下，负值向上；暂时限位±40°，超出会截断。
+收发线上pitch均为整数度；工具内部换算为cdeg，支持±40°。
+启动时先读A6反馈拿到当前动作编号，用“当前编号+1”发一次张开并等状态与目标匹配，
 之后所有包沿用这个编号和gripper_open=1，调pitch不会再触发夹爪动作。
 速度固定为0。退出后下位机200ms超时停车，相机保持当前角度。
 """
 import argparse, os, struct, sys, termios, threading, time, tty
 
 INVALID_PITCH = -32768
-PITCH_LIMIT = 2500  # 暂时±25°：固件只有三档；固件支持任意角后改回3500（舵机限位±35°）
-FIRMWARE_PRESETS = (-2500, 0, 2500)  # 固件当前档位，cdeg
+PITCH_LIMIT = 4000  # 内部cdeg；线上整数度，机械限位±40°
+
+
+
+def decode_pitch(deg):
+    return deg * 100 if -40 <= deg <= 40 else INVALID_PITCH
 
 
 def crc16(data):
@@ -38,12 +42,12 @@ def crc16(data):
 
 
 def motion_packet(gripper_open, action_id, pitch):
-    b = struct.pack('<BffBBh', 0x56, 0.0, 0.0, gripper_open, action_id, pitch)
+    b = struct.pack('<BffBBh', 0x56, 0.0, 0.0, gripper_open, action_id, max(-40, min(40, int(round(pitch / 100)))))
     return b + struct.pack('<H', crc16(b))
 
 
 class Feedback:
-    """按帧头+8字节+CRC+帧尾0x0A解析A6，不按换行切分。帧为 (done, 编号, pitch, 原始8字节)。"""
+    """按帧头+8字节+CRC+帧尾0x0A解析A6，不按换行切分。帧为 (gripper_open, 编号, pitch, 原始8字节)。"""
     def __init__(self):
         self.buf = bytearray()
 
@@ -56,7 +60,7 @@ class Feedback:
                 continue
             f = bytes(self.buf[:8])
             if crc16(f[:5]) == struct.unpack('<H', f[5:7])[0] and f[7] == 0x0A:
-                frames.append((f[1], f[2], struct.unpack('<h', f[3:5])[0], f))
+                frames.append((f[1], f[2], decode_pitch(struct.unpack('<h', f[3:5])[0]), f))
                 del self.buf[:8]
             else:
                 del self.buf[0]
@@ -102,7 +106,7 @@ def frame_hex(raw):
 
 def cdeg_hex(p):
     """int16小端两个字节，如 1200 -> B0 04。"""
-    return struct.pack('<h', p).hex(' ').upper()
+    return struct.pack('<h', INVALID_PITCH if p == INVALID_PITCH else int(round(p / 100))).hex(' ').upper()
 
 
 def pitch_detail(p, raw):
@@ -133,7 +137,7 @@ class Tracer:
         if changed or now - self.last_print >= self.every:
             err = '' if p == INVALID_PITCH or self.target is None else '  差 %+.2f°' % ((p - self.target) / 100)
             goal = '' if self.target is None else '目标 %.2f° [%s]  ' % (self.target / 100, cdeg_hex(self.target))
-            print('  +%5.2fs  %s读回 %s (%d cdeg)%s  编号=%d done=%d  RX: %s%s' % (
+            print('  +%5.2fs  %s读回 %s (%d cdeg)%s  编号=%d gripper_open=%d  RX: %s%s' % (
                   now - self.t0, goal, pitch_txt(p), p, err, action_id, done, frame_hex(raw),
                   '  *变化' if changed and self.last_pitch is not None else ''), flush=True)
             self.last_print = now
@@ -155,19 +159,15 @@ class Tracer:
             print('  注意: 读回始终为 %d cdeg（字节 %s），下发目标为 %d cdeg（字节 %s），读回未随目标变化；'
                   '若相机实际已转动，说明下位机没有刷新该字段' % (self.seen[0], cdeg_hex(self.seen[0]),
                   self.target, cdeg_hex(self.target)))
-            if self.target != 0 and self.seen[0] * 100 == self.target:
-                print('  注意: 读回 %d 恰好是目标 %d cdeg 的度数，下位机可能按“度”而不是0.01°上传，'
-                      '应为 %s' % (self.seen[0], self.target, cdeg_hex(self.target)))
 
 
 def to_cdeg(deg):
-    cd = int(round(deg * 100))
-    clamped = max(-PITCH_LIMIT, min(PITCH_LIMIT, cd))
-    if clamped != cd:
-        print('提示: %.2f° 超出暂时限位±25°，已截断为 %.2f°' % (deg, clamped / 100))
-    if clamped not in FIRMWARE_PRESETS:
-        print('提示: 下位机目前只有 -25/0/+25 三档，%.2f° 不是档位，实际角度以读回为准' % (clamped / 100))
-    return clamped
+    if not __import__('math').isfinite(deg):
+        raise ValueError('角度必须为有限数值')
+    actual = max(-40, min(40, int(round(deg))))
+    if actual != deg:
+        print('提示: 按整数度与±40°限位，实际目标为 %d°' % actual)
+    return actual * 100
 
 
 class Link:
@@ -301,7 +301,7 @@ def repl(link, action_id, pitch, timeout, tol):
             elif line == 's':
                 if link.last:
                     d, i, p, raw = link.last
-                    print('目标 %.2f°  读回 %s  编号=%d done=%d' % (state['pitch'] / 100, pitch_detail(p, raw), i, d))
+                    print('目标 %.2f°  读回 %s  编号=%d gripper_open=%d' % (state['pitch'] / 100, pitch_detail(p, raw), i, d))
                 else:
                     print('目标 %.2f°  尚无反馈' % (state['pitch'] / 100))
             elif line == 'm':
@@ -354,7 +354,7 @@ def main():
             sys.exit('0.5s内未收到A6反馈，检查下位机与串口')
         link.last = fb
         done, cur_id, cur_pitch, raw = fb
-        print('当前: 动作编号=%d done=%d pitch=%s' % (cur_id, done, pitch_detail(cur_pitch, raw)))
+        print('当前: 动作编号=%d gripper_open=%d pitch=%s' % (cur_id, done, pitch_detail(cur_pitch, raw)))
         if args.action == 'status':
             return
         if args.action == 'watch':

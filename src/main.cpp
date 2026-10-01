@@ -389,7 +389,7 @@ int main(int argc, char **argv) {
                 input.camera_pitch_cdeg=frame_sensors.actuator.camera_pitch_cdeg;
                 input.camera_pitch_stable=frame_sensors.pitch_stable;
             }
-            // Gripper completion: id echoed and done==1 for the last sent target. Read-only
+            // Gripper completion: id echoed and observed open/closed state matches the last target. Read-only
             // feedback never sends, so it never acknowledges anything.
             UARTController::GripperAck gripper_ack;
             if(link) {
@@ -484,7 +484,7 @@ int main(int argc, char **argv) {
                               << " stale_zero=" << st.stale << " gripper_id=" << int(feedback->gripperActionId())
                               << " target=" << gripper_ack.target << " ack=" << ack_names[int(gripper_ack.result)]
                               << " fb_valid=" << fb.valid << " fb_id=" << int(fb.gripper_action_id)
-                              << " fb_done=" << int(fb.gripper_done) << " pitch_rb=" << fb.camera_pitch_cdeg << "\n";
+                              << " fb_open=" << int(fb.gripper_open) << " pitch_rb=" << fb.camera_pitch_cdeg << "\n";
                 }
                 last_report = now;
             }

@@ -144,7 +144,7 @@ int main() {
     invalidConfig({"test","--hardware","--imu","--port","/dev/ttyUSB0"});         // same port as the IMU
     invalidConfig({"test","--pitch-presets","0,2500"});                           // FAR,TRACK,NEAR
     invalidConfig({"test","--pitch-presets","2500,0,2500"});                      // not ordered
-    invalidConfig({"test","--pitch-presets","0,2500,4000"});                      // beyond the servo
+    invalidConfig({"test","--pitch-presets","0,2500,4001"});                      // beyond the servo
     invalidConfig({"test","--pitch-presets","0,25.5,2500"});                      // integers only
     {
         const char* none[]={"test","--dry-run"};

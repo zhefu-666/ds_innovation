@@ -328,7 +328,7 @@ int main() {
         int master=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);assert(master>=0&&grantpt(master)==0&&unlockpt(master)==0);
         UARTController uart;uart.initFeedbackOnly(ptsname(master),115200);
         assert(!uart.sendMotion(MotionCommand{}));assert(uart.gripperActionId()==0);
-        uint8_t packet[8]={0xA6,1,1,0xD0,0x07,0,0,0x0A};
+        uint8_t packet[8]={0xA6,1,1,0x14,0x00,0,0,0x0A};
         auto crc=UARTController::calculateCRC16(packet,0,4);packet[5]=crc&255;packet[6]=crc>>8;
         assert(write(master,packet,8)==8);
         for(int i=0;i<100&&!uart.latestActuatorFeedback().valid;++i)std::this_thread::sleep_for(std::chrono::milliseconds(5));

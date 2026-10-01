@@ -94,7 +94,7 @@ void printUsage(const char *program) {
         << "  --tof-stop-m X      ToF emergency-stop distance, default 0.18\n"
         << "  --imu-tilt-deg X    Body pitch/roll stop limit, default 12 (ground mapping uses its own tighter limit)\n"
         << "  --pitch-presets F,T,N  Camera FAR,TRACK,NEAR presets in 0.01 deg, positive down, default 0,2500,2500\n"
-        << "                      (MCU firmware currently has only -2500/0/2500); needs -3500<=F<=T<=N<=3500\n"
+        << "                      (wire pitch uses integer degrees); needs -4000<=F<=T<=N<=4000\n"
         << "  --classes CSV       Raw model class names in tensor order\n"
         << "  --help              Show this help\n";
 }
@@ -193,8 +193,8 @@ Config parseArgs(int argc, char **argv) {
             for (size_t k = 0; k < 3; ++k) {
                 size_t used = 0;
                 const int v = std::stoi(items[k], &used);
-                if (used != items[k].size() || v < -3500 || v > 3500)
-                    throw std::runtime_error("--pitch-presets values must be integers in -3500..3500 (0.01 deg)");
+                if (used != items[k].size() || v < -4000 || v > 4000)
+                    throw std::runtime_error("--pitch-presets values must be integers in -4000..4000 (0.01 deg)");
                 config.pitch_presets_cdeg[k] = static_cast<int16_t>(v);
             }
             const auto &p = config.pitch_presets_cdeg;
