@@ -10,7 +10,7 @@ uint64_t nowUs() {
 }
 } // namespace
 
-MotionLink::MotionLink(UARTController &uart, MotionLinkConfig config) : uart_(uart), config_(config) {
+MotionLink::MotionLink(UARTController &uart, MotionLinkConfig config, std::function<bool()> permit) : permit_(std::move(permit)), uart_(uart), config_(config) {
     if (config_.period_ms == 0 || config_.command_timeout_ms == 0 || config_.command_timeout_ms >= 200)
         throw std::invalid_argument("MotionLink needs period > 0 and command timeout in 1..199 ms");
     worker_ = std::thread(&MotionLink::run, this);
@@ -26,8 +26,13 @@ void MotionLink::submit(const MotionCommand &command) {
     wake_.notify_one();
 }
 void MotionLink::write(const MotionCommand &command, bool stale) {
+    MotionCommand guarded = command;
+    if (permit_ && !permit_()) {
+        if (!ever_authorized_) return; // no implicit gripper close or pitch move before START
+        guarded = stopped(authorized_);
+    } else { authorized_ = guarded; ever_authorized_ = true; }
     bool ok = false;
-    try { ok = uart_.sendMotion(command); } catch (const std::exception &e) {
+    try { ok = uart_.sendMotion(guarded); } catch (const std::exception &e) {
         std::cerr << "[MCU] send rejected: " << e.what() << "\n";
     }
     std::lock_guard<std::mutex> guard(mutex_);
@@ -63,12 +68,12 @@ void MotionLink::stop() {
     if (sent) write(stopped(last), false);
 }
 bool MotionLink::healthy() const {
-    uint64_t submitted; MotionLinkStats s;
-    { std::lock_guard<std::mutex> guard(mutex_); submitted = has_command_ ? submitted_us_ : 0; s = stats_; }
+    uint64_t submitted; MotionLinkStats s; bool stopping;
+    { std::lock_guard<std::mutex> guard(mutex_); submitted = has_command_ ? submitted_us_ : 0; s = stats_; stopping = stopping_; }
     const uint64_t now = nowUs(), limit = uint64_t(config_.command_timeout_ms) * 1000;
     const auto recent = [&](uint64_t t) { return t && now >= t && now - t <= limit; };
     // Zero-velocity substitutes are successful writes but not a live task loop.
-    return !stopping_ && recent(submitted) && s.last_ok && recent(s.last_ok_us) && uart_.latestActuatorFeedback().valid;
+    return !stopping && recent(submitted) && s.last_ok && recent(s.last_ok_us) && uart_.latestActuatorFeedback().valid;
 }
 MotionLinkStats MotionLink::stats() const {
     std::lock_guard<std::mutex> guard(mutex_);

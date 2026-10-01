@@ -30,6 +30,11 @@ void detectorTests() {
     auto in=makePushObservation(out,1050000,false,.25f);
     assert(in.target_valid&&in.label=="ordinary_supply"&&!in.geometry_valid&&!in.safety_ok&&!in.zone_valid&&!in.path_safe&&!in.captured&&!in.zone_counts_valid);
     assert(!makePushObservation(out,1300000,false,.25f).target_valid);
+    // A different nearer candidate never replaces a locked ID; rejected IDs are skipped.
+    assert(makePushObservation(out,1050000,true,.25f,3).target_id==3);
+    assert(!makePushObservation(out,1050000,true,.25f,99).target_valid);
+    assert(makePushObservation(out,1050000,true,.25f,-1,{1}).target_id==3);
+    assert(!makePushObservation(out,1050000,false,.25f,-1,{1}).target_valid);
     // The danger object is never a push target, even after the first ordinary delivery.
     std::vector<SegDetection> danger{out[1]};assert(!makePushObservation(danger,1050000,true,.25f).target_valid);
     assert(taskLabel("blue")=="dangerous_object"&&taskLabel("orange")=="injured_person");

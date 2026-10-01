@@ -33,6 +33,7 @@ void PushTask::enter(PushState s, uint64_t now, const char *why) {
     if (why && *why) reason_ = why;
 }
 void PushTask::clearTrip() {
+    drop_locked_=false;drop_centre_zone_={};
     target_id_ = -1; label_.clear(); trip_ = {}; pending_ = {}; seen_ = {};
     verdict_ = RuleVerdict::OK;
 }
@@ -52,7 +53,7 @@ int PushTask::gripperWait(const PushObservation &in, uint8_t open, uint64_t now)
     return gripper_cmd_ == open && now - std::max(gripper_us_, phase_us_) > t_.gripper_timeout_us ? -1 : 0;
 }
 bool PushTask::candidate(const PushObservation &in, uint64_t now) const {
-    if (!in.target_valid || in.target_id < 0 || !in.geometry_valid || in.target_in_zone) return false;
+    if (!in.target_valid || in.target_id < 0 || !in.geometry_valid || !in.target_region_valid || in.target_in_zone) return false;
     if (!targetSelectable(in.label, first_)) return false;
     if (!std::isfinite(in.distance_m) || in.distance_m < 0 || !std::isfinite(in.heading_error) ||
         std::abs(in.heading_error) > 1.2f) return false;
@@ -61,11 +62,11 @@ bool PushTask::candidate(const PushObservation &in, uint64_t now) const {
 }
 bool PushTask::tracking(const PushObservation &in) const {
     return in.target_valid && in.target_id == target_id_ && in.label == label_ && in.geometry_valid &&
-        !in.target_in_zone && std::isfinite(in.distance_m) && in.distance_m >= 0 &&
+        in.target_region_valid && !in.target_in_zone && std::isfinite(in.distance_m) && in.distance_m >= 0 &&
         std::isfinite(in.heading_error) && std::abs(in.heading_error) <= 1.2f;
 }
 bool PushTask::zoneOk(const PushObservation &in) const {
-    return in.zone_valid && in.zone_own && in.zone_estimate.trusted(in.now_us);
+    return in.zone_identity_verified && in.zone_valid && in.zone_own && in.zone_estimate.trusted(in.now_us);
 }
 // The held set must still be the verified trip; a changed or partial view is not a hold.
 bool PushTask::holding(const PushObservation &in) const {
@@ -101,7 +102,7 @@ int PushTask::pitchWait(const PushObservation &in, uint64_t now) {
     return now - std::max(pitch_wait_us_, phase_us_) > t_.pitch_timeout_us ? -1 : 0;
 }
 float PushTask::halfX() const {
-    return trip_.injured > 0 ? t_.injured_half_x_m : t_.supply_half_x_m;
+    return drop_locked_ ? drop_centre_zone_.x : (trip_.injured > 0 ? t_.injured_half_x_m : t_.supply_half_x_m);
 }
 // After a stop the gripper state decides where to resume: a verified load is never
 // silently forgotten, and anything uncertain is released before scanning again.
@@ -131,6 +132,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         out.state = state_; out.motion = motion; out.target_id = target_id_;
         out.batch_size = trip_.total() ? trip_.total() : pending_.total();
         out.delivered_total = total_; out.first_ordinary_delivered = first_;
+        out.cargo_injured=trip_.injured>0;out.drop_locked=drop_locked_;out.drop_centre_zone=drop_centre_zone_;
         out.verdict = verdict_; out.reason = reason_;
         return out;
     };
@@ -163,7 +165,7 @@ PushOutput PushTask::update(const PushObservation &in) {
     const bool forward_ok = in.path_safe && in.opponent_zone_clear;
     const uint64_t elapsed = now - phase_us_;
     const auto drive = [&](float vx, float wz) {
-        if ((vx > 0 && !forward_ok) || (vx < 0 && !in.retreat_safe) || (vx == 0 && wz != 0 && !in.path_safe))
+        if ((vx > 0 && !forward_ok) || (vx < 0 && !in.retreat_safe) || (vx == 0 && wz != 0 && !forward_ok))
             return; // missing clearance stops the robot; it never substitutes another motion
         motion.vx_mps = std::clamp(vx, -t_.max_speed, t_.max_speed);
         motion.wz_rps = std::clamp(wz, -t_.max_wz, t_.max_wz);
@@ -187,6 +189,15 @@ PushOutput PushTask::update(const PushObservation &in) {
         const int p = pitchWait(in, now);
         if (p < 0) { fail("camera_pitch_timeout"); state_ = PushState::SAFE_STOP; return result(); }
         if (p == 0) return result();
+    }
+    const bool drop_fresh=in.navigation_timestamp_us && now>=in.navigation_timestamp_us &&
+        now-in.navigation_timestamp_us<=200000 && in.drop_plan_valid && drop_locked_ &&
+        std::isfinite(in.drop_centre_zone.x) && std::isfinite(in.drop_centre_zone.y) &&
+        cv::norm(in.drop_centre_zone-drop_centre_zone_)<=.005f;
+    if((state_==PushState::GATE || state_==PushState::OPEN_RELEASE || state_==PushState::ENTER) && !drop_fresh) {
+        reason_="drop_revalidation_missing";
+        if(now-carry_us_>t_.carry_budget_us) {fail("drop_revalidation_timeout");state_=PushState::SAFE_STOP;}
+        return result();
     }
     switch (state_) {
     case PushState::SCAN: {
@@ -297,6 +308,14 @@ PushOutput PushTask::update(const PushObservation &in) {
             step_ = 1; confirmations_ = 0; hold_misses_ = 0; break;
         }
         if (!zoneOk(in)) { drive(0, t_.scan_wz); break; } // look for our zone without moving the load
+        const bool fresh_plan=in.navigation_timestamp_us && now>=in.navigation_timestamp_us && now-in.navigation_timestamp_us<=200000;
+        if(!fresh_plan || !in.drop_plan_valid || !in.carry_plan_valid ||
+           !std::isfinite(in.drop_centre_zone.x)||!std::isfinite(in.drop_centre_zone.y)||
+           !std::isfinite(in.carry_waypoint_body.x)||!std::isfinite(in.carry_waypoint_body.y)) {
+            reason_="carry_plan_missing";break;
+        }
+        if(!drop_locked_) {drop_centre_zone_=in.drop_centre_zone;drop_locked_=true;}
+        if(cv::norm(in.drop_centre_zone-drop_centre_zone_)>.005f) {reason_="drop_plan_changed";break;}
         // Park the rotation centre so that, once facing in, the held centre sits gate_clearance
         // before the correct half: turning in place there does not sweep the load sideways.
         const auto &z = in.zone_estimate;
@@ -305,8 +324,8 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (dist <= t_.gate_tolerance_m) {
             enter(PushState::GATE, now, "gate_reached"); break;
         }
-        const float bearing = std::atan2(-gate.x, gate.y);
-        steer(std::max(.03f, std::min(t_.carry_speed, dist)), bearing);
+        const float bearing = std::atan2(-in.carry_waypoint_body.x, in.carry_waypoint_body.y);
+        steer(std::max(.03f, std::min(t_.carry_speed, float(cv::norm(in.carry_waypoint_body)))), bearing);
         break;
     }
     case PushState::GATE: {
@@ -337,6 +356,11 @@ PushOutput PushTask::update(const PushObservation &in) {
         break;
     }
     case PushState::OPEN_RELEASE: {
+        if(!in.opponent_zone_clear) {
+            reason_="release_opponent_clearance_missing";
+            if(elapsed>t_.gripper_timeout_us)fail("release_clearance_timeout");
+            break;
+        }
         commandGripper(1, now);
         const int p = pitchWait(in, now);
         if (p < 0) { fail("camera_pitch_timeout"); break; }
@@ -352,7 +376,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         const auto &z = in.zone_estimate;
         const cv::Point2f hold = z.bodyToZone({0, t_.hold_center_y_m});
         const float lateral = hold.x - halfX();
-        if (hold.y >= t_.deposit_y_m) { enter(PushState::BACK_OUT, now, "deposited"); break; }
+        if (hold.y >= (drop_locked_?drop_centre_zone_.y:t_.deposit_y_m)) { enter(PushState::BACK_OUT, now, "deposited"); break; }
         if (std::abs(lateral) > t_.enter_lateral_m) { enter(PushState::BACK_OUT, now, "enter_lateral"); break; }
         if (elapsed > t_.enter_budget_us) { enter(PushState::BACK_OUT, now, "enter_timeout"); break; }
         drive(t_.enter_speed, t_.heading_gain * wrapAngle(z.yaw_body_rad) + t_.lateral_gain * lateral);
@@ -365,7 +389,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (g <= 0) { if (g < 0) fail("gripper_open_timeout"); break; } // never drag the load out closed
         if (step_ == 0) { // distance bound used if the zone drops out of view
             const float mouth = zoneOk(in) ? in.zone_estimate.bodyToZone({0, t_.mouth_y_m}).y
-                                           : t_.deposit_y_m + t_.mouth_y_m;
+                                           : (drop_locked_?drop_centre_zone_.y:t_.deposit_y_m) + t_.mouth_y_m;
             travel_limit_ = std::max(0.f, mouth - t_.mouth_clear_y_m) + .05f;
             travel_ = 0; step_ = 1;
         }
@@ -432,5 +456,10 @@ PushOutput PushTask::update(const PushObservation &in) {
     }
     if (fault_) { state_ = PushState::SAFE_STOP; motion.vx_mps = motion.wz_rps = 0; }
     return result();
+}
+std::vector<int> PushTask::rejectedTargets(uint64_t now) const {
+    std::vector<int> ids;
+    for(const auto& item:rejected_)if(item.second>now)ids.push_back(item.first);
+    return ids;
 }
 } // namespace rescue

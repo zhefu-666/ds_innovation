@@ -127,6 +127,12 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
     f << "]" << "state" << "{" << "name" << PushTask::name(s.output.state)
       << "batch_size" << s.output.batch_size << "delivered_total" << s.output.delivered_total
       << "first_ordinary_delivered" << static_cast<int>(s.output.first_ordinary_delivered)
+      << "match_state" << s.output.match_state << "match_reason" << s.output.match_reason
+      << "match_remaining_ms" << double(s.output.match_remaining_us/1000)
+      << "target_region_valid" << int(in.target_region_valid) << "target_in_zone" << int(in.target_in_zone)
+      << "zone_identity_verified" << int(in.zone_identity_verified)
+      << "retreat_safe" << int(in.retreat_safe) << "opponent_zone_clear" << int(in.opponent_zone_clear)
+      << "zone_counts_valid" << int(in.zone_counts_valid)
       << "reason" << s.output.reason << "rule_verdict" << verdictName(s.output.verdict)
       << "gripper_open_cmd" << static_cast<int>(s.output.motion.gripper_open)
       << "camera_pitch_cmd_cdeg" << static_cast<int>(s.output.motion.camera_pitch_cdeg)
@@ -151,7 +157,7 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
       << "zone_yaw_sigma_rad" << finite(in.zone_estimate.yaw_sigma_rad)
       << "zone_predicted_distance_m" << finite(in.zone_estimate.predicted_distance_m) << "}"
       << "motion" << "{" << "vx_mps" << finite(s.output.motion.vx_mps)
-      << "wz_rps" << finite(s.output.motion.wz_rps) << "hardware_output_enabled" << 0 << "}"
+      << "wz_rps" << finite(s.output.motion.wz_rps) << "hardware_output_enabled" << int(s.output.hardware_output_enabled) << "}"
       << "health" << "{" << "loop_fps" << finite(s.loop_fps)
       << "inference_ms" << finite(s.inference_ms) << "capture_ms" << finite(s.capture_ms)
       << "publish_fps_limit" << config_.telemetry_fps

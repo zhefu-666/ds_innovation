@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "measured": 0,
+  "note": "Template only: replace all zeros with robot measurements and set measured=1 only after validation. Do not use this file as evidence.",
+  "image_width": 1280,
+  "image_height": 720,
+  "hold_center_y_m": 0,
+  "mouth_y_m": 0,
+  "corridor_half_width_m": 0,
+  "load_radius_m": 0,
+  "holding_views": [
+    {"pitch_cdeg": 2500, "area": [0, 0, 0, 0]}
+  ]
+}

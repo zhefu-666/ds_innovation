@@ -13,6 +13,7 @@ struct ExpectedStop {
 };
 struct GeometryResult {
     bool mapping_valid=false;
+    bool identity_verified=false;
     std::string reason="not_configured";
     ZoneEstimate zone;
     std::vector<SegDetection> detections;

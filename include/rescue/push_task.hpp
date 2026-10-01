@@ -2,6 +2,7 @@
 #include "rescue/transport_rules.hpp"
 #include "rescue/types.hpp"
 #include "rescue/zone_estimate.hpp"
+#include "rescue/planner.hpp"
 #include <map>
 #include <string>
 
@@ -31,6 +32,7 @@ struct PushObservation {
     std::string label;
     float distance_m = 0, heading_error = 0; // heading positive left/CCW
     // Positive evidence that the candidate already lies in our zone (never pull it out).
+    bool target_region_valid = false; // unknown is not evidence of being outside
     bool target_in_zone = false;
     // path_safe: forward motion and in-place turns, including the swept gripper and load.
     // retreat_safe: reversing (the rear is blind; only an explicit adapter may set it).
@@ -55,6 +57,7 @@ struct PushObservation {
     bool gripper_done = false;
     int gripper_feedback_open = -1;
     // Our own safe zone.
+    bool zone_identity_verified = false; // independent identity evidence, never --team alone
     bool zone_valid = false, zone_own = false; // diagnostic; quality is checked independently
     ZoneEstimate zone_estimate;
     std::string zone_class; // primary target's expected half, diagnostic only
@@ -62,6 +65,14 @@ struct PushObservation {
     bool zone_counts_valid = false;
     int zone_supply_count = 0, zone_injured_count = 0;
     // Relative IMU yaw, only used to measure the turn after a delivery.
+    // Navigation adapter output: timestamped, validated waypoint and selected drop centre.
+    // Missing route/occupancy never falls back to driving straight to a fixed gate.
+    NavigationScene navigation_scene;
+    bool zone_inventory_complete = false;
+    std::vector<PlannerObstacle> zone_occupied; // fixed zone frame, excluding this carried load
+    bool carry_plan_valid = false, drop_plan_valid = false;
+    uint64_t navigation_timestamp_us = 0;
+    cv::Point2f carry_waypoint_body, drop_centre_zone;
     bool heading_valid = false;
     float heading_rad = 0;
 };
@@ -70,8 +81,14 @@ struct PushOutput {
     MotionCommand motion; // includes gripper_open and camera_pitch_cdeg
     int target_id = -1, batch_size = 0, delivered_total = 0;
     bool first_ordinary_delivered = false;
+    bool cargo_injured = false;
+    bool drop_locked = false;
+    cv::Point2f drop_centre_zone;
     RuleVerdict verdict = RuleVerdict::OK;
     std::string reason;
+    std::string match_state, match_reason;
+    uint64_t match_remaining_us = 0;
+    bool hardware_output_enabled = false;
 };
 // Body geometry, speeds and budgets. Lengths marked "measure" are placeholders
 // until the gripper is measured on the robot.
@@ -112,6 +129,7 @@ public:
     explicit PushTask(TaskTuning tuning = {}) : t_(tuning) {}
     PushOutput update(const PushObservation &in);
     static const char *name(PushState state);
+    std::vector<int> rejectedTargets(uint64_t now_us) const;
 private:
     TaskTuning t_;
     PushState state_ = PushState::WAIT_START, stopped_from_ = PushState::WAIT_START;
@@ -127,6 +145,8 @@ private:
     // Dead-reckoned from the previous command; only bounds a phase, never proves progress.
     float travel_ = 0, travel_limit_ = 0, turned_ = 0, last_heading_ = 0, carried_ = 0;
     float last_vx_ = 0, last_wz_ = 0;
+    bool drop_locked_ = false;
+    cv::Point2f drop_centre_zone_;
     bool heading_seen_ = false;
     std::map<int, uint64_t> rejected_; // primary track id -> blacklist expiry
 

@@ -86,6 +86,7 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,const KeypointFr
     for(auto& d:out.detections)d.ground_contact_reason=groundContact(d,f);
     const auto filtered=filter_.filter(k,f,geometry_,calibration_);
     out.zone=fitter_.fit(filtered,k,f);out.reason=out.zone.reason;
+    out.identity_verified=k.identity_verified && out.zone.valid && k.frame_id==f.frame_id && k.capture_us==f.capture_us;
     // IPPE is optional and only cross-checks an already accepted metric fit.
     // Two-point fits and fixed-H files without extrinsics do not require PnP.
     cv::Matx34d camera_from_ground;
@@ -118,6 +119,8 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,const KeypointFr
 }
 void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const ExpectedStop& stop,
                              const std::string& team,uint64_t now) const {
+    in.target_region_valid=false;in.target_in_zone=false;
+    in.zone_identity_verified=r.identity_verified;
     in.geometry_valid=false;in.zone_valid=false;in.zone_own=false;in.zone_class.clear();
     in.zone_estimate=r.zone;
     for(const auto& d:r.detections)if(in.target_valid&&d.track_id==in.target_id&&d.ground_position_valid&&
@@ -125,8 +128,17 @@ void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const E
         in.geometry_valid=d.ground_contact_valid;in.distance_m=cv::norm(d.body_xy_m);
         in.heading_error=std::atan2(-d.body_xy_m.x,d.body_xy_m.y); // positive left/CCW
     }
-    in.zone_valid=r.zone.trusted(now);in.zone_own=in.zone_valid&&r.zone.zone_label==team+"_safe_zone";
-    if(!stop.valid||!in.target_valid||stop.target_id!=in.target_id||stop.frame_id!=r.zone.frame_id||stop.capture_us!=r.zone.timestamp_us)return;
+    in.zone_valid=r.zone.trusted(now);in.zone_own=in.zone_identity_verified&&in.zone_valid&&r.zone.zone_label==team+"_safe_zone";
+    // Only a trusted, independently identified own zone can classify the target.
+    // Use conservative footprint + pose uncertainty; touching/ambiguous stays unknown.
+    if(in.zone_own)for(const auto& d:r.detections)if(d.track_id==in.target_id && in.geometry_valid) {
+        const auto q=r.zone.bodyToZone(d.body_xy_m);
+        const float radius=(d.label=="injured_person"?.065f:.05f)+2*r.zone.position_sigma_m+2*cv::norm(q)*r.zone.yaw_sigma_rad;
+        const bool inside=std::abs(q.x)<geometry_.width_m/2-radius && q.y>radius && q.y<geometry_.depth_m-radius;
+        const bool outside=std::abs(q.x)>geometry_.width_m/2+radius || q.y < -radius || q.y>geometry_.depth_m+radius;
+        in.target_region_valid=inside||outside;in.target_in_zone=inside;
+    }
+    if(!in.zone_identity_verified || !stop.valid||!in.target_valid||stop.target_id!=in.target_id||stop.frame_id!=r.zone.frame_id||stop.capture_us!=r.zone.timestamp_us)return;
     const auto decision=classifyExpectedStop(geometry_,r.zone,stop.body_m,stop.radius_m,now);
     if(decision.valid)in.zone_class=decision.zone_class;
     // path_safe, safety_ok, capture and zone-count evidence are not fabricated.
@@ -139,7 +151,7 @@ uint64_t readExactTime(const cv::FileNode& n) {
     return static_cast<uint64_t>(value);
 }
 KeypointFrame readKeypointFrame(const cv::FileNode& n) {
-    KeypointFrame f;f.frame_id=readExactTime(n["frame_id"]);f.capture_us=readExactTime(n["capture_us"]);
+    KeypointFrame f;f.identity_verified=!n["identity_verified"].empty() && int(n["identity_verified"])==1;f.frame_id=readExactTime(n["frame_id"]);f.capture_us=readExactTime(n["capture_us"]);
     f.zone_label=std::string(n["zone_label"]);f.geometry_id=std::string(n["geometry_id"]);
     f.image_size={int(n["image_width"]),int(n["image_height"])};
     if(!n["points"].isSeq()||n["points"].size()>6)throw std::runtime_error("Expected at most six keypoints");

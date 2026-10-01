@@ -29,6 +29,7 @@ struct ZoneKeypoint {
     bool visible = false;
 };
 struct KeypointFrame {
+    bool identity_verified = false; // explicit same-frame identity source; pose shape does not supply this
     std::string zone_label, geometry_id;
     uint64_t frame_id = 0, capture_us = 0;
     cv::Size image_size;

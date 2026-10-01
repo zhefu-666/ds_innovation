@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "measured": 0,
+  "note": "Validate on actual red/blue zones, both teams, shadows, occlusions and distractors before setting measured=1. HSV uses OpenCV H=0..179; red 0..12 or 168..179, blue 95..135.",
+  "saturation_min": 80,
+  "value_min": 45,
+  "min_pixels": 200,
+  "min_fraction": 0.6,
+  "max_other_fraction": 0.1
+}

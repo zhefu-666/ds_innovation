@@ -25,14 +25,19 @@ struct Config {
     std::string rknn_library = "./benchmark_results/librknnrt.so";
     std::string model_path = "./models/detect_fp.rknn";
     // Optional YOLOv8-pose safe-zone model (zone_left/zone_right, 4 kpts each), own RKNN context.
-    std::string pose_model_path;
-    float pose_confidence = 0.25f;     // per-half box score
-    float pose_keypoint_confidence = 0.5f; // per-keypoint visibility
+    std::string pose_model_path; // 通用模型；parseArgs 后为本次实际使用的模型路径。
+    // 预留两版安全区模型接口：按己方颜色选择，仅路径不同，不分设置信度。
+    // 两版保持相同 zone_left/zone_right 类别、4 个关键点顺序及输出张量。
+    // 选择某颜色模型不等于确认画面区域归属，仍需独立颜色观测。
+    std::string pose_model_blue_path;
+    std::string pose_model_red_path;
+    float pose_confidence = 0.25f;     // 两版共用：per-half box score
+    float pose_keypoint_confidence = 0.5f; // 两版共用：per-keypoint visibility
     int detect_core_mask = -1;         // -1 leaves the runtime default; 0 auto, 1 core0, 2 core1, 4 core2
     int pose_core_mask = -1;
     bool parallel_inference = false;   // run detect and pose concurrently on separate contexts
     std::string uart_port = "/dev/ttyACM0"; // 下位机MCU（USB CDC）；IMU见imu_port
-    std::string team = "red";
+    std::string team = "blue"; // 暂定蓝色己方、红色对方；比赛时 --team red 可切换。
     int baudrate = 115200;
     int camera_index = 0;
     int frame_width = 1280;
@@ -56,6 +61,9 @@ struct Config {
     int telemetry_fps = 10;
     std::string telemetry_file = "/dev/shm/rescue-telemetry.bin";
     bool auto_run = false;
+    uint32_t match_seconds = 180; // confirmed competition duration: 3 minutes
+    std::string task_calibration_file, zone_color_file;
+    std::string match_socket = "/tmp/rescue-match.sock";
     bool require_instance_masks = false;
 
     // Safety and timing limits used by the non-blocking rescue pipeline.

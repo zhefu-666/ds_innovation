@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <mutex>
 #include <thread>
+#include <functional>
 
 namespace rescue {
 struct MotionLinkConfig {
@@ -23,7 +24,7 @@ struct MotionLinkStats {
 // they stop the wheels and never toggle the gripper. Nothing is sent before the first submit.
 class MotionLink {
 public:
-    explicit MotionLink(UARTController &uart, MotionLinkConfig config = {});
+    explicit MotionLink(UARTController &uart, MotionLinkConfig config = {}, std::function<bool()> permit = {});
     ~MotionLink();
     MotionLink(const MotionLink &) = delete;
     MotionLink &operator=(const MotionLink &) = delete;
@@ -39,6 +40,9 @@ public:
 private:
     void run();
     void write(const MotionCommand &command, bool stale);
+    std::function<bool()> permit_;
+    MotionCommand authorized_;
+    bool ever_authorized_ = false;
     UARTController &uart_;
     MotionLinkConfig config_;
     mutable std::mutex mutex_;

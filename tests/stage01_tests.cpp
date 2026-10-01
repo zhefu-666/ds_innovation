@@ -173,7 +173,7 @@ int main() {
         cv::Mat nonrigid=cv::Mat::eye(4,4,CV_64F);nonrigid.at<double>(0,0)=2;
         c.setPitchModel(nonrigid,2000,1000,2500);assert(!c.valid());
         // Geometry application projects targets but does not invent a safe route or delivery.
-        GeometryPipeline pipeline(s.camera,s.geometry);auto points=s.points();
+        GeometryPipeline pipeline(s.camera,s.geometry);auto points=s.points();points.identity_verified=true;
         SegDetection d;d.track_id=7;d.label="ordinary_supply";d.confidence=.9f;
         d.frame_id=s.frame.frame_id;d.timestamp_us=s.frame.capture_us;
         d.box=s.cubeBox({0,.82f});d.ground_contact_valid=false;
@@ -186,6 +186,10 @@ int main() {
         pipeline.apply(in,result,stop,"red",s.frame.now_us);
         assert(in.geometry_valid&&in.zone_valid&&in.zone_own&&in.zone_class=="supply");
         assert(!in.path_safe&&!in.safety_ok&&!in.retreat_safe&&!in.opponent_zone_clear&&!in.zone_counts_valid&&!in.captured);
+        result.identity_verified=false;
+        pipeline.apply(in,result,stop,"red",s.frame.now_us);
+        assert(!in.zone_own&&!in.zone_identity_verified&&!in.target_region_valid&&in.zone_class.empty());
+        result.identity_verified=true;
         result.detections[0].ground_contact_valid=false;
         pipeline.apply(in,result,stop,"red",s.frame.now_us);assert(!in.geometry_valid);
         stop.target_id=8;pipeline.apply(in,result,stop,"red",s.frame.now_us);assert(in.zone_class.empty());
@@ -286,6 +290,7 @@ int main() {
         // A historical bool alone must never bypass the zone-quality gate: a verified load
         // with an untrusted zone estimate only searches in place, it never drives to a gate.
         PushTask task;PushObservation in;
+        in.target_region_valid=in.zone_identity_verified=true;
         in.run=in.safety_ok=in.target_valid=in.geometry_valid=in.path_safe=in.opponent_zone_clear=true;
         in.target_id=1;in.label="ordinary_supply";in.distance_m=.2;
         in.zone_valid=in.zone_own=true;in.zone_class="supply";

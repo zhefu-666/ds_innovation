@@ -54,6 +54,8 @@ void printUsage(const char *program) {
         << "  --keypoints-file P Optional atomic same-frame landmark JSON (no box-derived points)\n"
         << "  --model PATH        Detector model, default models/detect_fp.rknn\n"
         << "  --pose-model PATH   Safe-zone YOLOv8-pose RKNN (zone_left/zone_right, 4 kpts); replaces --keypoints-file\n"
+        << "  --pose-model-blue P Blue-team pose model override; same thresholds and output schema\n"
+        << "  --pose-model-red P  Red-team pose model override; same thresholds and output schema\n"
         << "  --pose-conf X       Safe-zone half score threshold, default 0.25\n"
         << "  --pose-kpt-conf X   Safe-zone keypoint visibility threshold, default 0.5\n"
         << "  --detect-core N     RKNN core mask for detector (0 auto, 1, 2, 4)\n"
@@ -61,7 +63,7 @@ void printUsage(const char *program) {
         << "  --parallel-infer    Run detector and pose concurrently\n"
         << "  --port PATH         MCU serial port, default /dev/ttyACM0\n"
         << "  --baud N            Baudrate, default 115200\n"
-        << "  --team red|blue     Team color, default red\n"
+        << "  --team red|blue     Own zone color, default blue (opponent red)\n"
         << "  --camera N          Camera index, default 0\n"
         << "  --width N           Capture width, default 1280\n"
         << "  --height N          Capture height, default 720\n"
@@ -82,7 +84,11 @@ void printUsage(const char *program) {
         << "  --dry-run           Disable motion output; --imu may open IMU input\n"
         << "  --hardware          Send PushTask motion/gripper/pitch to the MCU (25 Hz, zero velocity on stall/exit);\n"
         << "                      needs --imu, reads gripper and pitch feedback from the same port\n"
-        << "  --auto-run          Start in run command state instead of pause\n"
+        << "  --auto-run          Request START once after live preflight; never auto-resume faults\n"
+        << "  --match-seconds N   Competition duration, default 180 s (1..86400)\n"
+        << "  --zone-color-calibration P  Validated red/blue zone color thresholds\n"
+        << "  --task-calibration P  Measured gripper geometry and NEAR image region JSON\n"
+        << "  --match-socket P    Local control socket, default /tmp/rescue-match.sock\n"
         << "  --require-masks     Reject box-only detections (safety mode)\n"
         << "  --sensor-timeout-ms N  Sensor freshness timeout, default 200\n"
         << "  --tof-stop-m X      ToF emergency-stop distance, default 0.18\n"
@@ -139,6 +145,10 @@ Config parseArgs(int argc, char **argv) {
             config.keypoints_file = needValue(arg);
         } else if (arg == "--model") {
             config.model_path = needValue(arg);
+        } else if (arg == "--pose-model-blue") {
+            config.pose_model_blue_path = needValue(arg);
+        } else if (arg == "--pose-model-red") {
+            config.pose_model_red_path = needValue(arg);
         } else if (arg == "--pose-model") {
             config.pose_model_path = needValue(arg);
         } else if (arg == "--pose-conf") {
@@ -217,6 +227,18 @@ Config parseArgs(int argc, char **argv) {
             config.dry_run = true;
         } else if (arg == "--hardware") {
             config.hardware = true;
+        } else if (arg == "--match-seconds") {
+            const auto text=needValue(arg); size_t used=0; const long v=std::stol(text,&used);
+            if(used!=text.size() || v<1 || v>86400) throw std::runtime_error("--match-seconds must be 1..86400");
+            config.match_seconds=static_cast<uint32_t>(v);
+        } else if (arg == "--zone-color-calibration") {
+            config.zone_color_file=needValue(arg);
+        } else if (arg == "--task-calibration") {
+            config.task_calibration_file=needValue(arg);
+        } else if (arg == "--match-socket") {
+            config.match_socket=needValue(arg);
+            if(config.match_socket.empty() || config.match_socket[0]!='/' || config.match_socket.size()>=108)
+                throw std::runtime_error("--match-socket must be an absolute Unix socket path");
         } else if (arg == "--auto-run") {
             config.auto_run = true;
         } else if (arg == "--require-masks") {
@@ -232,6 +254,14 @@ Config parseArgs(int argc, char **argv) {
     if (config.team != "red" && config.team != "blue") {
         throw std::runtime_error("--team must be red or blue");
     }
+    // 统一在参数解析完成后选择，避免 --team 与模型参数的先后顺序影响结果。
+    // 本方专用路径优先；未配置时沿用 --pose-model 通用模型，绝不借用对方模型。
+    // 当前只运行所选的一版；两种颜色共用置信度、NMS、输入尺寸和推理解码。
+    const auto &team_pose = config.team == "blue" ? config.pose_model_blue_path : config.pose_model_red_path;
+    if (!team_pose.empty()) config.pose_model_path = team_pose;
+    if (config.pose_model_path.empty() &&
+        (!config.pose_model_blue_path.empty() || !config.pose_model_red_path.empty()))
+        throw std::runtime_error("No pose model for selected --team; provide its model or --pose-model fallback");
     if (config.input_size <= 0 || !std::isfinite(config.confidence) || config.confidence < 0 || config.confidence > 1 ||
         !std::isfinite(config.nms) || config.nms < 0 || config.nms > 1)
         throw std::runtime_error("Invalid model size or confidence/NMS thresholds");

@@ -26,11 +26,13 @@ struct Sim {
     PushOutput out;
     float px = -.15f, py = -.75f, phi = 0; // phi: robot heading vs zone +y, CCW positive
     bool zone_visible = true, gripper_responds = true, servo_responds = true;
+    bool navigation_ready = true, drop_available = true;
     int pitch = 0, pitch_still = 0, pitch_rate = 400; // power-on: level
     Inventory load; // what is physically enclosed
     std::set<PushState> visited;
     explicit Sim(TaskTuning t = {}) : tune(t), task(t) {
         in.run = in.safety_ok = in.target_valid = in.geometry_valid = true;
+        in.target_region_valid = in.zone_identity_verified = true;
         in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
         in.target_id = 7; in.label = "ordinary_supply"; in.distance_m = .2f;
         in.corridor = inv(1); in.corridor_complete = in.corridor_occlusion_free = true;
@@ -56,6 +58,10 @@ struct Sim {
             const float c = std::cos(-phi), s = std::sin(-phi);
             z.origin_body_m = {c * -px - s * -py, s * -px + c * -py};
         }
+        // Simulator supplies explicit validated direct-route/empty-zone evidence.
+        in.carry_plan_valid=navigation_ready;in.drop_plan_valid=drop_available;in.navigation_timestamp_us=in.now_us;
+        in.drop_centre_zone={task_injured?tune.injured_half_x_m:tune.supply_half_x_m,tune.deposit_y_m};
+        in.carry_waypoint_body=z.zoneToBody({in.drop_centre_zone.x,-tune.gate_clearance_m-tune.hold_center_y_m});
         in.heading_rad = phi;
         const int target = out.motion.camera_pitch_cdeg;
         const int moved = servo_responds ? std::clamp(target - pitch, -pitch_rate, pitch_rate) : 0;
@@ -117,6 +123,11 @@ void writeFixture(const std::string &path) {
     f << "frames" << "[";
     for (const auto &in : s.frames) {
         f << "{" << "now_us" << double(in.now_us) << "run" << int(in.run) << "safety_ok" << int(in.safety_ok)
+          << "carry_plan_valid" << int(in.carry_plan_valid) << "drop_plan_valid" << int(in.drop_plan_valid)
+          << "navigation_timestamp_us" << double(in.navigation_timestamp_us)
+          << "carry_waypoint_body" << "[" << in.carry_waypoint_body.x << in.carry_waypoint_body.y << "]"
+          << "drop_centre_zone" << "[" << in.drop_centre_zone.x << in.drop_centre_zone.y << "]"
+          << "target_region_valid" << int(in.target_region_valid) << "zone_identity_verified" << int(in.zone_identity_verified)
           << "target_valid" << int(in.target_valid) << "geometry_valid" << int(in.geometry_valid)
           << "path_safe" << int(in.path_safe) << "retreat_safe" << int(in.retreat_safe)
           << "opponent_zone_clear" << int(in.opponent_zone_clear)
@@ -228,6 +239,21 @@ void captureTests() {
 }
 int main(int argc, char **argv) {
     if (argc == 3 && std::string(argv[1]) == "--write-fixture") { writeFixture(argv[2]); return 0; }
+    { Sim s;s.in.target_region_valid=false;
+      for(int i=0;i<60;++i)assert(s.tick().state!=PushState::APPROACH);
+    }
+    { Sim s;s.in.opponent_zone_clear=false;s.in.target_valid=false;
+      for(int i=0;i<20;++i)assert(stopped(s.tick().motion));
+    }
+    { Sim s;s.toCarry();s.in.zone_identity_verified=false;
+      for(int i=0;i<20;++i){auto o=s.tick();assert(o.motion.vx_mps==0 && o.state!=PushState::GATE);}
+    }
+    { Sim s;s.toCarry();s.navigation_ready=false;
+      for(int i=0;i<30;++i)assert(s.tick().motion.vx_mps==0);
+    }
+    { Sim s;s.toCarry();assert(s.until(PushState::OPEN_RELEASE,400));s.drop_available=false;
+      for(int i=0;i<10;++i){auto o=s.tick();assert(stopped(o.motion)&&o.motion.gripper_open==0);}
+    }
     rulesTests();
     captureTests();
     { // Interim firmware presets (2026-10: only -25/0/+25 deg): FAR 0, TRACK = NEAR = 2500.

@@ -12,6 +12,11 @@ find_package(OpenCV REQUIRED)
 
 add_executable(rescue_upper_host
     src/main.cpp
+    src/match_control.cpp
+    src/match_server.cpp
+    src/task_calibration.cpp
+    src/navigation_adapter.cpp
+    src/zone_color.cpp
     src/zone_estimate.cpp
     src/zone_geometry.cpp
     src/keypoint_filter.cpp
@@ -160,10 +165,46 @@ if(BUILD_TESTING)
         LEGACY_ZONE_GEOMETRY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/zone_geometry_inner_v1.json")
     add_test(NAME rescue_stage01_tests COMMAND rescue_stage01_tests)
     set_tests_properties(rescue_stage01_tests PROPERTIES TIMEOUT 20)
-    add_test(NAME rescue_geometry_replay COMMAND rescue_upper_host
+    # Recorded fixture describes the red zone; independent of the live default team.
+    add_test(NAME rescue_geometry_replay COMMAND rescue_upper_host --team red
         --geometry-replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/stage01_geometry.json
         --calibration ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/stage01-camera.synthetic.json
         --zone-geometry ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/zone_geometry_inner_v1.json)
     set_tests_properties(rescue_geometry_replay PROPERTIES
         PASS_REGULAR_EXPRESSION "Geometry replay frames=3 accepted=2 hardware_output=disabled" TIMEOUT 10)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_match_tests tests/match_tests.cpp src/match_control.cpp src/match_server.cpp)
+    target_include_directories(rescue_match_tests PRIVATE include)
+    target_link_libraries(rescue_match_tests PRIVATE pthread)
+    target_compile_options(rescue_match_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_match_tests COMMAND rescue_match_tests)
+    set_tests_properties(rescue_match_tests PROPERTIES TIMEOUT 10)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_task_calibration_tests tests/task_calibration_tests.cpp src/task_calibration.cpp)
+    target_include_directories(rescue_task_calibration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_task_calibration_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_task_calibration_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_task_calibration_tests COMMAND rescue_task_calibration_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_navigation_tests tests/navigation_tests.cpp src/planner.cpp src/navigation_adapter.cpp
+        src/zone_geometry.cpp src/zone_estimate.cpp)
+    target_include_directories(rescue_navigation_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_navigation_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_navigation_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_navigation_tests COMMAND rescue_navigation_tests)
+    set_tests_properties(rescue_navigation_tests PROPERTIES TIMEOUT 20)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_zone_color_tests tests/zone_color_tests.cpp src/zone_color.cpp)
+    target_include_directories(rescue_zone_color_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_zone_color_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_zone_color_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_zone_color_tests COMMAND rescue_zone_color_tests)
 endif()

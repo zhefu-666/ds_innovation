@@ -284,6 +284,20 @@ int main() {
         assert(!link.healthy());
         link.submit(drive);                                   // ignored after stop
         assert(collect(80).empty());
+        {
+            // Output authorization is checked in the resend worker, not only in the task loop.
+            std::atomic<bool> permit{false};
+            MotionLink gated(link_uart,{20,150},[&]{return permit.load();});
+            drive.gripper_open=1;drive.camera_pitch_cdeg=2200;
+            gated.submit(drive);assert(collect(50).empty()); // unarmed: no actuator commands at all
+            permit=true;gated.submit(drive);frames=collect(50);
+            assert(!frames.empty() && vx(frames.back())>0 && frames.back()[9]==1);
+            permit=false;drive.gripper_open=0;drive.camera_pitch_cdeg=3500;gated.submit(drive);
+            frames=collect(70);assert(!frames.empty());
+            const auto& last=frames.back();
+            assert(vx(last)==0 && last[9]==1 && pitch(last)==2200); // freeze last authorized actuator targets
+            gated.stop();collect(40);
+        }
         link_uart.closePort();
         close(mcu);
     }
