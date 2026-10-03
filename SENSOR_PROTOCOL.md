@@ -47,5 +47,4 @@ CRC 覆盖字节 **0..4**（不含帧尾），初值 0xFFFF，多项式 0xA001�
 
 `rescue_sensor_monitor [port] [baud] [seconds]` 现在仅监视A6执行器返回值、时间戳和有效性，不发送运动命令，不是HiPNUC驱动。
 
-
 独立HiPNUC接收现已实现：见 [HIPNUC_IMU.md](HIPNUC_IMU.md)。使用 `rescue_imu_monitor` 读取 `/dev/ttyUSB0`；本文件描述的 `rescue_sensor_monitor` 仍只用于 `/dev/ttyACM0` 上的A6执行器反馈，两者不能混用。

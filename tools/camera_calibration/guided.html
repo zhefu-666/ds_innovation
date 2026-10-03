@@ -6,23 +6,23 @@
 </style>
 <main>
 <header><div><div class="muted">救援机器人 / 相机参数</div><h1>按步骤完成圆点标定</h1></div><span class="badge">9 × 6 对称圆点</span></header>
-<p class="muted">平板负责显示标定板，电脑负责查看相机和拍摄。共 25 张，原图自动保存到上位机。</p>
+<p class="muted">使用实物 9 × 6 对称圆点板；电脑负责查看相机和拍摄。共 25 张，原图自动保存到上位机。</p>
 <section class="card"><h2>在 Foxglove 中同步查看</h2><p>连接类型选择 <strong>Foxglove WebSocket</strong>，连接地址：</p><div class="path" id="foxAddress">等待服务信息…</div><p id="foxStatus" class="muted"></p><p>添加 <strong>Image</strong> 面板，图像话题选择 <code>/calibration/image</code>，可看到流畅的相机实时画面。圆点识别结果在网页的检测图中单独显示。</p><p>添加 <strong>Raw Messages</strong> 面板查看 <code>/calibration/status</code>（当前步骤、已拍数量、识别状态）和 <code>/calibration/result</code>（完成后的参数与误差）。</p><p class="muted">可先点击下方按钮，仅预览而不采集标定照片。拍摄前再填写实测尺寸；拍摄和撤销继续在本网页操作。原主程序与 IMU 的连接仍使用 8765 端口。</p><button id="previewOnly" class="secondary">打开相机，仅预览 / Foxglove 观看</button><p class="muted">打开相机会暂停原项目预览。仅预览不会创建标定会话或保存照片。</p><img id="foxPreview" class="hidden" alt="相机实时预览" style="width:100%;max-width:960px;border-radius:12px"></section>
 <section id="setup" class="grid">
-<div class="card"><h2>1 · 平板显示，量出实际尺寸</h2>
-<p>在平板上打开下面的 PDF，横屏全屏显示整张板。固定缩放和屏幕方向，关闭自动亮度、夜间色温与自动锁屏。调整亮度，避免反光和条纹。相机焦点也需要固定。</p>
+<div class="card"><h2>1 · 测量实物标定板</h2>
+<p>保持板面平整，确认 9 列 × 6 行黑色圆点完整清晰。用尺测量实际圆心跨度，并固定相机焦点。只有没有实物板时才使用下面的备用 PDF。</p>
 <a class="linkbtn secondary" href="/board.pdf" target="_blank">打开备用 9 × 6 圆点板 PDF ↗</a>
-<p>用尺量<strong>圆心到圆心</strong>，不要量圆外缘、纸张边缘或平板边框。可以分别量两个圆的同侧边缘，等价于圆心跨度。</p>
+<p>用尺量<strong>圆心到圆心</strong>，不要量圆外缘或板材边缘。可以分别量两个圆的同侧边缘，等价于圆心跨度。</p>
 <svg viewBox="0 0 500 190" role="img" aria-label="横向9个圆心跨度为8个间距，纵向6个圆心跨度为5个间距">
 <defs><marker id="arrow" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto-start-reverse"><path d="M0 0L6 3L0 6z" fill="#146d61"/></marker></defs>
 <g fill="#203340" id="dots"></g><path d="M78 27H342M406 50V140" stroke="#146d61" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/><text x="144" y="17" font-size="14" fill="#146d61">横向：第 1 → 第 9 圆心</text><text x="418" y="88" font-size="12" fill="#146d61">纵向</text><text x="418" y="108" font-size="12" fill="#146d61">第 1 → 6</text><text x="170" y="184" font-size="12" fill="#526678">示意图，不能用此图代替 PDF 标定</text></svg>
-<p class="notice">9 × 6 圆点板实际尺寸以尺量为准，必须填写尺量值。使用平板备用 PDF 时，原图为横向 96 mm、纵向 60 mm，显示尺寸可能不同，填写后整个拍摄过程不要再缩放 PDF。</p>
+<p class="notice">9 × 6 圆点板实际尺寸以尺量为准，必须填写尺量值。备用 PDF 原图为横向 96 mm、纵向 60 mm；屏幕显示时仍须重新测量。</p>
 </div>
 <div class="card"><h2>2 · 填写测量值</h2>
 <form id="form"><label for="horizontal">横向第 1 到第 9 个圆心跨度 / mm</label><input id="horizontal" type="number" min="4.5" max="900" step="0.1" placeholder="填写实测值，例如 96" required>
 <label for="vertical">纵向第 1 到第 6 个圆心跨度 / mm</label><input id="vertical" type="number" min="3" max="600" step="0.1" placeholder="填写实测值，例如 60" required>
 <p id="spacing" class="muted">程序会分别除以 8 和 5，检查横纵间距是否一致。</p>
-<label><input id="confirm" type="checkbox" required> 已固定平板缩放、方向和亮度，已固定相机焦点</label>
+<label><input id="confirm" type="checkbox" required> 标定板平整、尺寸已实测，且相机焦点已固定</label>
 <p>标定分辨率：<strong id="resolution">读取中</strong>。请使用主程序实际运行的相同模式。</p>
 <button id="start" type="submit">开始相机与分步拍摄</button>
 <p class="muted">开始时会暂停现有项目预览，释放相机；在此页面查看标定画面。</p></form></div>
@@ -33,12 +33,12 @@
 <div id="error" role="alert"></div>
 <section id="result" class="card hidden"><h2 id="resultTitle">相机参数已生成</h2><p id="summary"></p><div id="warnings" class="notice hidden"></div><pre id="numbers"></pre><p>无需手抄参数。下载的 <strong>intrinsics.yaml</strong> 包含 camera_matrix、dist_coeffs 和图像尺寸。</p><div class="actions"><a class="linkbtn" href="/intrinsics.yaml" download="intrinsics.yaml">下载参数 YAML</a><a href="/report.json" download="report.json" class="linkbtn secondary">下载误差报告</a><a href="/instructions.txt" download="使用说明.txt" class="linkbtn secondary">下载接入说明</a></div>
 <h2>参数填到哪里？</h2><ol><li>后续地面标定时，将本次 <code>intrinsics.yaml</code> 的路径填入标定命令的 <code>--intrinsics</code> 参数。</li><li>地面标定通过后，完整结果放到项目的 <code>config/camera.yaml</code>。</li><li>项目配置字段为 <code>calibration_file: ./config/camera.yaml</code>。当前主程序尚未接通 YAML 读取，填入路径不会自动启用距离计算。</li></ol><p class="notice">本次只求内参与镜头畸变。相机安装位置、朝向、地面映射需要另外测量；低重投影误差也不能代替实际距离验收。</p></section>
-<footer>退出方式：SSH 终端按 Ctrl+C。已保存照片不会删除；中途改了屏幕缩放或相机焦点，请重新启动并完整重拍。</footer>
+<footer>退出方式：SSH 终端按 Ctrl+C。已保存照片不会删除；中途更换标定板或改变相机焦点，请重新启动并完整重拍。</footer>
 </main>
 <script>
 const $=id=>document.getElementById(id);let state={},pending=false,polling=false,shown=false,streamTarget=null;
 for(let y=0;y<6;y++)for(let x=0;x<9;x++){let c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('cx',78+x*33);c.setAttribute('cy',50+y*18);c.setAttribute('r',4);$('dots').append(c)}
-function measure(){const x=Number($('horizontal').value)/8,y=Number($('vertical').value)/5;if(x&&y)$('spacing').textContent=`横向间距 ${x.toFixed(3)} mm；纵向间距 ${y.toFixed(3)} mm。`}
+function measure(){const x=Number($('horizontal').value)/8,y=Number($('vertical').value)/5;if(x&&y)$('spacing').textContent=`横向间距 ${x.toFixed(3)} mm；纵向间距 ${y.toFixed(3)} mm。${Math.min(x,y)<8?' 请核对单位：若量到的是 32 cm，应填写 320 mm。':''}`}
 $('previewOnly').onclick=()=>action('preview',{});
 $('horizontal').oninput=measure;$('vertical').oninput=measure;
 async function action(path,data){if(pending)return;pending=true;render();$('error').textContent='';try{const r=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(!r.ok)throw Error(j.error);state=j;if(path==='capture')$('message').textContent=`第 ${state.count} 张原图已保存。`;if(path==='undo')$('message').textContent='已撤销，旧照片保留在 retakes 目录。';}catch(e){$('error').textContent=e.message}finally{pending=false;render()}}

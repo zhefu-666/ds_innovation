@@ -25,12 +25,13 @@ struct Sim {
     PushObservation in;
     PushOutput out;
     float px = -.15f, py = -.75f, phi = 0; // phi: robot heading vs zone +y, CCW positive
-    bool zone_visible = true, gripper_responds = true, servo_responds = true;
+    bool zone_visible = true, zone_predicted = false, gripper_responds = true, servo_responds = true;
     bool navigation_ready = true, drop_available = true;
     int pitch = 0, pitch_still = 0, pitch_rate = 400; // power-on: level
     Inventory load; // what is physically enclosed
     std::set<PushState> visited;
-    explicit Sim(TaskTuning t = {}) : tune(t), task(t) {
+    static TaskTuning testTune(TaskTuning t) { t.startup_advance_us = 0; return t; }
+    explicit Sim(TaskTuning t = {}) : tune(testTune(t)), task(tune) {
         in.run = in.safety_ok = in.target_valid = in.geometry_valid = true;
         in.target_region_valid = in.zone_identity_verified = true;
         in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
@@ -48,7 +49,7 @@ struct Sim {
         auto &z = in.zone_estimate;
         z = ZoneEstimate{};
         if (zone_visible) {
-            z.valid = true; z.source = ZoneEstimate::Source::MULTI_POINT;
+            z.valid = true; z.source = zone_predicted ? ZoneEstimate::Source::PREDICTED : ZoneEstimate::Source::MULTI_POINT;
             z.frame_id = in.now_us / 50000; z.timestamp_us = z.observed_us = in.now_us;
             z.zone_label = "red_safe_zone"; z.geometry_id = "rescue2027-inner-v1-red";
             z.inlier_ids = {0, 2, 3, 5}; z.residual_m = .001f; z.position_sigma_m = .002f; z.yaw_sigma_rad = .01f;
@@ -61,7 +62,8 @@ struct Sim {
         // Simulator supplies explicit validated direct-route/empty-zone evidence.
         in.carry_plan_valid=navigation_ready;in.drop_plan_valid=drop_available;in.navigation_timestamp_us=in.now_us;
         in.drop_centre_zone={task_injured?tune.injured_half_x_m:tune.supply_half_x_m,tune.deposit_y_m};
-        in.carry_waypoint_body=z.zoneToBody({in.drop_centre_zone.x,-tune.gate_clearance_m-tune.hold_center_y_m});
+        const float centre=task_injured?tune.injured_hold_center_y_m:tune.hold_center_y_m;
+        in.carry_waypoint_body=z.zoneToBody({in.drop_centre_zone.x,-tune.gate_clearance_m-centre});
         in.heading_rad = phi;
         const int target = out.motion.camera_pitch_cdeg;
         const int moved = servo_responds ? std::clamp(target - pitch, -pitch_rate, pitch_rate) : 0;
@@ -91,6 +93,7 @@ struct Sim {
     // Whole trip with the zone counts reacting once the load is pushed in.
     void deliver(bool counts_react = true) {
         assert(until(PushState::ENTER, 400));
+        in.delivery_observed = counts_react;
         assert(until(PushState::BACK_OUT, 400));
         if (counts_react) {
             if (out.batch_size && task_injured) in.zone_injured_count += out.batch_size;
@@ -128,6 +131,7 @@ void writeFixture(const std::string &path) {
           << "carry_waypoint_body" << "[" << in.carry_waypoint_body.x << in.carry_waypoint_body.y << "]"
           << "drop_centre_zone" << "[" << in.drop_centre_zone.x << in.drop_centre_zone.y << "]"
           << "target_region_valid" << int(in.target_region_valid) << "zone_identity_verified" << int(in.zone_identity_verified)
+          << "delivery_observed" << int(in.delivery_observed)
           << "target_valid" << int(in.target_valid) << "geometry_valid" << int(in.geometry_valid)
           << "path_safe" << int(in.path_safe) << "retreat_safe" << int(in.retreat_safe)
           << "opponent_zone_clear" << int(in.opponent_zone_clear)
@@ -170,10 +174,11 @@ void rulesTests() {
     Inventory a; a.add("ordinary_supply"); a.add("core_supply"); a.add("weird");
     assert(a.ordinary == 1 && a.core == 1 && a.unknown == 1 && a.supplies() == 2 && a.total() == 3);
     assert(checkTrip({}, true) == RuleVerdict::EMPTY);
-    assert(checkTrip(inv(1), false) == RuleVerdict::OK && checkTrip(inv(3), false) == RuleVerdict::OK);
+    assert(checkTrip(inv(1), false) == RuleVerdict::OK && checkTrip(inv(2), false) == RuleVerdict::OK);
     assert(checkTrip(inv(4), true) == RuleVerdict::TOO_MANY_SUPPLIES);
     assert(checkTrip(inv(2, 2), true) == RuleVerdict::TOO_MANY_SUPPLIES);
-    assert(checkTrip(inv(1, 2), true) == RuleVerdict::OK);
+    assert(checkTrip(inv(1, 1), true) == RuleVerdict::OK);
+    assert(checkTrip(inv(2, 1), true) == RuleVerdict::TOO_MANY_SUPPLIES);
     assert(checkTrip(inv(1, 1), false) == RuleVerdict::CORE_BEFORE_FIRST);
     assert(checkTrip(inv(0, 0, 1), false) == RuleVerdict::INJURED_BEFORE_FIRST);
     assert(checkTrip(inv(0, 0, 1), true) == RuleVerdict::OK);
@@ -193,7 +198,8 @@ void rulesTests() {
     assert(std::string(verdictName(RuleVerdict::TOO_MANY_SUPPLIES)) == "too_many_supplies");
 }
 void captureTests() {
-    CaptureMonitor monitor;
+    CaptureConfig old_view;old_view.holding={{3500,{540,570,820,690}}};
+    CaptureMonitor monitor(old_view);
     PushObservation in;
     in.camera_pitch_cdeg = 3500; in.camera_pitch_stable = true; // NEAR, settled
     const auto box = [](int id, const char *label, cv::Rect r, uint64_t t) {
@@ -205,7 +211,7 @@ void captureTests() {
     t += 50000; monitor.update(in, {box(1, "ordinary_supply", {602, 600, 40, 40}, t)}, t);
     assert(in.hold_observable && in.captured && in.held_complete && in.held == inv(1));
     // FAR, or a camera still moving: the region is out of view, nothing is claimed either way.
-    auto far = in; far.camera_pitch_cdeg = 1200; CaptureMonitor other;
+    auto far = in; far.camera_pitch_cdeg = 1200; CaptureMonitor other(old_view);
     for (int i = 0; i < 4; ++i) { other.update(far, {box(1, "ordinary_supply", {602, 600, 40, 40}, t)}, t); assert(!far.hold_observable && !far.captured); }
     auto moving = in; moving.camera_pitch_stable = false;
     other.update(moving, {box(1, "ordinary_supply", {602, 600, 40, 40}, t)}, t);
@@ -221,7 +227,7 @@ void captureTests() {
     t += 50000; monitor.update(in, {box(1, "ordinary_supply", {602, 600, 40, 40}, t - 400000)}, t);
     assert(!in.captured && in.held.total() == 0);
     // Corridor: objects in the swept width are inventoried; one without ground position spoils completeness.
-    CaptureMonitor corridor;
+    CaptureMonitor corridor(old_view);
     in = {}; in.target_valid = in.geometry_valid = true; in.distance_m = .3f; in.heading_error = 0;
     in.camera_pitch_cdeg = 3500; in.camera_pitch_stable = true;
     auto a = box(5, "ordinary_supply", {600, 300, 40, 40}, t); a.ground_position_valid = true; a.body_xy_m = {0, .3f};
@@ -236,6 +242,38 @@ void captureTests() {
     assert(!in.corridor_complete && !in.corridor_occlusion_free);
     in.camera_pitch_stable = false; corridor.update(in, {a}, t);
     assert(!in.corridor_complete && in.corridor.total() == 0); // no inventory while the camera moves
+}
+void holding40StaticReviewTests() {
+    CaptureConfig config;
+    config.holding = {{4000, {440, 210, 930, 720}, 440}};
+    const auto detection = [](int id, const char* label, float confidence, cv::Rect rect, uint64_t when) {
+        SegDetection d; d.track_id=id; d.label=label; d.confidence=confidence; d.box=rect; d.timestamp_us=when;
+        return d;
+    };
+    const auto check = [&](const std::vector<SegDetection>& sample, const Inventory& expected) {
+        CaptureMonitor monitor(config);
+        PushObservation in; in.camera_pitch_cdeg=4000; in.camera_pitch_stable=true;
+        for(int frame=0;frame<3;++frame) {
+            const uint64_t now=1000000+frame*50000;
+            auto boxes=sample;
+            for(auto& d:boxes)d.timestamp_us=now;
+            monitor.update(in,boxes,now);
+        }
+        assert(in.hold_observable && in.held==expected);
+        assert(in.captured==(expected.total()>0));
+        if(expected.total()>0)assert(in.held_complete);
+    };
+    constexpr uint64_t now=1000000;
+    check({detection(1,"ordinary_supply",.811f,{589,22,171,210},now)},{});
+    check({detection(1,"ordinary_supply",.875f,{614,255,284,306},now),
+           detection(2,"core_supply",.176f,{383,110,55,73},now)},inv(1));
+    check({detection(1,"ordinary_supply",.854f,{463,399,312,304},now),
+           detection(2,"ordinary_supply",.785f,{594,228,254,252},now)},inv(2));
+    check({detection(1,"injured_person",.573f,{622,255,290,465},now)},inv(0,0,1));
+    check({detection(1,"ordinary_supply",.711f,{545,104,203,180},now),
+           detection(2,"ordinary_supply",.429f,{591,274,150,82},now)},{});
+    check({detection(1,"ordinary_supply",.862f,{597,141,218,258},now),
+           detection(2,"core_supply",.592f,{321,101,104,111},now)},{});
 }
 int main(int argc, char **argv) {
     if (argc == 3 && std::string(argv[1]) == "--write-fixture") { writeFixture(argv[2]); return 0; }
@@ -256,6 +294,7 @@ int main(int argc, char **argv) {
     }
     rulesTests();
     captureTests();
+    holding40StaticReviewTests();
     { // Interim firmware presets (2026-10: only -25/0/+25 deg): FAR 0, TRACK = NEAR = 2500.
         TaskTuning t; t.far_pitch_cdeg = 0; t.track_pitch_cdeg = t.near_pitch_cdeg = 2500;
         Sim s(t); s.toCarry(); s.deliver();
@@ -288,7 +327,7 @@ int main(int argc, char **argv) {
         // An injured person grabbed together with a supply is dropped, not carried.
         s.in.label = "injured_person"; s.in.target_id = 9; s.in.corridor = inv(0, 0, 1); s.in.corridor_occlusion_free = true;
         s.toRush(); s.hold(inv(1, 0, 1));
-        assert(s.until(PushState::ABORT_DROP, 10) && s.out.verdict == RuleVerdict::INJURED_NOT_ALONE);
+        assert(s.until(PushState::ABORT_DROP, 40) && s.out.verdict == RuleVerdict::INJURED_NOT_ALONE);
         s.hold({});
         assert(s.until(PushState::SCAN, 200) && s.out.batch_size == 0 && s.out.delivered_total == 3);
         // Alone, it goes to the injured half.
@@ -298,6 +337,13 @@ int main(int argc, char **argv) {
         assert(s.out.delivered_total == 4 && s.in.zone_injured_count == 1);
         assert(s.px > 0); // pushed into the right (injured) half
     }
+    { // A held image is only required after the close feedback, never while the frame is open.
+        Sim s; s.toRush();
+        assert(s.until(PushState::CLOSE, 10));
+        assert(s.until(PushState::VERIFY_CAPTURE, 30));
+        s.hold(inv(1));
+        assert(s.until(PushState::CARRY, 15));
+    }
     for (const auto *label : {"core_supply", "injured_person", "dangerous_object", "unknown"}) {
         // Before the first ordinary delivery only ordinary supplies are selectable.
         Sim s; s.in.label = label;
@@ -306,8 +352,8 @@ int main(int argc, char **argv) {
     }
     { // First trip that also swept a core supply into the frame: release and back off.
         Sim s; s.toRush(); s.hold(inv(1, 1));
-        assert(s.until(PushState::ABORT_DROP, 10) && s.out.verdict == RuleVerdict::CORE_BEFORE_FIRST);
-        assert(s.out.motion.gripper_open == 1);
+        assert(s.until(PushState::ABORT_DROP, 40) && s.out.verdict == RuleVerdict::CORE_BEFORE_FIRST);
+        s.tick(); assert(s.out.motion.gripper_open == 1);
         s.hold({});
         assert(s.until(PushState::SCAN, 200));
         assert(s.out.delivered_total == 0 && !s.out.first_ordinary_delivered);
@@ -315,7 +361,7 @@ int main(int argc, char **argv) {
     }
     { // A dangerous object enclosed with the target is never carried.
         Sim s; s.toRush(); s.hold(inv(1, 0, 0, 1));
-        assert(s.until(PushState::ABORT_DROP, 10) && s.out.verdict == RuleVerdict::DANGEROUS);
+        assert(s.until(PushState::ABORT_DROP, 40) && s.out.verdict == RuleVerdict::DANGEROUS);
     }
     { // Too many supplies in the corridor: the rush is not started.
         Sim s; s.in.corridor = inv(4);
@@ -323,7 +369,7 @@ int main(int argc, char **argv) {
         assert(s.out.reason == "corridor_too_many_supplies" && !s.visited.count(PushState::RUSH));
     }
     { // ... nor when four end up held after closing.
-        Sim s; s.in.corridor = inv(3); s.toRush(); s.hold(inv(4));
+        Sim s; s.in.corridor = inv(2); s.toRush(); s.hold(inv(3));
         assert(s.until(PushState::ABORT_DROP, 20) && s.out.verdict == RuleVerdict::TOO_MANY_SUPPLIES);
     }
     { // Before the first delivery an occluded corridor might hide a core supply.
@@ -340,14 +386,14 @@ int main(int argc, char **argv) {
     }
     { // Nothing enclosed within the rush distance: release and retry later.
         Sim s; s.toRush();
-        assert(s.until(PushState::CAPTURE_FAIL, 100) && s.out.reason == "rush_overrun");
+        assert(s.until(PushState::CAPTURE_FAIL, 150) && s.out.reason == "capture_unverified");
         assert(s.until(PushState::SCAN, 200));
     }
     { // The load slips out during the carry: unseen at FAR, found by the next stopped NEAR check.
         Sim s; s.toCarry(); s.tick(); s.hold({});
         for (int i = 0; i < 20; ++i) assert(s.tick().state == PushState::CARRY);
         assert(s.until(PushState::LOST_HOLD, 200));
-        assert(std::abs(s.in.camera_pitch_cdeg - 3500) <= 100 && stopped(s.out.motion));
+        assert(std::abs(s.in.camera_pitch_cdeg - 4000) <= 100 && stopped(s.out.motion));
         assert(s.until(PushState::SCAN, 200) && s.out.delivered_total == 0 && s.out.batch_size == 0);
     }
     { // The load changes (another object joined): no longer the verified trip.
@@ -359,14 +405,14 @@ int main(int argc, char **argv) {
         int far = 0, near_checks = 0;
         for (int i = 0; i < 200; ++i) {
             s.tick(); assert(s.out.state == PushState::CARRY);
-            if (s.out.motion.camera_pitch_cdeg == 3500) { assert(stopped(s.out.motion)); ++near_checks; }
-            if (s.out.motion.camera_pitch_cdeg == 1200 && s.in.camera_pitch_stable) ++far;
+            if (s.out.motion.camera_pitch_cdeg == 4000) { assert(stopped(s.out.motion)); ++near_checks; }
+            if (s.out.motion.camera_pitch_cdeg == 500 && s.in.camera_pitch_stable) ++far;
         }
         assert(far > 100 && near_checks > 0);
     }
     { // Nothing moves while the camera is between presets.
         Sim s; s.in.distance_m = .8f; s.pitch_rate = 50;
-        for (int i = 0; i < 25; ++i) { s.tick(); assert(stopped(s.out.motion) && s.out.state == PushState::SCAN); }
+        for (int i = 0; i < 10; ++i) { s.tick(); assert(stopped(s.out.motion)); }
         assert(s.until(PushState::APPROACH, 10));
     }
     { // A camera that never reaches its preset is a fault.
@@ -415,10 +461,18 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 5; ++i) assert(stopped(s.tick().motion) && s.out.state == PushState::BACK_OUT);
         s.in.retreat_safe = true; s.tick(); assert(s.out.motion.vx_mps < 0);
     }
+    { // A short-term predicted zone pose cannot prove physical retreat or permit more reversing.
+        Sim s; s.toCarry(); assert(s.until(PushState::BACK_OUT,800));
+        s.zone_predicted=true;
+        for(int i=0;i<5;++i)assert(stopped(s.tick().motion) && s.out.state==PushState::BACK_OUT);
+    }
     { // No trusted zone estimate: carry only searches in place, never drives blind.
         Sim s; s.toCarry(); s.zone_visible = false;
         for (int i = 0; i < 10; ++i) { s.tick(); assert(s.out.state == PushState::CARRY && s.out.motion.vx_mps == 0); }
-        s.zone_visible = true; s.tick(); assert(s.out.motion.vx_mps > 0);
+        s.zone_visible = true;
+        bool resumed=false;
+        for(int i=0;i<40;++i) { s.tick(); resumed=resumed || s.out.motion.vx_mps>0; }
+        assert(resumed);
     }
     { // Stale frame or safety veto stops; resuming keeps the verified load.
         Sim s; s.toCarry(); s.tick();

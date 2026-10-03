@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "measured": 1,
+  "note": "Operator-confirmed runtime candidate: fixed wires, photo-based body envelope, 40-degree holding review, and real gripper operation. Dynamic obstacle clearance and MCU disconnect stop remain separate acceptance items.",
+  "image_width": 1280,
+  "image_height": 720,
+  "grasp_trigger_y_m": 0.20,
+  "hold_center_y_m": 0.12,
+  "injured_hold_center_y_m": 0.14,
+  "mouth_y_m": 0.21,
+  "closed_front_y_m": 0.225,
+  "rear_grip_boundary_y_m": 0.097,
+  "max_inner_width_m": 0.157,
+  "max_outer_width_m": 0.172,
+  "corridor_half_width_m": 0.11,
+  "load_radius_m": 0.32,
+  "holding_views": [
+    {"pitch_cdeg": 4000, "area": [440, 210, 930, 720], "min_visible_bottom_y_px": 440}
+  ]
+}

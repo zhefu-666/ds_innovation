@@ -148,7 +148,7 @@ int main() {
     invalidConfig({"test","--pitch-presets","0,25.5,2500"});                      // integers only
     {
         const char* none[]={"test","--dry-run"};
-        assert((parseArgs(2,const_cast<char**>(none)).pitch_presets_cdeg==std::array<int16_t,3>{0,2500,2500}));
+        assert((parseArgs(2,const_cast<char**>(none)).pitch_presets_cdeg==std::array<int16_t,3>{500,500,4000}));
         const char* p[]={"test","--dry-run","--pitch-presets","1200,2200,3500"};
         assert((parseArgs(4,const_cast<char**>(p)).pitch_presets_cdeg==std::array<int16_t,3>{1200,2200,3500}));
     }

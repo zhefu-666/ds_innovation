@@ -47,6 +47,7 @@ void CaptureMonitor::update(PushObservation &in, const std::vector<SegDetection>
         if (!touches) continue;
         if (!inside && !h.contains(c.x, c.y)) { ambiguous = true; continue; } // straddles from outside
         if (!inside) ambiguous = true; // centre inside but box crosses the edge
+        if (b.y + b.height < v->min_visible_bottom_y_px) { ambiguous = true; continue; }
         in.held.add(labelOf(*d));
         if (d->track_id < 0) { followed = false; continue; }
         auto &track = next[d->track_id];

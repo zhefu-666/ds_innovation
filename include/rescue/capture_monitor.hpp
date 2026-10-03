@@ -11,10 +11,11 @@ namespace rescue {
 struct HoldingView {
     int16_t pitch_cdeg;   // servo readback this region was calibrated at
     RectArea area;        // inside the closed frame, image px
+    float min_visible_bottom_y_px = 0; // object must reach this depth, even if clipped by image bottom
 };
 struct CaptureConfig {
-    // Only pitches that show the whole closed frame belong here (25 deg did not; NEAR = 35 deg).
-    std::vector<HoldingView> holding{{3500, {540.f, 570.f, 820.f, 690.f}}};
+    // No uncalibrated angle is observable by default.
+    std::vector<HoldingView> holding;
     int16_t pitch_tolerance_cdeg = 100;
     float edge_margin_px = 6.f;        // a box crossing the region edge is ambiguous, not held
     float follow_tolerance_px = 12.f;  // held objects move with the robot: near-static in image

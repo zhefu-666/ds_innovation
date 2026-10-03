@@ -30,17 +30,17 @@ STEPS = [
     '左下区域，完整保留所有圆点', '左侧中央，完整保留所有圆点',
     '中央靠近，让圆点阵列占画面宽度约 60%～80%',
     '中央稍远，让圆点阵列占画面宽度约 30%～40%',
-    '中央，平板左边靠近相机，倾斜约 20°',
-    '中央，平板右边靠近相机，倾斜约 20°',
-    '中央，平板上边靠近相机，倾斜约 20°',
-    '中央，平板下边靠近相机，倾斜约 20°',
-    '偏左，平板左边靠近相机，倾斜约 35°',
-    '偏右，平板右边靠近相机，倾斜约 35°',
-    '偏上，平板上边靠近相机，倾斜约 35°',
-    '偏下，平板下边靠近相机，倾斜约 35°',
+    '中央，标定板左边靠近相机，倾斜约 20°',
+    '中央，标定板右边靠近相机，倾斜约 20°',
+    '中央，标定板上边靠近相机，倾斜约 20°',
+    '中央，标定板下边靠近相机，倾斜约 20°',
+    '偏左，标定板左边靠近相机，倾斜约 35°',
+    '偏右，标定板右边靠近相机，倾斜约 35°',
+    '偏上，标定板上边靠近相机，倾斜约 35°',
+    '偏下，标定板下边靠近相机，倾斜约 35°',
     '左上区域，同时向左右和上下方向倾斜',
     '右下区域，换一个左右和上下倾斜姿态',
-    '中央，平板在自身平面内旋转约 20°，再稍微倾斜',
+    '中央，标定板在自身平面内旋转约 20°，再稍微倾斜',
     '验证照片：偏左、稍近，换一个倾斜姿态',
     '验证照片：偏右、稍远，换一个倾斜姿态',
     '验证照片：中央，同时向两个方向倾斜',
@@ -53,7 +53,7 @@ def spacing_from_spans(horizontal, vertical):
     if not all(math.isfinite(v) and 0.5 <= v <= 100 for v in (x, y)):
         raise ValueError('尺寸无效：请填写毫米数，横向量第 1 到第 9 个圆心，纵向量第 1 到第 6 个圆心。')
     if abs(x-y) / ((x+y)/2) > .01:
-        raise ValueError('横纵圆心间距相差超过 1%，请检查量尺位置或平板是否拉伸了 PDF。')
+        raise ValueError('横纵圆心间距相差超过 1%，请检查量尺位置或备用 PDF 是否拉伸。')
     return (x+y)/2
 
 
@@ -76,8 +76,7 @@ def detect_circles(frame, pattern=PATTERN):
         flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=detector)
     if not found or len(centers) != expected:
         return None
-    # Reject a subgrid of a larger (e.g. retired 10 x 7) board.
-    return None if calibrate.has_extra_grid_blobs(blobs, centers, pattern) else centers
+    return centers
 
 
 def session_pattern(measurement):
@@ -96,7 +95,7 @@ def quality(frame, centers):
     x, y, bw, bh = cv2.boundingRect(centers)
     gray = cv2.cvtColor(frame[y:y+bh, x:x+bw], cv2.COLOR_BGR2GRAY)
     if cv2.Laplacian(gray, cv2.CV_64F).var() < 30:
-        return '图像模糊，请保持平板静止，检查焦点。'
+        return '图像模糊，请保持标定板静止，检查焦点。'
     return ''
 
 
@@ -198,7 +197,7 @@ class Wizard:
                 raise ValueError('本次会话已开始，不能中途修改尺寸或重复开始。需要重拍时请重新启动程序。')
             spacing = spacing_from_spans(values['horizontal_mm'], values['vertical_mm'])
             if values.get('confirmed') is not True:
-                raise ValueError('请确认已锁定屏幕缩放、方向和相机焦点。')
+                raise ValueError('请确认标定板平整、尺寸已实测且相机焦点固定。')
             self.begin_preview()
             session = Path(self.args.output).resolve()/('circles_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6])
             (session/'samples').mkdir(parents=True, exist_ok=False)
@@ -351,7 +350,7 @@ class Wizard:
             if self.error: raise ValueError(self.error)
             if self.centers is None: raise ValueError('尚未识别完整圆点阵列。')
             if duplicate(self.centers, self.observations):
-                raise ValueError('与已保存的姿态太相近，请按当前提示移动或倾斜平板。')
+                raise ValueError('与已保存的姿态太相近，请按当前提示移动或倾斜标定板。')
             index = len(self.observations)+1
             path = self.session/'samples'/f'{index:03d}.png'
             if not cv2.imwrite(str(path), self.frame):

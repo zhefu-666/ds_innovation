@@ -47,6 +47,7 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
     flag("target_region_valid", in.target_region_valid);
     flag("zone_identity_verified", in.zone_identity_verified);
     flag("opponent_zone_clear", in.opponent_zone_clear); flag("target_in_zone", in.target_in_zone);
+    flag("delivery_observed", in.delivery_observed);
     flag("corridor_complete", in.corridor_complete); flag("corridor_occlusion_free", in.corridor_occlusion_free);
     flag("hold_observable", in.hold_observable);
     flag("captured", in.captured); flag("held_complete", in.held_complete);
@@ -207,6 +208,7 @@ int main(int argc, char **argv) {
         tuning.far_pitch_cdeg = config.pitch_presets_cdeg[0];
         tuning.track_pitch_cdeg = config.pitch_presets_cdeg[1];
         tuning.near_pitch_cdeg = config.pitch_presets_cdeg[2];
+        tuning.startup_advance_us = uint64_t(config.startup_advance_ms) * 1000;
         float measured_load_radius=0;
         CaptureConfig capture_config;capture_config.holding.clear(); // uncalibrated is unobservable
         capture_config.image_height_px=config.frame_height;
@@ -379,7 +381,12 @@ int main(int argc, char **argv) {
                 geometry_result=geometry->process(geometry_frame,points,detections);
                 detections=geometry_result.detections;
             }
-            const bool locked=previous.state==PushState::APPROACH || previous.state==PushState::PREPARE || previous.state==PushState::RUSH;
+            const bool locked=previous.state==PushState::APPROACH || previous.state==PushState::PREPARE ||
+                previous.state==PushState::RUSH || previous.state==PushState::CLOSE ||
+                previous.state==PushState::VERIFY_CAPTURE || previous.state==PushState::CARRY ||
+                previous.state==PushState::GATE || previous.state==PushState::OPEN_RELEASE ||
+                previous.state==PushState::ENTER || previous.state==PushState::BACK_OUT ||
+                previous.state==PushState::VERIFY_DELIVERY;
             auto input = makePushObservation(detections, observed_at,
                 previous.first_ordinary_delivered, config.confidence,
                 locked?previous.target_id:-1,task.rejectedTargets(observed_at));

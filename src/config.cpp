@@ -86,6 +86,7 @@ void printUsage(const char *program) {
         << "                      needs --imu, reads gripper and pitch feedback from the same port\n"
         << "  --auto-run          Request START once after live preflight; never auto-resume faults\n"
         << "  --match-seconds N   Competition duration, default 180 s (1..86400)\n"
+        << "  --startup-advance-ms N  Initial straight advance before scan, default 10000 (0..60000)\n"
         << "  --zone-color-calibration P  Validated red/blue zone color thresholds\n"
         << "  --task-calibration P  Measured gripper geometry and NEAR image region JSON\n"
         << "  --match-socket P    Local control socket, default /tmp/rescue-match.sock\n"
@@ -93,7 +94,7 @@ void printUsage(const char *program) {
         << "  --sensor-timeout-ms N  Sensor freshness timeout, default 200\n"
         << "  --tof-stop-m X      ToF emergency-stop distance, default 0.18\n"
         << "  --imu-tilt-deg X    Body pitch/roll stop limit, default 12 (ground mapping uses its own tighter limit)\n"
-        << "  --pitch-presets F,T,N  Camera FAR,TRACK,NEAR presets in 0.01 deg, positive down, default 0,2500,2500\n"
+        << "  --pitch-presets F,T,N  Camera FAR,TRACK,NEAR presets in 0.01 deg, positive down, default 500,500,4000\n"
         << "                      (wire pitch uses integer degrees); needs -4000<=F<=T<=N<=4000\n"
         << "  --classes CSV       Raw model class names in tensor order\n"
         << "  --help              Show this help\n";
@@ -231,6 +232,10 @@ Config parseArgs(int argc, char **argv) {
             const auto text=needValue(arg); size_t used=0; const long v=std::stol(text,&used);
             if(used!=text.size() || v<1 || v>86400) throw std::runtime_error("--match-seconds must be 1..86400");
             config.match_seconds=static_cast<uint32_t>(v);
+        } else if (arg == "--startup-advance-ms") {
+            const auto text=needValue(arg);size_t used=0;const auto v=std::stoul(text,&used);
+            if(used!=text.size()||v>60000)throw std::runtime_error("--startup-advance-ms must be 0..60000");
+            config.startup_advance_ms=static_cast<uint32_t>(v);
         } else if (arg == "--zone-color-calibration") {
             config.zone_color_file=needValue(arg);
         } else if (arg == "--task-calibration") {

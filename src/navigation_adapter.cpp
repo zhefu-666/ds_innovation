@@ -27,7 +27,8 @@ void CarryNavigator::update(PushObservation& in,const PushOutput& previous) cons
         in.drop_plan_valid=true;in.drop_centre_zone=plan.centre_zone_m;
         in.navigation_timestamp_us=in.zone_estimate.timestamp_us;return;
     }
-    const auto gate=in.zone_estimate.zoneToBody({plan.centre_zone_m.x,-tuning_.gate_clearance_m-tuning_.hold_center_y_m});
+    const float centre_y=previous.cargo_injured?tuning_.injured_hold_center_y_m:tuning_.hold_center_y_m;
+    const auto gate=in.zone_estimate.zoneToBody({plan.centre_zone_m.x,-tuning_.gate_clearance_m-centre_y});
     const auto route=routes_.planCarry(gate,in.navigation_scene,in.now_us);
     if(!route.valid || route.waypoints_m.size()<2)return;
     in.drop_plan_valid=in.carry_plan_valid=true;

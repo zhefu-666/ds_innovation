@@ -119,7 +119,7 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,const KeypointFr
 }
 void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const ExpectedStop& stop,
                              const std::string& team,uint64_t now) const {
-    in.target_region_valid=false;in.target_in_zone=false;
+    in.target_region_valid=false;in.target_in_zone=false;in.delivery_observed=false;
     in.zone_identity_verified=r.identity_verified;
     in.geometry_valid=false;in.zone_valid=false;in.zone_own=false;in.zone_class.clear();
     in.zone_estimate=r.zone;
@@ -137,6 +137,9 @@ void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const E
         const bool inside=std::abs(q.x)<geometry_.width_m/2-radius && q.y>radius && q.y<geometry_.depth_m-radius;
         const bool outside=std::abs(q.x)>geometry_.width_m/2+radius || q.y < -radius || q.y>geometry_.depth_m+radius;
         in.target_region_valid=inside||outside;in.target_in_zone=inside;
+        // Delivery is a direct local observation of the carried target entering our
+        // independently identified zone. It does not depend on inventory counts.
+        if (inside && in.zone_own) in.delivery_observed=true;
     }
     if(!in.zone_identity_verified || !stop.valid||!in.target_valid||stop.target_id!=in.target_id||stop.frame_id!=r.zone.frame_id||stop.capture_us!=r.zone.timestamp_us)return;
     const auto decision=classifyExpectedStop(geometry_,r.zone,stop.body_m,stop.radius_m,now);

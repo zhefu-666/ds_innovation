@@ -90,8 +90,10 @@ class GuidedTests(unittest.TestCase):
         frame = board(); centers = g.detect_circles(frame)
         self.assertIsNotNone(centers)
         self.assertEqual(len(centers), 54)
-        # The retired 10 x 7 board must not be mistaken for the new 9 x 6 board.
-        self.assertIsNone(g.detect_circles(board(10, 7)))
+        # A hand or background mark near one edge is not another board row.
+        with_one_mark = frame.copy()
+        cv2.circle(with_one_mark, (100, 480), 12, (0, 0, 0), -1)
+        self.assertIsNotNone(g.detect_circles(with_one_mark))
         self.assertEqual(len(g.detect_circles(board(10, 7), (10, 7))), 70)
         self.assertEqual(g.quality(frame, centers), '')
         self.assertTrue(g.duplicate(centers[::-1], [centers]))

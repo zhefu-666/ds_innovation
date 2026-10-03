@@ -6,6 +6,7 @@ namespace rescue {
 const char *PushTask::name(PushState s) {
     switch (s) {
     case PushState::WAIT_START: return "WAIT_START";
+    case PushState::START_ADVANCE: return "START_ADVANCE";
     case PushState::SCAN: return "SCAN";
     case PushState::APPROACH: return "APPROACH";
     case PushState::PREPARE: return "PREPARE";
@@ -30,10 +31,13 @@ void PushTask::enter(PushState s, uint64_t now, const char *why) {
     state_ = s; phase_us_ = now; travel_ = 0; travel_limit_ = 0;
     confirmations_ = 0; misses_ = 0; hold_misses_ = 0; step_ = 0; turned_ = 0; heading_seen_ = false;
     track_close_ = false;
+    retreat_origin_valid_ = false;
+    if (s == PushState::START_ADVANCE) delivery_seen_ = false;
     if (why && *why) reason_ = why;
 }
 void PushTask::clearTrip() {
     drop_locked_=false;drop_centre_zone_={};
+    delivery_seen_=false;
     target_id_ = -1; label_.clear(); trip_ = {}; pending_ = {}; seen_ = {};
     verdict_ = RuleVerdict::OK;
 }
@@ -82,8 +86,8 @@ int16_t PushTask::desiredPitch() const {
     switch (state_) {
     case PushState::SCAN: case PushState::TURN_SCAN: case PushState::VERIFY_DELIVERY: return t_.far_pitch_cdeg;
     case PushState::APPROACH: return track_close_ ? t_.track_pitch_cdeg : t_.far_pitch_cdeg;
-    case PushState::PREPARE: case PushState::RUSH: case PushState::CLOSE:
-    case PushState::VERIFY_CAPTURE: case PushState::OPEN_RELEASE: return t_.near_pitch_cdeg;
+    case PushState::PREPARE: case PushState::RUSH: case PushState::OPEN_RELEASE: return t_.track_pitch_cdeg;
+    case PushState::CLOSE: case PushState::VERIFY_CAPTURE: return t_.near_pitch_cdeg;
     case PushState::CARRY: case PushState::GATE: // step 1: stopped NEAR hold check
         return step_ ? t_.near_pitch_cdeg : t_.far_pitch_cdeg;
     case PushState::ENTER: case PushState::BACK_OUT: return t_.track_pitch_cdeg; // fence and mouth
@@ -104,12 +108,17 @@ int PushTask::pitchWait(const PushObservation &in, uint64_t now) {
 float PushTask::halfX() const {
     return drop_locked_ ? drop_centre_zone_.x : (trip_.injured > 0 ? t_.injured_half_x_m : t_.supply_half_x_m);
 }
+float PushTask::holdCenter() const {
+    return trip_.injured > 0 ? t_.injured_hold_center_y_m : t_.hold_center_y_m;
+}
 // After a stop the gripper state decides where to resume: a verified load is never
 // silently forgotten, and anything uncertain is released before scanning again.
 PushState PushTask::resumeState() const {
     switch (stopped_from_) {
     case PushState::CARRY: case PushState::GATE: return PushState::CARRY;
-    case PushState::WAIT_START: case PushState::SCAN: case PushState::APPROACH:
+    case PushState::WAIT_START: return PushState::START_ADVANCE;
+    case PushState::START_ADVANCE: return PushState::START_ADVANCE;
+    case PushState::SCAN: case PushState::APPROACH:
     case PushState::TURN_SCAN: return PushState::SCAN;
     case PushState::PREPARE: return PushState::APPROACH;
     case PushState::OPEN_RELEASE: case PushState::ENTER: case PushState::BACK_OUT:
@@ -163,6 +172,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         it = now >= it->second ? rejected_.erase(it) : std::next(it);
 
     const bool forward_ok = in.path_safe && in.opponent_zone_clear;
+    const bool observed_zone=zoneOk(in) && in.zone_estimate.source!=ZoneEstimate::Source::PREDICTED;
     const uint64_t elapsed = now - phase_us_;
     const auto drive = [&](float vx, float wz) {
         if ((vx > 0 && !forward_ok) || (vx < 0 && !in.retreat_safe) || (vx == 0 && wz != 0 && !forward_ok))
@@ -194,12 +204,20 @@ PushOutput PushTask::update(const PushObservation &in) {
         now-in.navigation_timestamp_us<=200000 && in.drop_plan_valid && drop_locked_ &&
         std::isfinite(in.drop_centre_zone.x) && std::isfinite(in.drop_centre_zone.y) &&
         cv::norm(in.drop_centre_zone-drop_centre_zone_)<=.005f;
-    if((state_==PushState::GATE || state_==PushState::OPEN_RELEASE || state_==PushState::ENTER) && !drop_fresh) {
+    if(((state_==PushState::GATE && !step_) || state_==PushState::OPEN_RELEASE || state_==PushState::ENTER) && !drop_fresh) {
         reason_="drop_revalidation_missing";
         if(now-carry_us_>t_.carry_budget_us) {fail("drop_revalidation_timeout");state_=PushState::SAFE_STOP;}
         return result();
     }
     switch (state_) {
+    case PushState::START_ADVANCE:
+        commandGripper(0, now);
+        if (elapsed >= t_.startup_advance_us) {
+            enter(PushState::SCAN, now, "startup_advance_complete");
+            break;
+        }
+        drive(t_.startup_advance_speed, 0);
+        break;
     case PushState::SCAN: {
         commandGripper(0, now);
         if (!candidate(in, now)) { confirmations_ = 0; target_id_ = -1; drive(0, t_.scan_wz); break; }
@@ -248,26 +266,21 @@ PushOutput PushTask::update(const PushObservation &in) {
         }
         pending_ = in.corridor;
         enter(PushState::RUSH, now, "corridor_ok");
-        travel_limit_ = std::max(0.f, in.distance_m - t_.hold_center_y_m) + t_.rush_extra_m;
+        travel_limit_ = std::max(0.f, in.distance_m - t_.grasp_trigger_y_m) + t_.rush_extra_m;
         break;
     }
     case PushState::RUSH: {
-        const bool complete = in.hold_observable && in.captured && in.held_complete;
-        if (complete) {
-            const auto verdict = checkTrip(in.held, first_);
-            if (verdict != RuleVerdict::OK && verdict != RuleVerdict::EMPTY) {
-                verdict_ = verdict; reason_ = std::string("held_") + verdictName(verdict);
-                blacklist(now); enter(PushState::ABORT_DROP, now, ""); break;
-            }
-        }
-        if (complete && in.held.count(targetKind(label_)) > 0) {
-            if (++confirmations_ >= t_.enclose_frames) { enter(PushState::CLOSE, now, "enclosed"); break; }
-        } else confirmations_ = 0;
         if (travel_ >= travel_limit_ || elapsed > t_.rush_budget_us) { enter(PushState::CAPTURE_FAIL, now, "rush_overrun"); break; }
-        if (tracking(in)) {
-            if (std::abs(in.heading_error) > t_.rush_abort_heading_rad) { enter(PushState::CAPTURE_FAIL, now, "rush_misaligned"); break; }
-            drive(t_.rush_speed, t_.heading_gain * in.heading_error);
-        } else drive(t_.rush_speed, 0); // target passes below the view before reaching the holding area
+        if (!tracking(in)) {
+            if (lostTarget()) enter(PushState::CAPTURE_FAIL, now, "rush_target_lost");
+            break;
+        }
+        misses_ = 0;
+        if (std::abs(in.heading_error) > t_.rush_abort_heading_rad) {
+            enter(PushState::CAPTURE_FAIL, now, "rush_misaligned"); break;
+        }
+        if (in.distance_m <= t_.grasp_trigger_y_m) { enter(PushState::CLOSE, now, "grasp_position_measured"); break; }
+        drive(t_.rush_speed, t_.heading_gain * in.heading_error);
         break;
     }
     case PushState::CLOSE: {
@@ -279,7 +292,16 @@ PushOutput PushTask::update(const PushObservation &in) {
     }
     case PushState::VERIFY_CAPTURE: {
         if (elapsed > t_.verify_budget_us) { enter(PushState::CAPTURE_FAIL, now, "capture_unverified"); break; }
-        if (!in.hold_observable || !in.captured || !in.held_complete || in.held.total() == 0) { confirmations_ = 0; break; }
+        if (in.hold_observable && in.captured && in.held_complete) {
+            const auto verdict=checkTrip(in.held,first_);
+            if(verdict!=RuleVerdict::OK && verdict!=RuleVerdict::EMPTY) {
+                verdict_=verdict;reason_=std::string("held_")+verdictName(verdict);
+                blacklist(now);enter(PushState::ABORT_DROP,now,"");break;
+            }
+        }
+        if (!in.hold_observable || !in.captured || !in.held_complete || in.held.total() == 0 || in.held != pending_) {
+            confirmations_ = 0; break;
+        }
         if (confirmations_ == 0 || in.held != seen_) { seen_ = in.held; confirmations_ = 0; }
         if (++confirmations_ < t_.capture_frames) break;
         verdict_ = checkTrip(in.held, first_);
@@ -319,7 +341,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         // Park the rotation centre so that, once facing in, the held centre sits gate_clearance
         // before the correct half: turning in place there does not sweep the load sideways.
         const auto &z = in.zone_estimate;
-        const cv::Point2f gate = z.zoneToBody({halfX(), -t_.gate_clearance_m - t_.hold_center_y_m});
+        const cv::Point2f gate = z.zoneToBody({halfX(), -t_.gate_clearance_m - holdCenter()});
         const float dist = std::hypot(gate.x, gate.y);
         if (dist <= t_.gate_tolerance_m) {
             enter(PushState::GATE, now, "gate_reached"); break;
@@ -342,7 +364,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         const auto &z = in.zone_estimate;
         const float yaw = wrapAngle(z.yaw_body_rad); // heading error to face into the zone
         if (std::abs(yaw) > t_.gate_yaw_rad) { confirmations_ = 0; drive(0, t_.heading_gain * yaw); break; }
-        const cv::Point2f hold = z.bodyToZone({0, t_.hold_center_y_m});
+        const cv::Point2f hold = z.bodyToZone({0, holdCenter()});
         if (std::abs(hold.x - halfX()) > t_.gate_lateral_m ||
             std::abs(hold.y + t_.gate_clearance_m) > 2 * t_.gate_tolerance_m) {
             enter(PushState::CARRY, now, "gate_offset"); break;
@@ -374,8 +396,13 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (!zoneOk(in)) { if (lostTarget()) enter(PushState::BACK_OUT, now, "zone_lost"); break; }
         misses_ = 0;
         const auto &z = in.zone_estimate;
-        const cv::Point2f hold = z.bodyToZone({0, t_.hold_center_y_m});
+        const cv::Point2f hold = z.bodyToZone({0, holdCenter()});
         const float lateral = hold.x - halfX();
+        if (in.delivery_observed) {
+            delivery_seen_ = true;
+            enter(PushState::BACK_OUT, now, "object_entered_own_zone");
+            break;
+        }
         if (hold.y >= (drop_locked_?drop_centre_zone_.y:t_.deposit_y_m)) { enter(PushState::BACK_OUT, now, "deposited"); break; }
         if (std::abs(lateral) > t_.enter_lateral_m) { enter(PushState::BACK_OUT, now, "enter_lateral"); break; }
         if (elapsed > t_.enter_budget_us) { enter(PushState::BACK_OUT, now, "enter_timeout"); break; }
@@ -387,14 +414,12 @@ PushOutput PushTask::update(const PushObservation &in) {
         commandGripper(1, now);
         const int g = gripperWait(in, 1, now);
         if (g <= 0) { if (g < 0) fail("gripper_open_timeout"); break; } // never drag the load out closed
-        if (step_ == 0) { // distance bound used if the zone drops out of view
-            const float mouth = zoneOk(in) ? in.zone_estimate.bodyToZone({0, t_.mouth_y_m}).y
-                                           : (drop_locked_?drop_centre_zone_.y:t_.deposit_y_m) + t_.mouth_y_m;
-            travel_limit_ = std::max(0.f, mouth - t_.mouth_clear_y_m) + .05f;
-            travel_ = 0; step_ = 1;
+        if (!observed_zone) {
+            if (elapsed > t_.retreat_budget_us) fail("retreat_reference_lost");
+            break;
         }
-        const bool clear = zoneOk(in) ?
-            in.zone_estimate.bodyToZone({0, t_.mouth_y_m}).y <= t_.mouth_clear_y_m : travel_ >= travel_limit_;
+        const bool clear = observed_zone &&
+            in.zone_estimate.bodyToZone({0, t_.mouth_y_m}).y <= t_.mouth_clear_y_m;
         if (clear) { enter(PushState::VERIFY_DELIVERY, now, "backed_out"); break; }
         if (elapsed > t_.retreat_budget_us) { fail("retreat_blocked"); break; }
         drive(-t_.back_speed, 0);
@@ -403,18 +428,11 @@ PushOutput PushTask::update(const PushObservation &in) {
     case PushState::VERIFY_DELIVERY: {
         commandGripper(1, now);
         const int expected = trip_.total();
-        if (zoneOk(in) && in.zone_counts_valid) {
-            const int got = (trip_.injured ? in.zone_injured_count : in.zone_supply_count) - baseline_;
-            const int other = trip_.injured ? in.zone_supply_count : in.zone_injured_count;
-            if (confirmations_ == 0 || got != step_) { step_ = got; confirmations_ = 0; }
-            if (other != baseline_other_) confirmations_ = 0;
-            else ++confirmations_;
-        } else confirmations_ = 0;
-        const bool stable = confirmations_ >= t_.delivery_frames;
+        if (in.delivery_observed) delivery_seen_ = true;
+        const bool stable = delivery_seen_;
         const bool expired = elapsed > t_.delivery_budget_us;
-        if (!(stable && step_ == expected) && !expired) break;
-        // Only stable, differential counts are credited; a timed push is not a delivery.
-        const int credited = stable && step_ > 0 ? std::min(step_, expected) : 0;
+        if (!stable && !expired) break;
+        const int credited = stable ? expected : 0;
         total_ += credited;
         if (credited > 0 && trip_.ordinary == trip_.total()) first_ = true;
         reason_ = credited == expected ? "delivered" : credited ? "partial_delivery" : "delivery_unverified";
@@ -423,14 +441,15 @@ PushOutput PushTask::update(const PushObservation &in) {
     }
     case PushState::TURN_SCAN: {
         commandGripper(0, now);
-        // Measure the turn with the IMU; dead-reckon the command only when it is unavailable.
+        // A turn is complete only with measured IMU heading changes.
         if (in.heading_valid && std::isfinite(in.heading_rad)) {
             if (heading_seen_) turned_ += std::abs(wrapAngle(in.heading_rad - last_heading_));
             last_heading_ = in.heading_rad; heading_seen_ = true;
-        } else { turned_ += std::abs(last_wz_) * dt; heading_seen_ = false; }
-        if (turned_ >= t_.turn_min_rad || elapsed > t_.turn_budget_us) {
+        } else heading_seen_ = false;
+        if (turned_ >= t_.turn_min_rad) {
             clearTrip(); enter(PushState::SCAN, now, ""); break;
         }
+        if (elapsed > t_.turn_budget_us) { fail("turn_heading_unverified"); break; }
         drive(0, t_.turn_wz);
         break;
     }
@@ -442,14 +461,23 @@ PushOutput PushTask::update(const PushObservation &in) {
             const int g = gripperWait(in, 1, now);
             if (g < 0) { fail("gripper_open_timeout"); break; }
             if (g == 0) break;
-            step_ = 1; travel_ = 0; phase_us_ = now;
+            step_ = 1; phase_us_ = now;
         }
-        if (travel_ >= t_.abort_back_m) {
+        if (observed_zone && !retreat_origin_valid_) {
+            retreat_origin_zone_=in.zone_estimate.bodyToZone({0,0});
+            retreat_forward_zone_=in.zone_estimate.bodyToZone({0,1})-retreat_origin_zone_;
+            retreat_geometry_id_=in.zone_estimate.geometry_id;
+            retreat_origin_valid_=true;
+        }
+        const bool measured=retreat_origin_valid_ && observed_zone &&
+            in.zone_estimate.geometry_id==retreat_geometry_id_;
+        const float back=measured ? -(in.zone_estimate.bodyToZone({0,0})-retreat_origin_zone_).dot(retreat_forward_zone_) : 0;
+        if (measured && back >= t_.abort_back_m) {
             if (state_ != PushState::LOST_HOLD) blacklist(now);
             clearTrip(); enter(PushState::SCAN, now, ""); break;
         }
-        if (elapsed > t_.retreat_budget_us) { fail("retreat_blocked"); break; }
-        drive(-t_.back_speed, 0);
+        if (elapsed > t_.retreat_budget_us) { fail("retreat_unverified"); break; }
+        if (measured) drive(-t_.back_speed, 0);
         break;
     }
     case PushState::WAIT_START: case PushState::SAFE_STOP: break;

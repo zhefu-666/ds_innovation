@@ -20,23 +20,6 @@ def detect(frame, pattern):
                            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 40, .001))
 
 
-def has_extra_grid_blobs(blobs, centers, pattern):
-    """True if unmatched blobs sit on/next to the grid, e.g. a larger board seen as a subgrid."""
-    grid = centers.reshape(pattern[1], pattern[0], 2)
-    pitch = min(np.linalg.norm(np.diff(grid, axis=1), axis=2).min(),
-                np.linalg.norm(np.diff(grid, axis=0), axis=2).min())
-    hull = cv2.convexHull(centers.reshape(-1, 1, 2).astype(np.float32))
-    points = centers.reshape(-1, 2)
-    for blob in blobs:
-        p = np.array(blob.pt, np.float32)
-        if np.linalg.norm(points - p, axis=1).min() < .4 * pitch:
-            continue
-        # Positive inside the hull, negative outside; one pitch outside still counts as the board.
-        if cv2.pointPolygonTest(hull, (float(p[0]), float(p[1])), True) > -1.5 * pitch:
-            return True
-    return False
-
-
 def detect_circle_grid(frame, pattern):
     """Detect a symmetric circle grid using the same model as guided.py."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
@@ -54,14 +37,28 @@ def detect_circle_grid(frame, pattern):
     detector = cv2.SimpleBlobDetector_create(params)
     blobs = detector.detect(gray)
     expected = pattern[0] * pattern[1]
-    if not expected <= len(blobs) <= max(expected * 2, expected + 10):
+    if expected <= len(blobs) <= max(expected * 2, expected + 10):
+        found, centers = cv2.findCirclesGrid(
+            gray, pattern, flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=detector)
+        if found and centers is not None and len(centers) == expected:
+            return centers
+
+    # A low camera can compress ground-plane circles into thin ellipses.
+    # Stretch only for detection, then return centers in original image pixels.
+    stretched = cv2.resize(gray, None, fx=1, fy=3, interpolation=cv2.INTER_LINEAR)
+    params.minArea = 5
+    params.maxArea = min(1500, stretched.size * .002)
+    params.filterByConvexity = False
+    params.minInertiaRatio = .03
+    detector = cv2.SimpleBlobDetector_create(params)
+    blobs = detector.detect(stretched)
+    if not expected <= len(blobs) <= expected * 4:
         return None
     found, centers = cv2.findCirclesGrid(
-        gray, pattern, flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=detector)
+        stretched, pattern, flags=cv2.CALIB_CB_SYMMETRIC_GRID, blobDetector=detector)
     if not found or centers is None or len(centers) != expected:
         return None
-    if has_extra_grid_blobs(blobs, centers, pattern):
-        return None
+    centers[:, :, 1] = (centers[:, :, 1] + .5) / 3 - .5
     return centers
 
 
@@ -308,7 +305,7 @@ def snapshot(args):
 
 
 
-def solve_board_pose(k, d, corners, pattern, square, origin, yaw_deg, height=0.):
+def solve_board_pose(k, d, corners, pattern, square, origin, yaw_deg, height=0., reverse_board_y=False):
     """Return transforms with explicit column-vector source/destination conventions."""
     obj = object_grid(pattern, square)
     result = cv2.solvePnPGeneric(obj, corners, k, d, flags=cv2.SOLVEPNP_IPPE)
@@ -328,8 +325,14 @@ def solve_board_pose(k, d, corners, pattern, square, origin, yaw_deg, height=0.)
     camera_from_board[:3, :3] = cv2.Rodrigues(rv)[0]
     camera_from_board[:3, 3] = tv.reshape(3)
     angle = math.radians(yaw_deg)
-    robot_from_board = np.array([[math.cos(angle), -math.sin(angle), 0, origin[0]],
-        [math.sin(angle), math.cos(angle), 0, origin[1]], [0, 0, 1, height], [0, 0, 0, 1.]])
+    robot_from_board = np.eye(4)
+    robot_from_board[:3, :3] = np.array([
+        [math.cos(angle), -math.sin(angle), 0],
+        [math.sin(angle), math.cos(angle), 0], [0, 0, 1]])
+    if reverse_board_y:
+        # The numbered +Y points toward the robot; +Z must point down to keep a proper rotation.
+        robot_from_board[:3, :3] = robot_from_board[:3, :3] @ np.diag([1, -1, -1])
+    robot_from_board[:3, 3] = [origin[0], origin[1], height]
     camera_from_robot = camera_from_board @ np.linalg.inv(robot_from_board)
     robot_from_camera = np.linalg.inv(camera_from_robot)
     # Project the actual robot ground z=0, not the elevated chessboard surface.
@@ -383,11 +386,13 @@ def extrinsics(args):
         cv2.putText(annotated, text, end, cv2.FONT_HERSHEY_SIMPLEX, .4, color, 1)
     if not cv2.imwrite(str(out/'corners_numbered.png'), annotated):
         raise ValueError('Cannot save corner inspection image')
+    reverse_board_y = getattr(args, 'reverse_board_y', False)
     report, h = solve_board_pose(k, d, corners, pattern, args.square_mm/1000.,
-        (args.origin_x, args.origin_y), args.yaw_deg, args.board_height_mm/1000.)
+        (args.origin_x, args.origin_y), args.yaw_deg, args.board_height_mm/1000., reverse_board_y)
     report.update(image_size=size, board_type=board_type, board_pattern=[args.cols, args.rows],
         square_mm=args.square_mm,
-        flip_cols=args.flip_cols, flip_rows=args.flip_rows, corner_order_confirmed=args.confirm_order,
+        flip_cols=args.flip_cols, flip_rows=args.flip_rows, reverse_board_y=reverse_board_y,
+        corner_order_confirmed=args.confirm_order,
         robot_axes='x right, y forward, z up; metres; right-handed',
         camera_axes='x image right, y image down, z optical forward',
         transform_convention='p_destination = T_destination_from_source @ p_source',
@@ -547,6 +552,8 @@ def main():
     p.add_argument('--yaw-deg',type=float,required=True,help='Board X angle from robot +x toward +y')
     p.add_argument('--board-height-mm',type=float,default=0,help='Printed board surface height above ground')
     p.add_argument('--flip-cols',action='store_true');p.add_argument('--flip-rows',action='store_true')
+    p.add_argument('--reverse-board-y',action='store_true',
+                   help='Numbered board +Y points opposite the robot forward direction at yaw 0')
     p.add_argument('--confirm-order',action='store_true',help='User has checked numbered corner orientation')
     p.add_argument('--check-points',help='Independent ground checks JSON with image_size and check array')
     p.add_argument('--max-rms',type=float,default=.5);p.add_argument('--max-error-mm',type=float,default=20)

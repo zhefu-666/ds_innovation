@@ -289,7 +289,7 @@ int main() {
     {
         // A historical bool alone must never bypass the zone-quality gate: a verified load
         // with an untrusted zone estimate only searches in place, it never drives to a gate.
-        PushTask task;PushObservation in;
+        TaskTuning tuning;tuning.startup_advance_us=0;PushTask task(tuning);PushObservation in;
         in.target_region_valid=in.zone_identity_verified=true;
         in.run=in.safety_ok=in.target_valid=in.geometry_valid=in.path_safe=in.opponent_zone_clear=true;
         in.target_id=1;in.label="ordinary_supply";in.distance_m=.2;

@@ -118,6 +118,27 @@ class CalibrationTests(unittest.TestCase):
             self.assertEqual(report['board_type'],'symmetric_circles')
             self.assertTrue(report['validated'])
 
+    def test_far_origin_with_board_y_toward_robot(self):
+        k=np.array([[500.,0,320],[0,500,240],[0,0,1]])
+        d=np.zeros(5)
+        robot_from_camera=np.array([-.05,-.1,.8])
+        camera_from_robot=cv2.Rodrigues(np.array([2.4,0.,0.]))[0]
+        robot_from_board=np.diag([1.,-1.,-1.])
+        origin=np.array([-.16,.895,.015])
+        obj=c.object_grid((9,6),.04)
+        rv=cv2.Rodrigues(camera_from_robot@robot_from_board)[0]
+        tv=camera_from_robot@(origin-robot_from_camera)
+        corners,_=cv2.projectPoints(obj,rv,tv,k,d)
+        report,h=c.solve_board_pose(k,d,corners,(9,6),.04,origin[:2],0,origin[2],True)
+        np.testing.assert_allclose(report['camera_position_robot_m'],robot_from_camera,atol=1e-4)
+        self.assertAlmostEqual(np.linalg.det(np.array(report['T_robot_from_board'])[:3,:3]),1.)
+        self.assertLess(report['rms_px'],.001)
+        ground=np.array([[-.2,.3,0.],[.2,.6,0.],[0.,1.,0.]],np.float32)
+        pixels,_=cv2.projectPoints(ground,cv2.Rodrigues(camera_from_robot)[0],
+            -camera_from_robot@robot_from_camera,k,d)
+        mapped=cv2.perspectiveTransform(cv2.undistortPoints(pixels,k,d,P=k),h)
+        np.testing.assert_allclose(mapped.reshape(-1,2),ground[:,:2],atol=1e-4)
+
     def test_pitch_range_validates_servo_model(self):
         k=np.array([[800.,0,640],[0,800,360],[0,0,1]]);d=np.zeros(5)
         def camera(deg):

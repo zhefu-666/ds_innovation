@@ -62,6 +62,7 @@ struct Config {
     std::string telemetry_file = "/dev/shm/rescue-telemetry.bin";
     bool auto_run = false;
     uint32_t match_seconds = 180; // confirmed competition duration: 3 minutes
+    uint32_t startup_advance_ms = 10000; // 0.1 m/s for 10 s before the first scan
     std::string task_calibration_file, zone_color_file;
     std::string match_socket = "/tmp/rescue-match.sock";
     bool require_instance_masks = false;
@@ -83,8 +84,8 @@ struct Config {
     std::array<int, 2> catch_angle{90, 90};
     std::array<int, 2> release_angle{0, 0};
     // PushTask camera presets FAR,TRACK,NEAR in 0.01 deg (positive down), overriding TaskTuning.
-    // 预设保持现有0/25/25度；新限位±40度，不自动改变未标定工作角。
-    std::array<int16_t, 3> pitch_presets_cdeg{0, 2500, 2500};
+    // 40度仅用于停稳后的夹持观察；地面测距仍须按实际角度单独验证。
+    std::array<int16_t, 3> pitch_presets_cdeg{500, 500, 4000};
 
     // blocks detector tensor order; taskLabel() maps colours to task semantics.
     std::vector<std::string> class_names{"blue", "orange", "green", "black"};

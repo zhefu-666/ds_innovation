@@ -377,7 +377,7 @@ tools/gripper/gripper_close.sh    # 合上
 
 ```bash
 tools/camera_pitch/pitch_status.sh     # 查看动作编号/夹爪开关状态/pitch读回（不发包）
-tools/camera_pitch/pitch_set.sh 20     # 张开夹爪，相机向下20°；直接输入真实角度
+tools/camera_pitch/pitch_set.sh 5     # 张开夹爪，相机向下20°；直接输入真实角度
 tools/camera_pitch/pitch_set.sh -5     # 相机向上5°；限位±40°
 tools/camera_pitch/pitch_repl.sh       # 交互模式：终端输入角度实时调整
 ```
@@ -423,6 +423,41 @@ EOF
 
 回包 `A6 <done> <编号> <pitch低> <pitch高> <CRC低> <CRC高> 0A`，done=1且编号等于最新编号才表示夹爪动作完成。
 
+### 终端发送速度脚本
+
+`tools/send_velocity.py` 默认使用当前 15 字节运动协议，预览模式不会打开串口：
+
+```bash
+python3 tools/send_velocity.py --port /dev/ttyACM0 --vx 0.10 --wz 0
+```
+
+确认端口和机械状态后，添加 `--send` 才会实际发送。默认 25 Hz 发送 1 秒，结束时补发零速度停车帧：
+
+```bash
+python3 tools/send_velocity.py \
+  --port /dev/ttyACM0 --baud 115200 \
+  --vx 0 --wz 10 --gripper closed --action-id 0 \
+  --duration 1 --send
+```
+
+默认退出时补发零速度停车帧；需要自行控制是否停车时可显式选择：
+
+```bash
+python3 tools/send_velocity.py --no-stop-on-exit --vx 0 --wz 10 --send
+python3 tools/send_velocity.py --stop-on-exit --vx 0 --wz 0 --send
+```
+
+持续发送直到 `Ctrl+C`：
+
+```bash
+python3 tools/send_velocity.py --port /dev/ttyACM0 \
+  --vx 0 --wz 0.5 --duration 0 --send
+```
+
+当前协议中 `--gripper open` 为 `1`、`--gripper closed` 为 `0`；夹爪状态变化时使用新的 `--action-id`（1..255），`0` 表示不触发新动作。`--pitch` 使用真实度数，限幅 ±40°。发送模式会监听现有 A6 执行器反馈并显示夹爪状态、动作编号和 pitch；下位机不回传速度帧，因此终端不能显示实测 `vx/wz`，只能显示发送命令。使用前应停止占用 `/dev/ttyACM0` 的其他程序。
+
+旧六字节协议可用 `--protocol legacy6` 显式选择；不要将两种协议混用。
+
 ## HiPNUC IMU 接收（2026-09-26）
 
 已接入 HI91 接收、CRC 校验、SI 单位转换、新鲜度检查及网页/Foxglove 数据显示。详细包格式、数据接口和故障边界见 [HIPNUC_IMU.md](HIPNUC_IMU.md)。
@@ -436,3 +471,18 @@ python3 tools/remote_camera_telemetry/manage_project.py start --imu --imu-port /
 ```
 
 两个命令二选一，不能同时读取同一个IMU串口。已运行预览时，先执行管理脚本的 `stop` 再带上述参数启动。默认不启用IMU，避免未接设备时影响原有预览。`--dry-run --imu` 只允许IMU接收，不启用下位机运动输出。
+
+
+### 查看速度脚本收到的下位机原始数据
+
+在原有发送命令末尾增加 `--show-rx`：
+
+```bash
+python3 tools/send_velocity.py --vx 0 --wz 0 --duration 2 --send --show-rx
+```
+
+将 vx/wz 换成已验证的测试值即可。默认退出补发零速度帧。
+`RX RAW` 是每次串口实际读取的字节块，可能包含半帧或多帧；
+`RX A6 [CRC OK]` 是校验通过的完整8字节反馈，随后显示夹爪状态、动作编号与pitch。
+结束时汇总收到的字节数和有效帧数；不加参数保持原有状态变化显示。
+当前A6不包含实际线速度或角速度；此参数只显示已有回包，不能让固件自动增加速度反馈。
