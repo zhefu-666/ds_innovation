@@ -13,6 +13,7 @@ struct HoldingView {
     int16_t pitch_cdeg;   // servo readback this region was calibrated at
     RectArea area;        // inside the closed frame, image px
     float min_visible_bottom_y_px = 0; // object must reach this depth, even if clipped by image bottom
+    std::vector<cv::Point2f> polygon;
 };
 struct CaptureConfig {
     // No uncalibrated angle is observable by default.

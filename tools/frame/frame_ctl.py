@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""方框升降：up/raise=+20°，down/lower=0°；status只读。
+"""方框升降：open/up/raise=0°，close/down/lower=20°；status只读。
 
 升降时车速固定为0，相机保持A6返回角度：TX=RX-40（下发偏移角，回传0..80）。
---dry-run只读反馈并预览，不发送。A6暂按0=放下、1=抬起，需匹配动作编号。
+--dry-run只读反馈并预览，不发送。A6开闭语义由已验收配置提供，需匹配动作编号。
 """
 import argparse
 from contextlib import contextmanager
@@ -15,8 +15,11 @@ import sys
 import termios
 import time
 
-ALIASES = {'raise': 'up', 'lower': 'down', 'open': 'up', 'close': 'down'}
-TARGETS = {'up': (20, 1, '上升'), 'down': (0, 0, '下降')}
+from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from frame_semantics import ANGLES, DEFAULT_CONFIG, load_mapping
+ALIASES = {'raise': 'open', 'lower': 'close', 'up': 'open', 'down': 'close'}
+TARGETS = {'open': (ANGLES['open'], '开'), 'close': (ANGLES['close'], '关')}
 
 
 def crc16(data):
@@ -113,13 +116,14 @@ def send_packet(fd, packet, deadline):
 
 def show_feedback(feedback):
     state, action_id, pitch, raw = feedback
-    label = {0: '放下', 1: '抬起'}.get(state, '未知')
+    label = '原始A6状态，须按验收配置解释'
     print('RX: %s | 状态=%d(%s，按当前A6约定) 编号=%d 相机实际角=%d°' %
           (raw.hex(' ').upper(), state, label, action_id, pitch), flush=True)
 
 
 def run(args):
     action = ALIASES.get(args.action, args.action)
+    mapping = load_mapping(args.frame_config) if action != 'status' else None
     with serial_port(args.port, args.baud, action == 'status' or args.dry_run) as fd:
         parser = Feedback()
         deadline = time.monotonic() + args.timeout
@@ -136,7 +140,8 @@ def run(args):
         state, old_id, pitch, _ = current
         if state not in (0, 1) or not 0 <= pitch <= 80:
             raise ValueError('反馈状态或相机实际角无效，拒绝发送')
-        offset, target_state, label = TARGETS[action]
+        offset, label = TARGETS[action]
+        target_state = mapping[action]
         action_id = old_id % 255 + 1  # Explicit manual request: always issue a fresh action.
         packet = motion_packet(offset, action_id, pitch)
         print('%s: 方框=%+d°，车速=0，相机保持RX%d°（TX偏移%d°），动作编号=%d\n包: %s' %
@@ -166,6 +171,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['up', 'down', 'raise', 'lower', 'status', 'open', 'close'])
+    parser.add_argument('--frame-config', default=str(DEFAULT_CONFIG))
     parser.add_argument('--port', default='/dev/ttyACM0')
     parser.add_argument('--baud', type=int, choices=[9600, 115200, 230400, 460800, 921600], default=115200)
     parser.add_argument('--timeout', type=float, default=3.)

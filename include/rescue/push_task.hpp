@@ -8,12 +8,12 @@
 
 namespace rescue {
 // Frame enclosure and transport (no gripping):
-// PREPARE raises frame (+20 deg) -> RUSH positions the object inside -> LOWER_FRAME (0 deg)
+// PREPARE opens frame (0 deg) -> RUSH positions the object inside -> LOWER_FRAME / CLOSE (20 deg)
 // -> VERIFY_CAPTURE checks the enclosed inventory -> CARRY -> GATE -> ENTER with frame DOWN
 // -> RAISE_RELEASE at the drop point -> BACK_OUT -> VERIFY_DELIVERY.
 // Failure recovery raises the frame before retreat. Stop commands preserve the last position.
 // Legacy gripper_done / gripper_feedback_open observations retain the unchanged A6 binary
-// interface: assumed 0=lowered, 1=raised; fresh action-ID matching is required.
+// interface: assumed raw bits configured after acceptance; fresh action-ID matching is required.
 // Camera phases and visual enclosure checks remain mandatory; A6 is not proof of capture.
 enum class PushState {
     WAIT_START, START_ADVANCE, SCAN, LOST_SEARCH, MID_REACQUIRE, MID_APPROACH, NEAR_REACQUIRE, SELECT_CARGO, CUE_APPROACH, CUE_PREPARE, CLEAR_PILE, CLEAR_PAUSE, APPROACH, PREPARE, RUSH, LOWER_FRAME, VERIFY_CAPTURE, CARRY, GATE,
@@ -27,6 +27,14 @@ struct PushObservation {
     bool run = false, reset = false, safety_ok = false;
     // Primary candidate chosen by the perception adapter.
     bool target_valid = false, geometry_valid = false;
+    bool multi_view_finished=false;
+    int multi_view_verdict=0; // 0 uncertain, 1 enclosed, 2 empty
+    int16_t multi_view_pitch=kCameraPitchInvalid;
+    Inventory multi_view_inventory;
+    double pixel_ratio_raw=0,pixel_ratio_smoothed=0;
+    std::string pixel_mode="none",pixel_reason,multi_view_reason;
+    bool pixel_locked=false;int observation_view=0,observation_frames=0;
+    uint64_t observation_round=0;
     bool target_is_search_cue = false; // search cue only, never a transport target
     bool gripper_closed_observed = false; // fresh causal A6 lowered state, not a new-action acknowledgement
     int target_id = -1;
@@ -104,6 +112,9 @@ struct PushOutput {
 // Body geometry, speeds and budgets. Lengths marked "measure" are placeholders
 // until the gripper is measured on the robot.
 struct TaskTuning {
+    bool require_multi_view = true;
+    uint64_t attempt_budget_us=0; // enabled by schema 2, never reset by target reselection
+    float approach_limit_m=0, retreat_limit_m=0;
     bool enable_search_cues = false;
     bool enable_short_push = false;
     bool enable_lost_search = false;
@@ -183,7 +194,10 @@ private:
     Inventory trip_, pending_, seen_;
     RuleVerdict verdict_ = RuleVerdict::OK, seen_verdict_ = RuleVerdict::OK;
     bool first_ = false, fault_ = false, track_close_ = false, delivery_seen_ = false;
-    uint8_t frame_raised_ = 0;
+    uint8_t frame_raised_ = 0; // logical open, independent of wire angle
+    uint64_t frame_transaction_=0,attempt_started_=0;
+    float bounded_approach_=0,bounded_retreat_=0;
+    int16_t multi_view_pitch_=kCameraPitchInvalid;
     int16_t pitch_cmd_ = t_.far_pitch_cdeg;
     uint64_t startup_commanded_us_ = 0;
     uint64_t zone_search_started_us_ = 0;

@@ -1,6 +1,7 @@
 #include "rescue/capture_monitor.hpp"
 #include <cmath>
 #include <cstdlib>
+#include <opencv2/imgproc.hpp>
 
 namespace rescue {
 namespace {
@@ -42,7 +43,11 @@ void CaptureMonitor::update(PushObservation &in, const std::vector<SegDetection>
         const auto &h = v->area;
         const cv::Rect &b = d->box;
         const auto c = d->center();
-        const bool inside = h.contains(float(b.x), float(b.y)) && h.contains(float(b.x + b.width), float(b.y + b.height));
+        bool inside = h.contains(float(b.x), float(b.y)) && h.contains(float(b.x + b.width), float(b.y + b.height));
+        if(!v->polygon.empty()) {
+            for(const cv::Point2f p : std::vector<cv::Point2f>{{float(b.x),float(b.y)},{float(b.br().x),float(b.y)},{float(b.x),float(b.br().y)},{float(b.br().x),float(b.br().y)}})
+                inside=inside && cv::pointPolygonTest(v->polygon,p,true)>c_.edge_margin_px;
+        }
         const bool touches = b.x <= h.x2 + c_.edge_margin_px && b.x + b.width >= h.x1 - c_.edge_margin_px &&
                              b.y <= h.y2 + c_.edge_margin_px && b.y + b.height >= h.y1 - c_.edge_margin_px;
         if (!touches) continue;

@@ -4,12 +4,15 @@ import importlib.util
 from pathlib import Path
 import struct
 import unittest
+import time
+from unittest.mock import patch
 
 
 path = Path(__file__).resolve().parents[1] / 'tools/camera_pitch/pitch_ctl.py'
 spec = importlib.util.spec_from_file_location('pitch_ctl', path)
 pitch_ctl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pitch_ctl)
+pitch_ctl.FRAME_MAPPING={"open":0,"close":1} # synthetic only
 
 
 class FakeLink:
@@ -52,6 +55,24 @@ class PreparePitchTests(unittest.TestCase):
         link = FakeLink(action_id=0)
         self.assertTrue(pitch_ctl.prepare_pitch_five(link, 0, 0, 1))
         self.assertTrue(all(packet[10] == 0 for packet in link.sent))
+
+    def test_missing_or_stale_feedback_prevents_camera_tx(self):
+        link=pitch_ctl.Link(-1,False)
+        packet=pitch_ctl.motion_packet(0,7,4500)
+        with patch.object(pitch_ctl.os,'write') as write:
+            with self.assertRaises(TimeoutError):link.send(packet)
+            link.last=(0,7,4500,b'');link.last_received=time.monotonic()-1
+            with self.assertRaises(TimeoutError):link.send(packet)
+            write.assert_not_called()
+
+    def test_changed_state_or_id_prevents_camera_tx(self):
+        link=pitch_ctl.Link(-1,False);link.last_received=time.monotonic()
+        packet=pitch_ctl.motion_packet(0,7,4500)
+        with patch.object(pitch_ctl.os,'write') as write:
+            for feedback in [(1,7,4500,b''),(0,8,4500,b'')]:
+                link.last=feedback
+                with self.assertRaises(ValueError):link.send(packet)
+            write.assert_not_called()
 
     def test_invalid_gripper_state_sends_nothing(self):
         link = FakeLink(state=2)

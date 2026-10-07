@@ -12,6 +12,9 @@
 
 namespace rescue {
 
+enum class FrameAction { Open, Close };
+constexpr int16_t frameAngle(FrameAction a) { return a == FrameAction::Open ? 0 : 20; }
+
 struct SegDetection {
     int track_id = -1;
     std::string label;
@@ -47,7 +50,7 @@ struct MotionPacket {
     uint8_t start_of_frame = kHeader;
     float vx_mps = 0.0f; // m/s，正前进、负后退；下位机对下发速度有限制，buildMotionPacket()硬限幅到±kMaxLinearSpeedMps（1.0m/s）
     float wz_rps = 0.0f; // rad/s
-    int8_t gripper_offset = 0; // 方框位置偏移，-20..20度；0中点(90度)，当前0放下、+20抬起
+    int8_t gripper_offset = 0; // 方框逻辑角度：0开、20关
     uint8_t gripper_action_id = 0; // 夹爪动作编号：仅目标变化时+1，1..255循环，0保留为“无动作”
     int16_t camera_pitch_offset = 0; // TX偏移角-40..40；实测TX35->RX75，TX40->RX80
     uint16_t crc16 = 0; // Modbus CRC，覆盖字节0..12，初值FFFF、多项式A001，低字节在前
@@ -59,7 +62,7 @@ struct SensorPacket {
     static constexpr uint8_t kHeader = 0xA6;
     static constexpr uint8_t kNewline = 0x0A; // 帧尾'\n'，不参与CRC
     uint8_t start_of_frame = kHeader;
-    uint8_t gripper_open = 0; // 旧A6二值状态保留：暂映射0放下、1抬起，待电控确认
+    uint8_t gripper_open = 0; // 旧A6二值状态保留：原始状态，开闭含义由验收配置提供
     uint8_t gripper_action_id = 0; // 该状态对应的夹爪动作编号，0表示上电后尚未收到动作
     int16_t camera_pitch_deg = 40; // 线上整数度0..80；解析时减40转回标定角；-32768无效
     // uint16_t tof_fl_mm = 0; // 左前，毫米
@@ -107,7 +110,7 @@ static_assert(sizeof(SensorPacket) == SensorPacket::kSize && offsetof(SensorPack
 // 夹爪完成须同时比对action_id与状态，见gripperActionResult()；相机到位见cameraPitchResult()。
 struct ActuatorFeedback {
     uint64_t timestamp_us = 0;
-    uint8_t gripper_open = 0; // 旧A6二值状态：暂按0放下、1抬起解释，非角度
+    uint8_t gripper_open = 0; // 旧A6二值状态：必须使用已验收映射解释，非角度
     uint8_t gripper_action_id = 0;
     int16_t camera_pitch_cdeg = kCameraPitchInvalid; // 转换后的标定角pitch，0.01°，线上角减40度
     bool valid = false;
@@ -146,10 +149,11 @@ struct SafeZonePose {
 // 算法业务请求；禁止直接发送sizeof(MotionCommand)，该结构可能包含对齐填充。
 // buildMotionPacket()序列化为15字节（含动作编号与CRC），sendMotion()负责串口发送。
 struct MotionCommand {
+    uint64_t frame_transaction = 0; // changes only for a new logical request, including explicit retry
     uint8_t header = 0x56;
     float vx_mps = 0.0f; // m/s；发给下位机的速度有限制，超过±1.0m/s（kMaxLinearSpeedMps）会在打包时被截断
     float wz_rps = 0.0f; // rad/s
-    int16_t gripper_offset = 0; // 方框目标偏移度；打包限幅-20..20；0放下、+20抬起
+    int16_t gripper_offset = 0; // 方框目标偏移度；仅接受0开、20关
     int16_t camera_pitch_cdeg = 0; // 相机标定角目标，0.01°，正值向下；TX除100发偏移角-40..40，RX减40后入标定；标定范围±4000
 };
 

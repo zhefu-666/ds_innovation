@@ -117,9 +117,9 @@
         const preflight = d.preflight_reason || '';
         el('preflight').textContent = live ? (d.preflight_ready ? '通过' : `${reasonName[preflight] || preflight || '未通过'} (${preflight || '--'})`) : '--';
         el('preflight').className = `value mono ${live && !d.preflight_ready ? 'warn' : ''}`;
-        el('target').textContent = live ? (d.target_valid ? `${d.target_label || '--'} #${d.target_id}` : '未选定') : '--';
+        el('target').textContent = live ? (d.target_valid ? `${d.target_label || '--'} #${d.target_id} · ${d.pixel_mode === "mask_pixels" ? "掩码像素占比" : "检测框占比"} ${number(100 * d.pixel_ratio_smoothed)}%` : '未选定') : '--';
         el('zone').textContent = live ? (d.zone_own ? '已确认' : d.zone_color_reason || '未确认') : '--';
-        el('capture').textContent = live ? `${d.captured ? '检测到' : '未确认'} / ${d.drop_plan_valid ? '落点有效' : '无落点'}` : '--';
+        el('capture').textContent = live ? `${({0:'无法确认',1:'已框住',2:'未框住'})[d.multi_view_verdict] || '无法确认'} · 观察档 ${d.observation_view ?? '--'} / ${d.observation_frames ?? 0}帧 · ${d.multi_view_reason || ''}` : '--';
         el('motion').textContent = live ? `${number(d.computed_vx_mps)} m/s · ${number(d.computed_wz_rps)} rad/s` : '--';
         const missing = el('evidence'); missing.replaceChildren();
         if (live) for (const code of d.missing_evidence || []) {

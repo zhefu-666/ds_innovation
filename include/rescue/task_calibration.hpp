@@ -1,8 +1,13 @@
 #pragma once
 #include "rescue/capture_monitor.hpp"
 #include <cmath>
+#include "rescue/multi_view_capture.hpp"
 namespace rescue {
 struct TaskCalibration {
+    std::vector<FrameView> frame_views;
+    int feedback_open=-1, feedback_close=-1;
+    std::string version;
+    bool box_area_accepted=false;
     cv::Vec<float,6> body_envelope{}; // front,rear,left,right,open width,open front; zero disables
     TaskTuning task;
     CaptureConfig capture;

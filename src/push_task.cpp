@@ -60,7 +60,7 @@ void PushTask::blacklist(uint64_t now) {
 // Unrecoverable without an operator: stop, keep the gripper as commanded.
 void PushTask::fail(const char *why) { fault_ = true; reason_ = why; }
 void PushTask::commandFrame(uint8_t open, uint64_t now) {
-    if (frame_raised_ != open) { frame_raised_ = open; gripper_us_ = now; }
+    if (frame_raised_ != open) { frame_raised_ = open; gripper_us_ = now; ++frame_transaction_; }
 }
 int PushTask::frameWait(const PushObservation &in, uint8_t open, uint64_t now) const {
     // A done flag counts only for the action matching the current target state.
@@ -107,7 +107,8 @@ int16_t PushTask::desiredPitch() const {
     case PushState::APPROACH: return t_.track_pitch_cdeg;
     case PushState::PREPARE: return step_ == 0 ? t_.near_pitch_cdeg : t_.track_pitch_cdeg;
     case PushState::RUSH: case PushState::RAISE_RELEASE: return t_.track_pitch_cdeg;
-    case PushState::LOWER_FRAME: case PushState::VERIFY_CAPTURE: return t_.near_pitch_cdeg;
+    case PushState::LOWER_FRAME: return t_.near_pitch_cdeg;
+    case PushState::VERIFY_CAPTURE: return multi_view_pitch_==kCameraPitchInvalid?t_.near_pitch_cdeg:multi_view_pitch_;
     case PushState::CARRY: case PushState::GATE: // step 1: stopped NEAR hold check
         return step_ ? t_.near_pitch_cdeg : t_.far_pitch_cdeg;
     case PushState::CAPTURE_FAIL: case PushState::LOST_HOLD: case PushState::ABORT_DROP: return t_.far_pitch_cdeg;
@@ -153,10 +154,12 @@ PushState PushTask::resumeState() const {
 }
 
 PushOutput PushTask::update(const PushObservation &in) {
+    multi_view_pitch_=in.multi_view_pitch;
     MotionCommand motion; // zero velocity by default
     const uint64_t now = in.now_us;
     const auto result = [&] {
-        motion.gripper_offset = frame_raised_ ? 20 : 0; // stops hold the gripper, never toggle it
+        motion.gripper_offset = frameAngle(frame_raised_ ? FrameAction::Open : FrameAction::Close);
+        motion.frame_transaction = frame_transaction_; // stops hold the gripper, never toggle it
         const int16_t want = desiredPitch(); // a phase change commands its preset at once
         if (want != kCameraPitchInvalid && want != pitch_cmd_) { pitch_cmd_ = want; pitch_wait_us_ = now; }
         motion.camera_pitch_cdeg = pitch_cmd_;
@@ -175,6 +178,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         return out;
     };
     if (in.reset) {
+        attempt_started_=0;bounded_approach_=bounded_retreat_=0;
         clearTrip(); rejected_.clear(); total_ = 0; first_ = false; fault_ = false;clear_attempts_=0;near_failures_=0;lost_round_=0;startup_commanded_us_=0;
         frame_raised_ = 0; gripper_us_ = now; stopped_from_ = PushState::WAIT_START;
         pitch_cmd_ = t_.far_pitch_cdeg; pitch_wait_us_ = now;
@@ -190,7 +194,18 @@ PushOutput PushTask::update(const PushObservation &in) {
         startup_commanded_us_ += static_cast<uint64_t>(std::llround(double(dt)*1000000));
     if(state_==PushState::CLEAR_PILE && last_vx_>0 && timely)
         clear_commanded_us_ += static_cast<uint64_t>(std::llround(double(dt)*1000000));
+    if(t_.attempt_budget_us && in.run){
+        if(!attempt_started_)attempt_started_=now;
+        if(last_vx_<0)bounded_retreat_-=last_vx_*dt;
+        if(last_vx_>0 && trip_.total()==0)bounded_approach_+=last_vx_*dt;
+        if(now<attempt_started_ || now-attempt_started_>t_.attempt_budget_us ||
+            (t_.approach_limit_m>0&&bounded_approach_>=t_.approach_limit_m) ||
+            (t_.retreat_limit_m>0&&bounded_retreat_>=t_.retreat_limit_m))fail("bounded_attempt_exhausted");
+    }
     if (fault_) { state_ = PushState::SAFE_STOP; return result(); }
+    if(t_.require_multi_view && state_!=PushState::WAIT_START && (!in.safety_ok||!timely)){
+        fail(!timely?"stale_frame":"safety_veto");state_=PushState::SAFE_STOP;return result();
+    }
     if (!in.run || !in.safety_ok || !timely) {
         if (state_ != PushState::WAIT_START) stopped_from_ = state_;
         enter(PushState::WAIT_START, now, !in.run ? "not_running" : !in.safety_ok ? "safety_veto" : "stale_frame");
@@ -258,7 +273,7 @@ PushOutput PushTask::update(const PushObservation &in) {
     if ((state_ == PushState::CAPTURE_FAIL || state_ == PushState::LOST_HOLD ||
          state_ == PushState::ABORT_DROP) && in.opponent_zone_clear)
         commandFrame(1, now); // release at rest while recovering the FAR view
-    if (state_ != PushState::PREPARE && state_ != PushState::RAISE_RELEASE) {
+    if (state_ != PushState::PREPARE && state_ != PushState::RAISE_RELEASE && state_ != PushState::VERIFY_CAPTURE) {
         const int p = pitchWait(in, now);
         if (p < 0) { fail("camera_pitch_timeout"); state_ = PushState::SAFE_STOP; return result(); }
         if (p == 0) { reason_="camera_pitch_wait"; return result(); }
@@ -601,11 +616,21 @@ PushOutput PushTask::update(const PushObservation &in) {
     case PushState::LOWER_FRAME: {
         commandFrame(0, now);
         const int g = frameWait(in, 0, now);
-        if (g < 0) { reason_ = "frame_lower_timeout"; enter(PushState::ABORT_DROP, now, ""); }
+        if (g < 0) { fail("frame_close_timeout"); state_=PushState::SAFE_STOP; }
         else if (g > 0) enter(PushState::VERIFY_CAPTURE, now, "frame_lowered");
         break;
     }
     case PushState::VERIFY_CAPTURE: {
+        if(t_.require_multi_view) {
+            if(elapsed>8000000 || (in.multi_view_finished && in.multi_view_verdict!=1)) {
+                fail("multi_view_unconfirmed");state_=PushState::SAFE_STOP;break;
+            }
+            if(!in.multi_view_finished)break;
+            verdict_=checkTrip(in.multi_view_inventory,first_);
+            if(verdict_!=RuleVerdict::OK || in.multi_view_inventory!=pending_){fail("multi_view_inventory_conflict");state_=PushState::SAFE_STOP;break;}
+            trip_=in.multi_view_inventory;carry_us_=now;zone_search_started_us_=0;
+            enter(PushState::CARRY,now,"multi_view_capture_verified");hold_seen_us_=now;carried_=0;break;
+        }
         if (elapsed > t_.verify_budget_us) { enter(PushState::CAPTURE_FAIL, now, "capture_unverified"); break; }
         if (in.hold_observable && in.captured && in.held_complete) {
             const auto verdict=checkTrip(in.held,first_);
@@ -788,6 +813,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (!stable && !expired) break;
         const int credited = stable ? delivery_delta_ : 0;
         total_ += credited;
+        if(credited>0){attempt_started_=now;bounded_approach_=bounded_retreat_=0;}
         if(credited==expected && credited>0){near_failures_=0;}
         if (credited > 0 && credited == expected && trip_.ordinary == trip_.total()) first_ = true;
         reason_ = credited == expected ? "delivered" : credited ? "partial_delivery" : "delivery_unverified";

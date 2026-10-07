@@ -27,11 +27,12 @@ struct Sim {
     PushOutput out;
     float px = -.15f, py = -.75f, phi = 0; // phi: robot heading vs zone +y, CCW positive
     bool zone_visible = true, zone_predicted = false, gripper_responds = true, servo_responds = true;
+    bool multi_evidence=true;
     bool navigation_ready = true, drop_available = true, live_camera_guard = false;
     int pitch = 0, pitch_still = 0, pitch_rate = 400; // power-on: level
     Inventory load; // what is physically enclosed
     std::set<PushState> visited;
-    static TaskTuning testTune(TaskTuning t) { t.startup_advance_us = 0; return t; }
+    static TaskTuning testTune(TaskTuning t) { t.startup_advance_us = 0; t.require_multi_view=false; return t; }
     explicit Sim(TaskTuning t = {}) : tune(testTune(t)), task(tune) {
         in.run = in.safety_ok = in.target_valid = in.geometry_valid = true;
         in.target_region_valid = in.zone_identity_verified = true;
@@ -73,9 +74,12 @@ struct Sim {
         in.hold_observable = in.camera_pitch_stable && std::abs(pitch - tune.near_pitch_cdeg) <= 100;
         in.held = in.hold_observable ? load : Inventory{};
         in.captured = in.held_complete = in.held.total() > 0;
-        in.gripper_closed_observed=gripper_responds && out.motion.gripper_offset==0;
+        in.gripper_closed_observed=gripper_responds && out.motion.gripper_offset==20;
+        in.multi_view_finished=multi_evidence && out.state==PushState::VERIFY_CAPTURE && in.captured;
+        in.multi_view_verdict=in.multi_view_finished?1:0;
+        in.multi_view_inventory=in.held;
         in.gripper_done = gripper_responds;
-        in.gripper_feedback_open = gripper_responds ? (out.motion.gripper_offset == 20 ? 1 : 0) : -1;
+        in.gripper_feedback_open = gripper_responds ? (out.motion.gripper_offset == 0 ? 1 : 0) : -1;
         const bool mapped = in.camera_pitch_stable && pitch==tune.far_pitch_cdeg;
         if(live_camera_guard) {
             const std::string reason=in.camera_pitch_stable?"pitch_not_calibrated":"pitch_moving";
@@ -348,7 +352,7 @@ void blindRetreatTests() {
         for(int i=0;i<400 && s.out.state!=PushState::SCAN;++i) {
             s.tick();
             assert(s.out.state!=PushState::SAFE_STOP);
-            if(s.out.motion.vx_mps<0) { reversed=true; assert(s.out.motion.wz_rps==0 && s.out.motion.gripper_offset==20); }
+            if(s.out.motion.vx_mps<0) { reversed=true; assert(s.out.motion.wz_rps==0 && s.out.motion.gripper_offset==0); }
         }
         assert(reversed && s.out.state==PushState::SCAN && s.out.reason=="blind_retreat_complete");
         assert(std::abs(s.phi-phi0)<1e-6f);
@@ -400,7 +404,7 @@ int main(int argc, char **argv) {
       for(int i=0;i<30;++i)assert(s.tick().motion.vx_mps==0);
     }
     { Sim s;s.toCarry();assert(s.until(PushState::RAISE_RELEASE,400));s.drop_available=false;
-      for(int i=0;i<10;++i){auto o=s.tick();assert(stopped(o.motion)&&o.motion.gripper_offset==0);}
+      for(int i=0;i<10;++i){auto o=s.tick();assert(stopped(o.motion)&&o.motion.gripper_offset==20);}
     }
     { // Live-loop guard permits camera work only at zero speed in explicit phases.
         PushOutput out; out.state=PushState::LOWER_FRAME;
@@ -466,7 +470,7 @@ int main(int argc, char **argv) {
         assert(s.out.state==PushState::CARRY);
         bool searched=false;
         for(int i=0;i<550;++i) {
-            s.tick();assert(s.out.state==PushState::CARRY&&s.out.motion.vx_mps==0&&s.out.motion.gripper_offset==0);
+            s.tick();assert(s.out.state==PushState::CARRY&&s.out.motion.vx_mps==0&&s.out.motion.gripper_offset==20);
             searched|=s.out.motion.wz_rps>0&&s.out.reason=="searching_own_zone";
         }
         assert(searched); // >25s with no zone no longer aborts the requested first-trip search
@@ -479,7 +483,7 @@ int main(int argc, char **argv) {
         TaskTuning t;t.carry_budget_us=90000000;t.zone_search_budget_us=2000000;
         Sim s(t);s.toCarry();s.zone_visible=false;
         assert(s.until(PushState::SAFE_STOP,100));
-        assert(s.out.reason=="own_zone_search_timeout"&&stopped(s.out.motion)&&s.out.motion.gripper_offset==0);
+        assert(s.out.reason=="own_zone_search_timeout"&&stopped(s.out.motion)&&s.out.motion.gripper_offset==20);
     }
     { // Count a full 10s of forward commands; blocked time is not travelled time.
         TaskTuning t;t.startup_advance_us=10000000;PushTask task(t);PushObservation in;
@@ -498,12 +502,12 @@ int main(int argc, char **argv) {
         TaskTuning t;t.enable_search_cues=true;Sim s(t);
         s.in.label=label;s.in.target_is_search_cue=true;s.in.distance_m=.34f;
         assert(s.until(PushState::SELECT_CARGO,80));
-        assert(stopped(s.out.motion)&&s.out.motion.gripper_offset==0);
+        assert(stopped(s.out.motion)&&s.out.motion.gripper_offset==20);
         assert(s.out.search_cue_id==7&&s.out.capture_target_id==-1&&!s.out.cue_contact_allowed);
         s.in.label="ordinary_supply";s.in.target_id=9;s.in.target_is_search_cue=false;s.in.distance_m=.7f;
         assert(s.until(PushState::APPROACH,10));
         assert(s.out.search_cue_id==7&&s.out.capture_target_id==9&&s.out.target_id==9);
-        s.tick();assert(s.out.state==PushState::APPROACH&&s.out.motion.gripper_offset==0);
+        s.tick();assert(s.out.state==PushState::APPROACH&&s.out.motion.gripper_offset==20);
         s.in.distance_m=.2f;s.toCarry();s.deliver();
         assert(s.out.first_ordinary_delivered&&s.out.delivered_total==1);
         assert(!s.visited.count(PushState::CLEAR_PILE));
@@ -514,7 +518,7 @@ int main(int argc, char **argv) {
         assert(s.until(PushState::SELECT_CARGO,80));
         s.in.target_is_search_cue=false;
         for(int i=0;i<90;++i){
-            s.tick();assert(stopped(s.out.motion)&&s.out.motion.gripper_offset==0);
+            s.tick();assert(stopped(s.out.motion)&&s.out.motion.gripper_offset==20);
             if(s.out.state==PushState::SCAN)break;
         }
         assert(s.out.state==PushState::SCAN&&s.out.reason=="no_eligible_cargo");
@@ -565,7 +569,7 @@ int main(int argc, char **argv) {
         assert(s.out.state==PushState::MID_APPROACH&&s.pitch==2000&&s.in.camera_pitch_stable);
         s.tick();assert(s.out.motion.vx_mps>0&&s.out.motion.vx_mps<=.4f);
         s.in.distance_m=.21f;s.tick();assert(s.out.state==PushState::MID_APPROACH);
-        s.in.distance_m=.19f;assert(s.until(PushState::NEAR_REACQUIRE,15));assert(stopped(s.out.motion)&&s.out.motion.gripper_offset==20);
+        s.in.distance_m=.19f;assert(s.until(PushState::NEAR_REACQUIRE,15));assert(stopped(s.out.motion)&&s.out.motion.gripper_offset==0);
         assert(s.out.motion.camera_pitch_cdeg==4000);s.in.target_id=102;
         assert(s.until(PushState::APPROACH,40));assert(s.out.capture_target_id==102&&s.pitch==4000);
         s.in.distance_m=.2f;s.toCarry();assert(s.out.motion.camera_pitch_cdeg==500);
@@ -576,12 +580,12 @@ int main(int argc, char **argv) {
         assert(s.until(PushState::MID_REACQUIRE,80));s.in.target_is_search_cue=false;s.in.target_id=101;
         assert(s.until(PushState::MID_APPROACH,40));s.in.distance_m=.34f;s.gripper_responds=false;
         for(int i=0;i<5;++i){s.tick();assert(stopped(s.out.motion));}
-        assert(s.out.motion.gripper_offset==20&&s.out.motion.camera_pitch_cdeg==2000);
+        assert(s.out.motion.gripper_offset==0&&s.out.motion.camera_pitch_cdeg==2000);
         assert(s.out.reason=="mid_gripper_feedback_wait");
         s.gripper_responds=true;s.tick();assert(s.out.motion.vx_mps>0);
-        s.in.distance_m=.19f;s.tick();assert(s.out.state==PushState::NEAR_REACQUIRE&&s.out.motion.gripper_offset==20);
+        s.in.distance_m=.19f;s.tick();assert(s.out.state==PushState::NEAR_REACQUIRE&&s.out.motion.gripper_offset==0);
         s.in.target_id=102;assert(s.until(PushState::APPROACH,40));
-        assert(s.out.motion.gripper_offset==20&&s.out.motion.camera_pitch_cdeg==4000);
+        assert(s.out.motion.gripper_offset==0&&s.out.motion.camera_pitch_cdeg==4000);
     }
     for(int mode=0;mode<4;++mode) {
         // Field 20deg setup (near switch 0.27). 0: tracked to 0.26 switches to 40deg.
@@ -593,24 +597,24 @@ int main(int argc, char **argv) {
         Sim s(t);s.in.target_is_search_cue=true;s.in.distance_m=.39f;
         assert(s.until(PushState::MID_REACQUIRE,80));s.in.target_is_search_cue=false;s.in.target_id=101;
         assert(s.until(PushState::MID_APPROACH,40));
-        if(mode==3){s.in.distance_m=.38f;s.tick();assert(s.out.motion.gripper_offset==0);
+        if(mode==3){s.in.distance_m=.38f;s.tick();assert(s.out.motion.gripper_offset==20);
             s.in.target_valid=false;assert(s.until(PushState::LOST_SEARCH,20));continue;}
         s.in.distance_m=.34f;
-        for(int i=0;i<10&&!(s.out.motion.gripper_offset==20&&s.out.motion.vx_mps>0);++i)s.tick();
-        assert(s.out.motion.gripper_offset==20&&s.out.motion.vx_mps>0);
+        for(int i=0;i<10&&!(s.out.motion.gripper_offset==0&&s.out.motion.vx_mps>0);++i)s.tick();
+        assert(s.out.motion.gripper_offset==0&&s.out.motion.vx_mps>0);
         if(mode==0) {
             s.in.distance_m=.28f;s.tick();assert(s.out.state==PushState::MID_APPROACH&&s.out.motion.vx_mps>0);
             s.in.distance_m=.26f;s.tick();
-            assert(s.out.state==PushState::NEAR_REACQUIRE&&stopped(s.out.motion)&&s.out.motion.gripper_offset==20);
+            assert(s.out.state==PushState::NEAR_REACQUIRE&&stopped(s.out.motion)&&s.out.motion.gripper_offset==0);
             continue;
         }
         if(mode==1){s.in.distance_m=.29f;s.tick();assert(s.out.state==PushState::MID_APPROACH);}
         s.in.target_valid=false;s.tick();
         if(mode==1) {
-            assert(s.out.state==PushState::NEAR_REACQUIRE&&stopped(s.out.motion)&&s.out.motion.gripper_offset==20);
+            assert(s.out.state==PushState::NEAR_REACQUIRE&&stopped(s.out.motion)&&s.out.motion.gripper_offset==0);
             assert(s.out.reason=="open_jaw_lost_at_mouth_near_handoff"&&s.out.motion.camera_pitch_cdeg==4000);
             s.in.target_valid=true;s.in.target_id=102;s.in.distance_m=.22f;
-            assert(s.until(PushState::APPROACH,40)&&s.out.motion.gripper_offset==20);
+            assert(s.until(PushState::APPROACH,40)&&s.out.motion.gripper_offset==0);
         } else {
             assert(s.until(PushState::SAFE_STOP,20)&&s.out.reason=="lost_search_jaw_or_load_unsafe");
         }
@@ -629,13 +633,13 @@ int main(int argc, char **argv) {
         s.in.target_is_search_cue=true;s.in.distance_m=.39f;
         assert(s.until(PushState::MID_REACQUIRE,80));s.in.target_is_search_cue=false;s.in.target_id=101;
         assert(s.until(PushState::MID_APPROACH,40));s.in.distance_m=.34f;
-        for(int i=0;i<10&&!(s.out.motion.gripper_offset==20&&s.out.motion.vx_mps>0);++i)s.tick();
-        assert(s.out.motion.gripper_offset==20&&s.out.motion.vx_mps>0);
+        for(int i=0;i<10&&!(s.out.motion.gripper_offset==0&&s.out.motion.vx_mps>0);++i)s.tick();
+        assert(s.out.motion.gripper_offset==0&&s.out.motion.vx_mps>0);
         s.in.corridor=mode==1?inv(1,0,0,1):inv(2);s.tick();
         assert(s.out.state==PushState::MID_APPROACH&&stopped(s.out.motion)&&s.out.reason=="open_jaw_corridor_recheck");
         if(mode==0) {
             s.in.corridor=inv(1);s.tick();
-            assert(s.out.state==PushState::MID_APPROACH&&s.out.motion.vx_mps>0&&s.out.motion.gripper_offset==20);
+            assert(s.out.state==PushState::MID_APPROACH&&s.out.motion.vx_mps>0&&s.out.motion.gripper_offset==0);
             continue;
         }
         s.tick();assert(stopped(s.out.motion));
@@ -684,7 +688,7 @@ int main(int argc, char **argv) {
             int moving=0;
             for(int i=0;i<12 && s.out.state!=PushState::CLEAR_PAUSE;++i) {
                 s.in.distance_m=std::max(.19f,s.in.distance_m-.04f);
-                s.tick();assert(s.out.motion.gripper_offset==0&&s.out.motion.wz_rps==0&&s.out.delivered_total==0);
+                s.tick();assert(s.out.motion.gripper_offset==20&&s.out.motion.wz_rps==0&&s.out.delivered_total==0);
                 if(s.out.motion.vx_mps>0){assert(s.out.motion.vx_mps==.4f);++moving;}
             }
             assert(moving>0&&moving<=6&&s.out.state==PushState::CLEAR_PAUSE&&s.out.clearing_attempts==1);
@@ -831,7 +835,7 @@ int main(int argc, char **argv) {
         assert(!s.visited.count(PushState::RAISE_RELEASE));
         bool advanced=false;
         for(int i=0;i<400 && s.out.state==PushState::ENTER;++i) {
-            s.tick(); assert(s.out.motion.gripper_offset==0);
+            s.tick(); assert(s.out.motion.gripper_offset==20);
             if(s.out.motion.vx_mps>0) advanced=true;
         }
         assert(advanced && s.out.state==PushState::RAISE_RELEASE);
@@ -841,11 +845,11 @@ int main(int argc, char **argv) {
             s.tick(); assert(stopped(s.out.motion));
             assert(s.out.state!=PushState::BACK_OUT);
         }
-        assert(s.out.state==PushState::SAFE_STOP && s.out.motion.gripper_offset==20);
+        assert(s.out.state==PushState::SAFE_STOP && s.out.motion.gripper_offset==0);
     }
     { // Full first ordinary trip: rush, enclose, carry, carry inside, raise at the drop point, back out, turn.
         Sim s; s.toCarry();
-        assert(s.out.batch_size == 1 && s.out.motion.gripper_offset == 0);
+        assert(s.out.batch_size == 1 && s.out.motion.gripper_offset == 20);
         s.deliver();
         assert(s.out.delivered_total == 1 && s.out.first_ordinary_delivered && s.out.reason == "delivered");
         for (auto st : {PushState::SCAN, PushState::APPROACH, PushState::PREPARE, PushState::RUSH, PushState::LOWER_FRAME,
@@ -893,7 +897,7 @@ int main(int argc, char **argv) {
     { // First trip that also swept a core supply into the frame: release and back off.
         Sim s; s.toRush(); s.hold(inv(1, 1));
         assert(s.until(PushState::ABORT_DROP, 40) && s.out.verdict == RuleVerdict::CORE_BEFORE_FIRST);
-        s.tick(); assert(s.out.motion.gripper_offset == 20);
+        s.tick(); assert(s.out.motion.gripper_offset == 0);
         s.hold({});
         assert(s.until(PushState::SCAN, 200));
         assert(s.out.delivered_total == 0 && !s.out.first_ordinary_delivered);
@@ -912,13 +916,13 @@ int main(int argc, char **argv) {
         Sim s; s.toRush(); s.in.distance_m=at_close?.19f:.30f;
         s.in.corridor=inv(1,0,0,1); s.tick();
         assert(s.out.state==PushState::CAPTURE_FAIL && stopped(s.out.motion));
-        assert(s.out.motion.gripper_offset==20 && s.out.reason=="rush_corridor_dangerous");
+        assert(s.out.motion.gripper_offset==0 && s.out.reason=="rush_corridor_dangerous");
         assert(!s.visited.count(PushState::LOWER_FRAME));
     }
     { // Lost corridor evidence also prevents advancing or closing.
         Sim s; s.toRush(); s.in.corridor_complete=false; s.tick();
         assert(s.out.state==PushState::CAPTURE_FAIL && stopped(s.out.motion));
-        assert(s.out.reason=="rush_corridor_incomplete" && s.out.motion.gripper_offset==20);
+        assert(s.out.reason=="rush_corridor_incomplete" && s.out.motion.gripper_offset==0);
     }
     { // Too many supplies in the corridor: the rush is not started.
         Sim s; s.in.corridor = inv(4);
@@ -981,7 +985,7 @@ int main(int argc, char **argv) {
         Sim s; s.toCarry();
         assert(s.until(PushState::GATE, 800));
         s.hold({});
-        for (int i = 0; i < 100 && s.out.state == PushState::GATE; ++i) { s.tick(); assert(s.out.motion.gripper_offset == 0); }
+        for (int i = 0; i < 100 && s.out.state == PushState::GATE; ++i) { s.tick(); assert(s.out.motion.gripper_offset == 20); }
         assert(s.out.state == PushState::LOST_HOLD && !s.visited.count(PushState::RAISE_RELEASE));
     }
     { // Pushed, but the zone counts never confirm it: no credit, first stays false.
@@ -1026,7 +1030,7 @@ int main(int argc, char **argv) {
     }
     { // A load is never released where the opponent zone may receive it.
         Sim s; s.toCarry(); s.in.opponent_zone_clear = false; s.hold({});
-        assert(s.until(PushState::LOST_HOLD, 200) && s.out.motion.gripper_offset == 0);
+        assert(s.until(PushState::LOST_HOLD, 200) && s.out.motion.gripper_offset == 20);
         assert(s.until(PushState::SAFE_STOP, 80) && s.out.reason == "drop_blocked_opponent_zone");
         for (int i = 0; i < 5; ++i) assert(stopped(s.tick().motion) && s.out.state == PushState::SAFE_STOP);
     }
@@ -1054,7 +1058,7 @@ int main(int argc, char **argv) {
         Sim s; s.toCarry(); s.tick();
         s.in.safety_ok = false; s.tick();
         assert(s.out.state == PushState::WAIT_START && stopped(s.out.motion) && s.out.batch_size == 1);
-        assert(s.out.motion.gripper_offset == 0); // a stop never opens the frame
+        assert(s.out.motion.gripper_offset == 20); // a stop never opens the frame
         s.in.safety_ok = true; s.tick(); assert(s.out.state == PushState::CARRY && s.out.batch_size == 1);
         s.in.now_us += 300000; s.tick();
         assert(s.out.state == PushState::WAIT_START && stopped(s.out.motion));
@@ -1106,13 +1110,13 @@ int main(int argc, char **argv) {
     }
     { // Entering PREPARE must open in the same stationary output, not one frame later.
         Sim s; assert(s.until(PushState::PREPARE, 40));
-        assert(stopped(s.out.motion) && s.out.motion.gripper_offset == 20);
+        assert(stopped(s.out.motion) && s.out.motion.gripper_offset == 0);
     }
     { // Open at NEAR without ground evidence, then reacquire TRACK before moving.
         Sim s;
         assert(s.until(PushState::PREPARE,80));
         s.live_camera_guard=true;
-        assert(s.out.motion.camera_pitch_cdeg==4000 && s.out.motion.gripper_offset==20);
+        assert(s.out.motion.camera_pitch_cdeg==4000 && s.out.motion.gripper_offset==0);
         bool returned=false;
         for(int i=0;i<60;++i) {
             s.in.target_valid=s.in.geometry_valid=false;
@@ -1136,6 +1140,18 @@ int main(int argc, char **argv) {
     { // Still outside the closing plane: do not close early.
         Sim s; s.toRush(); s.in.distance_m = .21f; s.in.heading_error = .2f;
         s.tick(); assert(s.out.state == PushState::RUSH);
+    }
+    { // New default: missing multiview evidence holds CLOSE and ends in safe stop.
+        Sim s;s.tune.require_multi_view=true;s.task=PushTask(s.tune);s.multi_evidence=false;
+        s.toRush();s.load=inv(1);s.in.distance_m=.19f;
+        assert(s.until(PushState::VERIFY_CAPTURE,100));
+        for(int i=0;i<200&&s.out.state!=PushState::SAFE_STOP;++i){s.tick();assert(stopped(s.out.motion));assert(s.out.motion.gripper_offset==20);}
+        assert(s.out.state==PushState::SAFE_STOP&&s.out.reason=="multi_view_unconfirmed");
+        assert(!s.visited.count(PushState::CARRY));
+    }
+    { // Positive injected multiview summary exercises the actual default path.
+        Sim s;s.tune.require_multi_view=true;s.task=PushTask(s.tune);s.toCarry();
+        assert(s.out.state==PushState::CARRY&&s.out.reason=="multi_view_capture_verified");
     }
     assert(makeTargetAreas("red") == std::vector<std::string>{"red_safe_zone"});
     assert(makeTargetAreas("blue") == std::vector<std::string>{"blue_safe_zone"});

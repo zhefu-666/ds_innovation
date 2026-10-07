@@ -20,6 +20,8 @@
 #include "rescue/task_calibration.hpp"
 #include "rescue/navigation_adapter.hpp"
 #include "rescue/perception_adapter.hpp"
+#include "rescue/pixel_selector.hpp"
+#include "rescue/multi_view_capture.hpp"
 #include "rescue/tracker.hpp"
 #include "rescue/utils.hpp"
 #include "rescue/vision_logic.hpp"
@@ -60,6 +62,8 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
     flag("hold_observable", in.hold_observable);
     flag("captured", in.captured); flag("held_complete", in.held_complete);
     flag("camera_pitch_stable", in.camera_pitch_stable);
+    flag("multi_view_finished",in.multi_view_finished);
+    if(!n["multi_view_verdict"].empty()) n["multi_view_verdict"]>>in.multi_view_verdict;
     flag("gripper_done", in.gripper_done);
     flag("zone_valid", in.zone_valid); flag("zone_own", in.zone_own);
     flag("carry_plan_valid",in.carry_plan_valid);flag("drop_plan_valid",in.drop_plan_valid);
@@ -88,6 +92,7 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
         count("ordinary", inv.ordinary); count("core", inv.core); count("injured", inv.injured);
         count("dangerous", inv.dangerous); count("unknown", inv.unknown);
     };
+    inventory("multi_view_inventory",in.multi_view_inventory);
     inventory("corridor", in.corridor); inventory("held", in.held);
     n["label"] >> in.label; n["zone_class"] >> in.zone_class;
     n["distance_m"] >> in.distance_m; n["heading_error"] >> in.heading_error;
@@ -245,15 +250,18 @@ int main(int argc, char **argv) {
         if(config.controlled_empty_field) tuning.carry_budget_us = 90000000;
         cv::Vec<float,6> body_envelope{};
         float measured_load_radius=0, measured_body_radius=0, load_half_width=0, load_half_depth=0;
+        std::vector<FrameView> frame_views;int feedback_open=-1,feedback_close=-1;bool box_area_accepted=false;
         CaptureConfig capture_config;capture_config.holding.clear(); // uncalibrated is unobservable
         capture_config.image_height_px=config.frame_height;
         const bool task_calibrated=!config.task_calibration_file.empty();
         if(task_calibrated) {
             const auto measured=loadTaskCalibration(config.task_calibration_file,tuning,config.frame_width,config.frame_height);
+            frame_views=measured.frame_views;feedback_open=measured.feedback_open;feedback_close=measured.feedback_close;box_area_accepted=measured.box_area_accepted;
             body_envelope=measured.body_envelope;
             tuning=measured.task;capture_config=measured.capture;measured_load_radius=measured.load_radius_m;measured_body_radius=measured.robot_swept_radius_m;
             load_half_width=measured.load_half_width_m;load_half_depth=measured.load_half_depth_m;
         }
+        if(config.hardware && (feedback_open<0||frame_views.size()<2))throw std::runtime_error("New frame requires accepted schema 2 calibration and A6 mapping before hardware output");
         if (config.check_config) {
             int missing = 0;
             const auto check = [&](bool ok, const char* reason) {
@@ -261,6 +269,7 @@ int main(int argc, char **argv) {
                 missing += !ok;
             };
             check(task_calibrated, "task_calibration");
+            check(feedback_open>=0 && frame_views.size()>=2,"new_frame_mapping_and_multiview_calibration");
             const auto g = ZoneGeometry::load(config.zone_geometry_file, config.team+"_safe_zone");
             check(loadFitsHalf(measured_load_radius,g.width_m,g.depth_m,g.divider_exclusion_half_width_m,load_half_width,load_half_depth),
                   "load_footprint_fits_half");
@@ -358,6 +367,7 @@ int main(int argc, char **argv) {
         std::unique_ptr<MotionLink> link;
         if(config.hardware) {
             feedback=std::make_unique<UARTController>();
+            feedback->configureFrameFeedback(feedback_open,feedback_close);
             feedback->initUART(config.uart_port,config.baudrate,false,config.auto_run);
             // Continue from the MCU's current action id so a restart is never taken as a repeat.
             if(!feedback->syncGripperActionId(Ms(500)))
@@ -376,6 +386,9 @@ int main(int argc, char **argv) {
         VisionLogic vision(config);
         NearestNeighborTracker tracker;
         CaptureMonitor capture(capture_config);
+        PixelSelector pixel_selector;MultiViewCapture multi_view(frame_views,{config.frame_width,config.frame_height});
+        bool observing=false;uint64_t observation_round=0;
+        ZoneEstimate observation_pose;
         // Use the USB camera's MJPEG V4L2 path; automatic GStreamer negotiation
         // fails when applying the requested 720p/60 FPS settings on this board.
         cv::VideoCapture camera(config.camera_index, cv::CAP_V4L2);
@@ -466,24 +479,22 @@ int main(int argc, char **argv) {
                 geometry_result=geometry->process(geometry_frame,points,detections);
                 detections=geometry_result.detections;
             }
-            const bool cue_locked=previous.state==PushState::CUE_APPROACH || previous.state==PushState::CUE_PREPARE ||
-                previous.state==PushState::CLEAR_PILE;
-            const bool locked=cue_locked || previous.state==PushState::MID_APPROACH || previous.state==PushState::APPROACH || previous.state==PushState::PREPARE ||
-                previous.state==PushState::RUSH || previous.state==PushState::LOWER_FRAME ||
-                previous.state==PushState::VERIFY_CAPTURE || previous.state==PushState::CARRY ||
-                previous.state==PushState::GATE || previous.state==PushState::RAISE_RELEASE ||
-                previous.state==PushState::ENTER || previous.state==PushState::BACK_OUT ||
-                previous.state==PushState::VERIFY_DELIVERY;
-            auto input = makePushObservation(detections, observed_at,
-                previous.first_ordinary_delivered, config.confidence,
-                locked?previous.target_id:-1,task.rejectedTargets(observed_at),
-                config.search_cues && (previous.state==PushState::SCAN || previous.state==PushState::CUE_APPROACH ||
-                                      previous.state==PushState::WAIT_START || previous.state==PushState::START_ADVANCE),
-                cue_locked,bool(geometry));
+            const auto selection=pixel_selector.update(detections,frame.size(),frame_sensors.actuator.camera_pitch_cdeg,
+                frame_sensors.actuator.valid && frame_sensors.pitch_stable,observed_at,previous.first_ordinary_delivered,
+                config.confidence,task.rejectedTargets(observed_at));
+            auto input = makePushObservation(detections, observed_at,previous.first_ordinary_delivered,config.confidence,
+                selection.id,task.rejectedTargets(observed_at),false,false,false);
+            if(!selection.locked) input.target_valid=false;
+            if(selection.mode=="box_area" && !box_area_accepted)input.target_valid=false;
+            std::cout << "[PIXEL_SELECTION] timestamp="<<observed_at<<" pitch="<<frame_sensors.actuator.camera_pitch_cdeg
+                <<" stable="<<frame_sensors.pitch_stable<<" id="<<selection.id<<" mode="<<selection.mode
+                <<" raw="<<selection.raw<<" smooth="<<selection.smoothed<<" locked="<<selection.locked<<" reason="<<selection.reason<<"\n";
+            input.pixel_ratio_raw=selection.raw;input.pixel_ratio_smoothed=selection.smoothed;
+            input.pixel_mode=selection.mode;input.pixel_reason=selection.reason;input.pixel_locked=selection.locked;
             input.run = false; // MatchControl supplies the final authorization below.
             if(geometry)geometry->apply(input,geometry_result,expected_stop,config.team,imuNowUs());
             if(frame_sensors.actuator.valid){
-                input.gripper_closed_observed=frame_sensors.actuator.gripper_open==0;
+                input.gripper_closed_observed=feedback_close>=0 && frame_sensors.actuator.gripper_open==feedback_close;
                 input.camera_pitch_cdeg=frame_sensors.actuator.camera_pitch_cdeg;
                 input.camera_pitch_stable=frame_sensors.pitch_stable;
             }
@@ -496,6 +507,27 @@ int main(int argc, char **argv) {
             }
             // Holding-region and rush-corridor inventory; uncertainty leaves them incomplete.
             capture.update(input, detections, observed_at);
+            if(previous.state==PushState::VERIFY_CAPTURE){
+                const auto fb=feedback?feedback->latestActuatorFeedback():ActuatorFeedback{};
+                if(!observing){multi_view.begin(observed_at,fb.gripper_action_id,++observation_round);observing=true;observation_pose=input.zone_estimate;}
+                const bool stationary_pose=observation_pose.trusted(observation_pose.timestamp_us) && input.zone_estimate.trusted(observed_at) &&
+                    observation_pose.source!=ZoneEstimate::Source::PREDICTED && input.zone_estimate.source!=ZoneEstimate::Source::PREDICTED &&
+                    observation_pose.geometry_id==input.zone_estimate.geometry_id &&
+                    cv::norm(observation_pose.origin_body_m-input.zone_estimate.origin_body_m)<.01 &&
+                    std::abs(wrapAngle(observation_pose.yaw_body_rad-input.zone_estimate.yaw_body_rad))<.02;
+                multi_view.update(observed_at,timestamp,fb.gripper_action_id,
+                    fb.valid && input.gripper_done && input.gripper_feedback_open==0,
+                    stationary_pose && previous.motion.vx_mps==0 && previous.motion.wz_rps==0,
+                    input.camera_pitch_cdeg,input.camera_pitch_stable,detections);
+                const auto& evidence=multi_view.result();input.multi_view_finished=evidence.finished;
+                input.multi_view_verdict=int(evidence.verdict);input.multi_view_inventory=evidence.inventory;
+                input.multi_view_pitch=multi_view.desiredPitch();
+                input.multi_view_reason=evidence.reason;input.observation_view=evidence.view;input.observation_frames=evidence.frames;input.observation_round=evidence.round;
+                std::cout<<"[MULTI_VIEW] timestamp="<<observed_at<<" round="<<evidence.round<<" action="<<int(fb.gripper_action_id)
+                    <<" view="<<evidence.view<<" frames="<<evidence.frames<<" verdict="<<captureVerdictName(evidence.verdict)
+                    <<" finished="<<evidence.finished<<" reason="<<evidence.reason<<"\n";
+            }else if(observing){multi_view.reset();observing=false;}
+
             if(config.controlled_empty_field)
                 controlled_field.update(input,detections,vision_result.halves,frame.size(),previous,geometry_result.mapping_valid,config.controlled_ignore_clearance);
             // Raw boxes do not establish metric distance, route safety or delivery.

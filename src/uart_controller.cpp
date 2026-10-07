@@ -215,8 +215,9 @@ bool UARTController::syncGripperActionId(std::chrono::milliseconds timeout) {
             if (gripper_sent_) return true; // 已经开始发送，编号由发送序列决定
             // 下位机未随上位机重启：接管其当前编号和夹爪状态，保持该状态不算新动作，状态变化才用编号+1。
             gripper_action_id_ = fb.gripper_action_id;
-            gripper_synced_ = fb.gripper_open <= 1;
-            gripper_target_ = gripper_synced_ && fb.gripper_open == 1 ? 20 : 0;
+            gripper_synced_ = feedback_open_>=0 && (fb.gripper_open == feedback_open_ || fb.gripper_open == feedback_close_);
+            if(!gripper_synced_) return false;
+            gripper_target_ = fb.gripper_open == feedback_open_ ? frameAngle(FrameAction::Open) : frameAngle(FrameAction::Close);
             return true;
         }
         if (Clock::now() >= until) return false;
@@ -231,10 +232,9 @@ int16_t UARTController::cameraPitchTarget() const {
 
 namespace {
 // 编号不一致说明完成标志属于上一次动作，不能采信。
-ActionResult judgeAction(uint8_t id, bool feedback_valid, uint8_t feedback_id, uint8_t state, int16_t target) {
+ActionResult judgeAction(uint8_t id, bool feedback_valid, uint8_t feedback_id, uint8_t state, int expected) {
     if (id == 0) return ActionResult::Idle;
     if (!feedback_valid) return ActionResult::NoFeedback;
-    const int expected = target == 0 ? 0 : target == 20 ? 1 : -1;
     return feedback_id == id && expected >= 0 && state == expected ? ActionResult::Done : ActionResult::NotDone;
 }
 
@@ -251,7 +251,9 @@ UARTController::GripperAck UARTController::gripperAck() const {
     std::lock_guard<std::mutex> guard(io_mutex_);
     if (!gripper_sent_) return {};
     const auto fb = freshFeedback(actuator_feedback_);
-    return {judgeAction(gripper_action_id_, fb.valid, fb.gripper_action_id, fb.gripper_open, gripper_target_), gripper_target_ == 0 ? 0 : gripper_target_ == 20 ? 1 : -1};
+    const int logical_open = gripper_target_ == frameAngle(FrameAction::Open) ? 1 : 0;
+    const int expected = logical_open ? feedback_open_ : feedback_close_;
+    return {judgeAction(gripper_action_id_, fb.valid, fb.timestamp_us > action_started_us_ ? fb.gripper_action_id : 0, fb.gripper_open, expected), logical_open};
 }
 
 ActionResult UARTController::cameraPitchResult(int16_t tolerance_cdeg) const {
@@ -275,12 +277,16 @@ bool UARTController::sendMotion(const MotionCommand &command) {
     if (feedback_only_) return false;
     // 夹爪目标变化才算新动作；写失败后重发沿用同一编号。未同步时首包也算新动作；
     // 同步后首包若与下位机当前状态相同，沿用下位机编号，不消耗编号。
-    const int16_t gripper = std::clamp<int16_t>(command.gripper_offset, -20, 20);
-    const bool keep_mcu_action = !gripper_sent_ && gripper_synced_ && gripper == gripper_target_;
-    if (!keep_mcu_action && (!gripper_sent_ || gripper != gripper_target_)) {
+    const int16_t gripper = command.gripper_offset;
+    if(gripper!=0 && gripper!=20) return false;
+    const bool retry = command.frame_transaction != transaction_;
+    const bool keep_mcu_action = !retry && !gripper_sent_ && gripper_synced_ && gripper == gripper_target_;
+    if (!keep_mcu_action && (!gripper_sent_ || gripper != gripper_target_ || retry)) {
         gripper_action_id_ = nextGripperActionId(gripper_action_id_);
         gripper_target_ = gripper;
+        action_started_us_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
     }
+    transaction_=command.frame_transaction;
     gripper_sent_ = true;
     camera_pitch_target_ = clampPitch(command.camera_pitch_cdeg);
     camera_sent_ = true;
@@ -349,7 +355,8 @@ std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand &comm
     // 下位机对速度有限制：vx硬限幅，任何上层请求都不能超过±kMaxLinearSpeedMps。
     packet.vx_mps = valid ? std::clamp(command.vx_mps, -kMaxLinearSpeedMps, kMaxLinearSpeedMps) : 0.0f;
     packet.wz_rps = valid ? command.wz_rps : 0.0f;
-    packet.gripper_offset = static_cast<int8_t>(std::clamp<int16_t>(command.gripper_offset, -20, 20));
+    if(command.gripper_offset!=0 && command.gripper_offset!=20)throw std::invalid_argument("Frame requires OPEN=0 or CLOSE=20");
+    packet.gripper_offset = static_cast<int8_t>(command.gripper_offset);
     packet.gripper_action_id = gripper_action_id;
     packet.camera_pitch_offset = cameraPitchToWire(command.camera_pitch_cdeg);
     std::vector<uint8_t> bytes(sizeof(packet));

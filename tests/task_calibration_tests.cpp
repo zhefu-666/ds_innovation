@@ -33,5 +33,22 @@ int main(){
     c=loadTaskCalibration(file,TaskTuning{},1280,720);
     assert(c.capture.holding[0].pitch_cdeg==4000 && c.capture.holding[0].min_visible_bottom_y_px==440);
     assert(c.task.injured_hold_center_y_m==.14f && c.task.grasp_trigger_y_m==.20f);
+    // Synthetic schema 2 acceptance exists only in a temporary test file.
+    const std::string synthetic=R"JSON({"schema_version":2,"version":"frame-20261007-pending","status":"pending_field_calibration","dimensions_source":"user_confirmed_not_field_measured","image_width":1280,"image_height":720,"coordinate_transform_verified":1,"action_mapping_verified":1,"capture_stop_verified":1,"body_envelope_verified":1,"visual_acceptance_passed":1,"box_area_accepted":0,"a6_open_state":1,"a6_close_state":0,"forward_sign":1,"rotation_origin_x_m":0,"rotation_origin_y_m":0,"outer_width_m":0.165,"outer_depth_m":0.09515,"inner_width_m":0.15,"inner_depth_m":0.08008,"entrance_width_m":0.15,"edge_height_m":0.01,"near_inner_m":0.09092,"far_inner_m":0.171,"body_left_m":0.145,"body_right_m":0.145,"body_rear_m":0.1,"body_front_m":0.18107,"body_front_source":"derived_0.28107_minus_0.100_pending_endpoint_verification","grasp_trigger_y_m":0.13096,"maximum_block_depth_m":0.04,"stopping_margin_m":0.005,"open_width_m":0.29,"open_front_m":0.19,"robot_swept_radius_m":0.25,"frame_views":[{"pitch_cdeg":500,"calibrated":1,"fully_observable":1,"polygon":[[10,10],[300,10],[300,300],[10,300]]},{"pitch_cdeg":2000,"calibrated":1,"fully_observable":1,"polygon":[[50,50],[350,50],[350,350],[50,350]]}],"pending":["coordinate origin and sign","0 open 20 close physical and A6 mapping","stop position and block dimensions","two or three view polygons and independent samples","body and moving mechanism envelope","box-area mode acceptance or original-image instance masks"],"maximum_block_width_m":0.04})JSON";
+    const auto write2=[&](std::string data){std::ofstream f(file);f<<data;};
+    write2(synthetic);c=loadTaskCalibration(file,TaskTuning{},1280,720);
+    assert(std::abs(c.task.mouth_y_m-.171f)<1e-6f);
+    assert(std::abs(c.task.hold_center_y_m-.13096f)<1e-6f);
+    assert(std::abs(c.load_radius_m-.08501883f)<1e-6f);
+    assert(c.feedback_open==1&&c.feedback_close==0&&c.frame_views.size()==2);
+    assert(c.task.require_multi_view&&c.task.max_speed==.1f&&c.task.attempt_budget_us==60000000);
+    const auto invalid2=[&](const std::string& old,const std::string& replacement){auto data=synthetic;auto at=data.find(old);assert(at!=std::string::npos);data.replace(at,old.size(),replacement);write2(data);assert(rejected());};
+    invalid2("\"action_mapping_verified\":1","\"action_mapping_verified\":0");
+    invalid2("\"coordinate_transform_verified\":1","\"coordinate_transform_verified\":0");
+    invalid2("\"visual_acceptance_passed\":1","\"visual_acceptance_passed\":0");
+    invalid2("\"a6_close_state\":0","\"a6_close_state\":1");
+    invalid2("\"grasp_trigger_y_m\":0.13096","\"grasp_trigger_y_m\":0.2");
+    invalid2("\"pitch_cdeg\":2000","\"pitch_cdeg\":500");
+    invalid2("\"maximum_block_width_m\":0.04","\"maximum_block_width_m\":0.2");
     unlink(file);std::cout<<"Measured gripper calibration validation passed\n";
 }

@@ -1,3 +1,9 @@
+> **2026-10-07 机械接入候选版（尚未通过实车验收）**
+>
+> 本分支采用 **0°开、20°关**，接入像素占比选目标、多档框内证据和动作反馈门槛。运行基线保存在前一提交；本候选没有部署替换原运行版本。
+> 新配置 `config/frame_20261007.pending.json` 保持待验收，旧机械配置不能授权候选硬件运行。
+> 先阅读 [候选版使用与验收](docs/机械候选版_使用与验收.md) 和 [软件验证记录](docs/机械候选版_软件验证_20261007.md)。下方及其他旧日期文档属于历史运行说明，角度、启动和验收口径以候选版说明为准。
+
 # ds_innovation 下载后的部署与运行
 
 本文说明从 GitHub 下载 `ds_innovation` 后，如何在 LubanCat/RK3588S 这类 ARM64 板子上完成编译，并通过网页或 Foxglove 查看主程序的实时检测画面。
@@ -55,7 +61,7 @@ python -m pip install 'websockets>=10,<11'
 
 ## 3. 补齐 Git 忽略的运行资源
 
-为了避免把大文件和板卡二进制提交到 Git，`.gitignore` 排除了 `benchmark_results/`。完整运行仍需要下面两个文件：
+为了避免把大文件和板卡二进制提交到 Git，`.gitignore` 排除了 `benchmark_results/`。编译需要匹配板端 SDK 的 `benchmark_results/rknn_api.h`；该供应商头文件需从已有 SDK 单独提供。完整运行还需要模型和运行库：
 
 ```text
 benchmark_results/best_fp16.rknn

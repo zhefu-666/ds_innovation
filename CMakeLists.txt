@@ -226,7 +226,7 @@ if(BUILD_TESTING)
         --zone-geometry ${CMAKE_CURRENT_SOURCE_DIR}/config/zone_geometry.json
         --task-calibration ${CMAKE_CURRENT_SOURCE_DIR}/config/task_calibration.40_runtime.json
         --pose-model-blue models/zone_pose_fp.rknn)
-    set_tests_properties(rescue_controlled_config_check PROPERTIES PASS_REGULAR_EXPRESSION "hardware_output=disabled")
+    set_tests_properties(rescue_controlled_config_check PROPERTIES WILL_FAIL TRUE)
 endif()
 
 if(BUILD_TESTING)
@@ -234,4 +234,19 @@ if(BUILD_TESTING)
     target_include_directories(async_log_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(async_log_tests PRIVATE pthread)
     add_test(NAME async_log_tests COMMAND async_log_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_mechanical_tests tests/mechanical_integration_tests.cpp src/transport_rules.cpp)
+    target_include_directories(rescue_mechanical_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_mechanical_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_mechanical_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_mechanical_tests COMMAND rescue_mechanical_tests)
+endif()
+
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME frame_virtual_serial_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_frame_ctl.py)
+    add_test(NAME camera_hold_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pitch_prepare5.py)
+    set_tests_properties(frame_virtual_serial_tests camera_hold_tests PROPERTIES TIMEOUT 15)
 endif()

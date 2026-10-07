@@ -306,13 +306,14 @@ int main() {
         in.corridor.add("ordinary_supply");in.corridor_complete=in.corridor_occlusion_free=true;
         PushOutput out;
         // Ideal servo: readback is the last command, settled; the frame is in view only at NEAR.
-        auto step=[&]{in.now_us+=50000;in.gripper_feedback_open=out.motion.gripper_offset==20?1:0;
+        auto step=[&]{in.now_us+=50000;in.gripper_feedback_open=out.motion.gripper_offset==0?1:0;
             in.camera_pitch_cdeg=out.motion.camera_pitch_cdeg;in.camera_pitch_stable=true;
             in.hold_observable=in.camera_pitch_cdeg==TaskTuning{}.near_pitch_cdeg;out=task.update(in);};
         in.gripper_done=true;
         for(int i=0;i<12&&out.state!=PushState::RUSH;++i)step();
         assert(out.state==PushState::RUSH);
         in.captured=in.held_complete=true;in.held.add("ordinary_supply");
+        in.multi_view_finished=true;in.multi_view_verdict=1;in.multi_view_inventory=in.held;
         for(int i=0;i<20&&out.state!=PushState::CARRY;++i)step();
         assert(out.state==PushState::CARRY);
         for(int i=0;i<6;++i){step();assert(out.state==PushState::CARRY&&out.motion.vx_mps==0);}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <stdexcept>
 #include <chrono>
 #include <atomic>
 #include <cstdint>
@@ -35,6 +36,11 @@ using GripperActionResult = ActionResult;
 class UARTController {
 public:
     UARTController() = default;
+    void configureFrameFeedback(int open_state, int close_state) {
+        if(open_state<0||open_state>1||close_state<0||close_state>1||open_state==close_state)
+            throw std::invalid_argument("Unverified A6 mapping");
+        feedback_open_=open_state;feedback_close_=close_state;
+    }
     UARTController(const UARTController &) = delete;
     UARTController &operator=(const UARTController &) = delete;
     virtual ~UARTController();
@@ -95,6 +101,8 @@ private:
     void openPort();
     void readLoop();
 
+    int feedback_open_=-1, feedback_close_=-1;
+    uint64_t transaction_=0, action_started_us_=0;
     int fd_ = -1;
     std::string port_ = "/dev/ttyACM0";
     int baudrate_ = 115200;
@@ -112,7 +120,7 @@ private:
     uint8_t gripper_action_id_ = 0; // 已发送时为当前编号；同步后未发送时为下位机编号
     bool gripper_sent_ = false;
     bool gripper_synced_ = false; // 已接管下位机编号/状态，尚未发送时gripper_target_为下位机状态
-    int16_t gripper_target_ = 0; // 已限幅方框偏移角，0放下、20抬起
+    int16_t gripper_target_ = 0; // 已限幅方框偏移角，0开、20关
     bool camera_sent_ = false;
     int16_t camera_pitch_target_ = 0; // 0.01°，已限幅
 };

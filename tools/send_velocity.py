@@ -276,7 +276,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gripper", choices=("open", "closed"), default=None,
                         help="仅供legacy6历史协议使用")
     parser.add_argument("--frame-offset", type=int, default=0,
-                        help="latest15方框偏移角-20..20；0放下、+20抬起")
+                        help="latest15方框角度：0开、20关（候选版仅预览）")
     parser.add_argument("--action-id", type=int, default=0,
                         help="latest15 夹爪动作编号 0..255；0 表示不触发新动作")
     parser.add_argument("--pitch", type=parse_finite_float, default=40.0,
@@ -299,6 +299,10 @@ def make_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = make_parser().parse_args()
+    if args.send:
+        raise SystemExit("候选版速度工具仅允许预览；动作请用带反馈的frame工具，运动须通过主程序验收门槛")
+    if args.protocol=="latest15" and args.frame_offset not in (0,20):
+        raise SystemExit("方框仅支持0开、20关")
     if args.protocol == "latest15" and args.gripper is not None:
         raise SystemExit("latest15请使用--frame-offset角度；--gripper仅供legacy6")
     if args.rate <= 0:

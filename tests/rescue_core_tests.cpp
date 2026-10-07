@@ -83,10 +83,9 @@ int main() {
         for (const auto requested : {-32768, -21, -20, -1, 0, 1, 20, 21, 32767}) {
             MotionCommand signed_frame;
             signed_frame.gripper_offset = requested;
-            const auto bytes = UARTController::buildMotionPacket(signed_frame, 7);
-            const int expected = std::clamp(requested, -20, 20);
-            assert(bytes.size() == 15 && static_cast<int8_t>(bytes[9]) == expected);
-            assert(bytes[10] == 7);
+            if(requested!=0 && requested!=20){bool rejected=false;try{UARTController::buildMotionPacket(signed_frame,7);}catch(const std::invalid_argument&){rejected=true;}assert(rejected);continue;}
+            const auto bytes=UARTController::buildMotionPacket(signed_frame,7);
+            assert(bytes.size()==15&&bytes[9]==requested&&bytes[10]==7);
         }
         MotionCommand opened;
         opened.gripper_offset = 20;
@@ -108,7 +107,7 @@ int main() {
         command.wz_rps = -0.25f;
         auto packet = UARTController::buildMotionPacket(command, 1);
         assert((packet == Bytes{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x00,0x01,0x00,0x00,0x48,0x35}));
-        command.gripper_offset = 127; // 超范围截断到20度
+        command.gripper_offset = 20; // only explicit CLOSE accepted
         command.camera_pitch_cdeg = 4550;
         packet = UARTController::buildMotionPacket(command, 2);
         assert((packet == Bytes{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x14,0x02,0x28,0x00,0xA3,0xC5}));

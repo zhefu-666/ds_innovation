@@ -3987,6 +3987,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -4071,6 +4074,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -4155,6 +4161,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -4239,6 +4248,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -4323,6 +4335,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -4407,6 +4422,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -10539,6 +10557,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -10623,6 +10644,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -16251,6 +16275,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {
@@ -16335,6 +16362,9 @@
             "hold_observable": 1,
             "captured": 1,
             "held_complete": 1,
+            "multi_view_finished": 1,
+            "multi_view_verdict": 1,
+            "multi_view_inventory": {"ordinary": 1, "core": 0, "injured": 0, "dangerous": 0, "unknown": 0},
             "camera_pitch_cdeg": 4000,
             "camera_pitch_stable": 1,
             "held": {

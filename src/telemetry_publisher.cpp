@@ -226,6 +226,12 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
       << "hold_observable" << int(in.hold_observable)
       << "captured" << int(in.captured) << "held_complete" << int(in.held_complete)
       << "held_total" << in.held.total()
+      << "pixel_mode" << in.pixel_mode << "pixel_ratio_raw" << in.pixel_ratio_raw
+      << "pixel_ratio_smoothed" << in.pixel_ratio_smoothed << "pixel_locked" << int(in.pixel_locked)
+      << "pixel_reason" << in.pixel_reason << "multi_view_verdict" << in.multi_view_verdict
+      << "multi_view_finished" << int(in.multi_view_finished) << "multi_view_reason" << in.multi_view_reason
+      << "observation_round" << double(in.observation_round) << "observation_view" << in.observation_view
+      << "observation_frames" << in.observation_frames
       << "gripper_feedback_confirmed" << int(in.gripper_done)
       << "gripper_feedback_open" << in.gripper_feedback_open
       << "camera_pitch_readback_cdeg" << int(in.camera_pitch_cdeg)

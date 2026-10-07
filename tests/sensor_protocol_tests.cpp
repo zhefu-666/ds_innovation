@@ -85,7 +85,7 @@ int main() {
 
     {
         // dry-run也按目标变化分配编号，不打开串口。
-        UARTController dry;
+        UARTController dry; dry.configureFrameFeedback(0,1);
         dry.initUART("/dev/null",115200,true,false);
         assert(dry.gripperActionId()==0 && dry.gripperActionResult()==GripperActionResult::Idle);
         assert(dry.cameraPitchResult(300)==ActionResult::Idle);
@@ -109,24 +109,21 @@ int main() {
     }
 
     {
-        // IDs follow the clamped angle, not its truth value. Binary feedback cannot
-        // acknowledge an arbitrary intermediate or negative angle.
-        UARTController dry;
+        // Only the two accepted logical angles are writable. Explicit retries get new IDs.
+        UARTController dry; dry.configureFrameFeedback(0,1);
         dry.initUART("/dev/null",115200,true,false);
-        MotionCommand c; c.gripper_offset=20;
-        dry.sendMotion(c); assert(dry.gripperActionId()==1);
-        c.gripper_offset=21; dry.sendMotion(c); assert(dry.gripperActionId()==1);
-        c.gripper_offset=-20; dry.sendMotion(c); assert(dry.gripperActionId()==2);
-        dry.publishActuatorFeedback({static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count()),1,2,0,true});
-        assert(dry.gripperAck().result==ActionResult::NotDone && dry.gripperAck().target==-1);
-        c.gripper_offset=-21; dry.sendMotion(c); assert(dry.gripperActionId()==2);
-        c.gripper_offset=0; dry.sendMotion(c); assert(dry.gripperActionId()==3);
+        MotionCommand c;c.gripper_offset=20;assert(dry.sendMotion(c));
+        c.gripper_offset=21;assert(!dry.sendMotion(c)&&dry.gripperActionId()==1);
+        c.gripper_offset=-20;assert(!dry.sendMotion(c)&&dry.gripperActionId()==1);
+        c.gripper_offset=20;c.frame_transaction=1;assert(dry.sendMotion(c)&&dry.gripperActionId()==2);
+        assert(dry.sendMotion(c)&&dry.gripperActionId()==2);
+        c.frame_transaction=2;assert(dry.sendMotion(c)&&dry.gripperActionId()==3);
     }
 
     // A virtual terminal exercises real read/write code without opening hardware.
     int master=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
     assert(master>=0 && grantpt(master)==0 && unlockpt(master)==0);
-    UARTController uart;
+    UARTController uart; uart.configureFrameFeedback(0,1);
     uart.initUART(ptsname(master),115200,false,false);
     assert(write(master,frame.data(),2)==2);
     std::this_thread::sleep_for(Ms(20));
@@ -250,11 +247,11 @@ int main() {
         int mcu=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
         assert(mcu>=0 && grantpt(mcu)==0 && unlockpt(mcu)==0);
         const std::string path=ptsname(mcu);
-        UARTController link_uart;
+        UARTController link_uart; link_uart.configureFrameFeedback(0,1);
         link_uart.initUART(path,115200,false,false);
         {
             // 独占：第二个进程/对象不能同时打开同一串口。
-            UARTController second; bool owned=false;
+            UARTController second; second.configureFrameFeedback(0,1); bool owned=false;
             try { second.initUART(path,115200,false,false); } catch(const std::runtime_error&) { owned=true; }
             assert(owned);
         }
@@ -296,10 +293,10 @@ int main() {
         link.submit(drive);                                   // next task frame, same command
         report(1,7,1200);                                     // old id: not an acknowledgement
         std::this_thread::sleep_for(Ms(20));
-        assert(link.healthy() && link_uart.gripperAck().result==R::NotDone && link_uart.gripperAck().target==1);
+        assert(link.healthy() && link_uart.gripperAck().result==R::NotDone && link_uart.gripperAck().target==0);
         report(1,8,1200);
         std::this_thread::sleep_for(Ms(20));
-        assert(link_uart.gripperAck().result==R::Done && link_uart.gripperAck().target==1);
+        assert(link_uart.gripperAck().result==R::Done && link_uart.gripperAck().target==0);
         // Stalled task loop: after 150 ms the resend becomes zero velocity, gripper/pitch kept.
         frames=collect(250);
         assert(!frames.empty() && vx(frames.back())==0.0f && frames.back()[9]==20 && frames.back()[10]==8 &&
@@ -338,7 +335,7 @@ int main() {
         // 状态变化才用编号+1，之后下位机回报的编号与上位机一致。
         int mcu=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
         assert(mcu>=0 && grantpt(mcu)==0 && unlockpt(mcu)==0);
-        UARTController sync_uart;
+        UARTController sync_uart; sync_uart.configureFrameFeedback(0,1);
         sync_uart.initUART(ptsname(mcu),115200,false,false);
         auto report=[&](uint8_t open,uint8_t id) {
             Frame f{}; packFeedback(f.data(),open,id,500);
@@ -361,15 +358,15 @@ int main() {
         c.gripper_offset=20;
         assert(sync_uart.sendMotion(c) && lastId()==1 && sync_uart.gripperActionId()==1);
         report(0,0); assert(sync_uart.gripperAck().result==R::NotDone);
-        report(1,1); assert(sync_uart.gripperAck().result==R::Done && sync_uart.gripperAck().target==1);
+        report(1,1); assert(sync_uart.gripperAck().result==R::Done && sync_uart.gripperAck().target==0);
         c.gripper_offset=0;
         assert(sync_uart.sendMotion(c) && lastId()==2);
         report(1,1); assert(sync_uart.gripperAck().result==R::NotDone);
-        report(0,2); assert(sync_uart.gripperAck().result==R::Done && sync_uart.gripperAck().target==0);
+        report(0,2); assert(sync_uart.gripperAck().result==R::Done && sync_uart.gripperAck().target==1);
         sync_uart.closePort();
 
         // 下位机停在编号5且已张开：首包保持张开沿用5（状态已一致即完成），关闭用6。
-        UARTController open_uart;
+        UARTController open_uart; open_uart.configureFrameFeedback(0,1);
         open_uart.initUART(ptsname(mcu),115200,false,false);
         report(1,5);
         assert(open_uart.syncGripperActionId(Ms(500)));
@@ -386,7 +383,7 @@ int main() {
         // No A6 feedback: sync fails and leaves the id untouched.
         int mcu=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
         assert(mcu>=0 && grantpt(mcu)==0 && unlockpt(mcu)==0);
-        UARTController silent;
+        UARTController silent; silent.configureFrameFeedback(0,1);
         silent.initUART(ptsname(mcu),115200,false,false);
         const auto t0=Clock::now();
         assert(!silent.syncGripperActionId(Ms(100)));

@@ -42,3 +42,11 @@ venv/
 /intelligence20260617.pdf
 calibration_runs/
 /build_*/
+
+# Local rollback copies are archived outside the source repository
+/backups/
+*.bak*
+*.before-*
+*.old
+*.orig
+*.bundle

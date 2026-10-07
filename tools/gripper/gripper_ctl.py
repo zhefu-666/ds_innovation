@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""旧夹爪入口兼容：open/close现在分别调用方框上升/下降。"""
+"""旧夹爪入口兼容：open=0°、close=20°；A6由验收配置定义。"""
 from pathlib import Path
 import runpy
 if __name__ == '__main__':
