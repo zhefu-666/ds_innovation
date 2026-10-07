@@ -3,6 +3,8 @@
 #include <opencv2/core.hpp>
 
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstddef>
 #include <string>
@@ -43,11 +45,11 @@ struct MotionPacket {
     static constexpr size_t kSize = 15;
     static constexpr uint8_t kHeader = 0x56;
     uint8_t start_of_frame = kHeader;
-    float vx_mps = 0.0f; // m/s，正前进、负后退；下位机对下发速度有限制，buildMotionPacket()硬限幅到±kMaxLinearSpeedMps（0.2m/s）
+    float vx_mps = 0.0f; // m/s，正前进、负后退；下位机对下发速度有限制，buildMotionPacket()硬限幅到±kMaxLinearSpeedMps（1.0m/s）
     float wz_rps = 0.0f; // rad/s
-    uint8_t gripper_open = 0; // 0关闭，1张开；开合角度由机械限位决定
+    int8_t gripper_offset = 0; // 方框位置偏移，-20..20度；0中点(90度)，当前0放下、+20抬起
     uint8_t gripper_action_id = 0; // 夹爪动作编号：仅目标变化时+1，1..255循环，0保留为“无动作”
-    int16_t camera_pitch_deg = 0; // 线上整数度，小端，±40°；反馈 -32768 表示无效
+    int16_t camera_pitch_offset = 0; // TX偏移角-40..40；实测TX35->RX75，TX40->RX80
     uint16_t crc16 = 0; // Modbus CRC，覆盖字节0..12，初值FFFF、多项式A001，低字节在前
 };
 
@@ -57,9 +59,9 @@ struct SensorPacket {
     static constexpr uint8_t kHeader = 0xA6;
     static constexpr uint8_t kNewline = 0x0A; // 帧尾'\n'，不参与CRC
     uint8_t start_of_frame = kHeader;
-    uint8_t gripper_open = 0; // 当前夹爪状态：0关闭，1张开，不是状态
+    uint8_t gripper_open = 0; // 旧A6二值状态保留：暂映射0放下、1抬起，待电控确认
     uint8_t gripper_action_id = 0; // 该状态对应的夹爪动作编号，0表示上电后尚未收到动作
-    int16_t camera_pitch_deg = 0; // 线上整数度，小端，±40°；反馈 -32768 表示无效
+    int16_t camera_pitch_deg = 40; // 线上整数度0..80；解析时减40转回标定角；-32768无效
     // uint16_t tof_fl_mm = 0; // 左前，毫米
     // uint16_t tof_fr_mm = 0; // 右前，毫米
     // uint16_t tof_rl_mm = 0; // 左后，毫米
@@ -72,15 +74,28 @@ struct SensorPacket {
 // A6 的开关状态须与本次目标和编号匹配，不是独立到位传感器。
 // 相机pitch读回无效标记（int16最小值，即字节00 80）。
 constexpr int16_t kCameraPitchInvalid = std::numeric_limits<int16_t>::min();
-// 上位机下发pitch目标的限幅，0.01°。下位机舵机上下限位为±40°（±4000，2026-10由±25°放宽），超出部分由下位机截断。
-constexpr int16_t kCameraPitchLimitCdeg = 4000;
+// 内部沿用旧标定坐标±4000 cdeg；TX仍为标定偏移角-40..40，RX为0..80度；RX减40转换回标定角。
+constexpr int16_t kCameraPitchLimitCdeg = 4000; // 旧标定坐标，也是TX偏移角范围
+constexpr int16_t kCameraProtocolZeroDeg = 40; // RX = calibration_deg + 40; TX = calibration_deg
+inline int16_t cameraPitchToWire(int16_t calibrated_cdeg) {
+    return static_cast<int16_t>(std::round(std::clamp<int>(calibrated_cdeg, -4000, 4000) / 100.0));
+}
+inline int16_t cameraPitchToFeedbackDeg(int16_t calibrated_cdeg) {
+    return calibrated_cdeg == kCameraPitchInvalid ? kCameraPitchInvalid
+        : static_cast<int16_t>(cameraPitchToWire(calibrated_cdeg) + kCameraProtocolZeroDeg);
+}
+constexpr int16_t cameraPitchFromWire(int16_t wire_deg) {
+    return wire_deg >= 0 && wire_deg <= 80
+        ? static_cast<int16_t>((wire_deg - kCameraProtocolZeroDeg) * 100) : kCameraPitchInvalid;
+}
+
 // 上位机下发线速度硬限幅，m/s。下位机对速度有限制，buildMotionPacket()把|vx|截断到该值。
-constexpr float kMaxLinearSpeedMps = 0.2f;
+constexpr float kMaxLinearSpeedMps = 1.0f;
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
               "Motion protocol requires IEEE754 float32");
 static_assert(sizeof(MotionPacket) == MotionPacket::kSize && offsetof(MotionPacket, vx_mps) == 1 &&
-              offsetof(MotionPacket, wz_rps) == 5 && offsetof(MotionPacket, gripper_open) == 9 &&
-              offsetof(MotionPacket, gripper_action_id) == 10 && offsetof(MotionPacket, camera_pitch_deg) == 11 &&
+              offsetof(MotionPacket, wz_rps) == 5 && offsetof(MotionPacket, gripper_offset) == 9 &&
+              offsetof(MotionPacket, gripper_action_id) == 10 && offsetof(MotionPacket, camera_pitch_offset) == 11 &&
               offsetof(MotionPacket, crc16) == 13,
               "MotionPacket wire layout mismatch");
 static_assert(sizeof(SensorPacket) == SensorPacket::kSize && offsetof(SensorPacket, gripper_action_id) == 2 &&
@@ -92,9 +107,9 @@ static_assert(sizeof(SensorPacket) == SensorPacket::kSize && offsetof(SensorPack
 // 夹爪完成须同时比对action_id与状态，见gripperActionResult()；相机到位见cameraPitchResult()。
 struct ActuatorFeedback {
     uint64_t timestamp_us = 0;
-    uint8_t gripper_open = 0; // 当前状态：0关闭，1张开
+    uint8_t gripper_open = 0; // 旧A6二值状态：暂按0放下、1抬起解释，非角度
     uint8_t gripper_action_id = 0;
-    int16_t camera_pitch_cdeg = kCameraPitchInvalid; // 读回的相机pitch，0.01°
+    int16_t camera_pitch_cdeg = kCameraPitchInvalid; // 转换后的标定角pitch，0.01°，线上角减40度
     bool valid = false;
 };
 
@@ -132,10 +147,10 @@ struct SafeZonePose {
 // buildMotionPacket()序列化为15字节（含动作编号与CRC），sendMotion()负责串口发送。
 struct MotionCommand {
     uint8_t header = 0x56;
-    float vx_mps = 0.0f; // m/s；发给下位机的速度有限制，超过±0.2m/s（kMaxLinearSpeedMps）会在打包时被截断
+    float vx_mps = 0.0f; // m/s；发给下位机的速度有限制，超过±1.0m/s（kMaxLinearSpeedMps）会在打包时被截断
     float wz_rps = 0.0f; // rad/s
-    uint8_t gripper_open = 0; // 夹爪目标状态：0关闭（默认），1张开
-    int16_t camera_pitch_cdeg = 0; // 相机pitch目标，0.01°，0平视、正值向下；每包持续下发；舵机限位±40°（±4000）
+    int16_t gripper_offset = 0; // 方框目标偏移度；打包限幅-20..20；0放下、+20抬起
+    int16_t camera_pitch_cdeg = 0; // 相机标定角目标，0.01°，正值向下；TX除100发偏移角-40..40，RX减40后入标定；标定范围±4000
 };
 
 }

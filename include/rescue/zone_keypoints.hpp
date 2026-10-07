@@ -6,7 +6,10 @@
 #include <memory>
 namespace rescue {
 // YOLOv8-pose safe-zone contract (Model-Training-Tool zone_pose_v*):
-// classes {zone_left, zone_right}, one instance each, 4 keypoints per half in
+// classes {zone_left, zone_right}, one instance each. Class 0 zone_left is the
+// supply half, class 1 zone_right is the injured half in the zone frame
+// (facing into its entrance); these are not image-left/right or team colors.
+// Each class has 4 keypoints per half in
 // order far_left, near_left, far_right, near_right (robot view), output
 // [1, 4+2+4*3, N]: cx,cy,w,h | sigmoid class scores | (x,y,sigmoid conf) x4,
 // all coordinates in letterboxed model-input pixels.

@@ -21,7 +21,7 @@ from typing import Optional
 
 HEADER = 0x56
 MAX_LINEAR_SPEED_MPS = 0.2
-MAX_PITCH_DEG = 40
+MAX_PITCH_DEG = 80
 BAUDRATES = {
     9600: termios.B9600,
     19200: termios.B19200,
@@ -78,8 +78,8 @@ class FeedbackParser:
         if not self.show_rx and state == self._last_actuator:
             return
         self._last_actuator = state
-        pitch = "invalid" if not -40 <= pitch_wire <= 40 else f"{pitch_wire} deg"
-        gripper_text = {0: "closed", 1: "open"}.get(gripper, f"invalid({gripper})")
+        pitch = "invalid" if not 0 <= pitch_wire <= 80 else f"{pitch_wire} deg"
+        gripper_text = {0: "lowered (assumed)", 1: "raised (assumed)"}.get(gripper, f"invalid({gripper})")
         if self.show_rx:
             print(f"RX A6 [CRC OK]: {packet_text(frame)}", flush=True)
         print(f"反馈执行器: gripper={gripper_text}, "
@@ -126,21 +126,21 @@ def rounded_integer(value: float) -> int:
 def build_latest_packet(
     vx_mps: float,
     wz_rps: float,
-    gripper: str,
+    gripper: int,
     action_id: int,
     pitch_deg: float,
 ) -> bytes:
     if not math.isfinite(vx_mps) or not math.isfinite(wz_rps):
         vx_mps = wz_rps = 0.0
     vx_mps = max(-MAX_LINEAR_SPEED_MPS, min(MAX_LINEAR_SPEED_MPS, vx_mps))
-    pitch_deg = max(-MAX_PITCH_DEG, min(MAX_PITCH_DEG, pitch_deg))
-    pitch_wire = rounded_integer(pitch_deg)
+    pitch_deg = max(0, min(MAX_PITCH_DEG, pitch_deg))
+    pitch_wire = rounded_integer(pitch_deg) - 40
     payload = struct.pack(
-        "<BffBBh",
+        "<BffbBh",
         HEADER,
         vx_mps,
         wz_rps,
-        1 if gripper == "open" else 0,
+        max(-20, min(20, int(gripper))),
         action_id,
         pitch_wire,
     )
@@ -159,9 +159,9 @@ def build_legacy6_packet(vx_mps: float, wz_rps: float, gripper: str) -> bytes:
 
 def build_packet(args: argparse.Namespace, vx_mps: float, wz_rps: float) -> bytes:
     if args.protocol == "latest15":
-        return build_latest_packet(vx_mps, wz_rps, args.gripper,
+        return build_latest_packet(vx_mps, wz_rps, args.frame_offset,
                                    args.action_id, args.pitch)
-    return build_legacy6_packet(vx_mps, wz_rps, args.gripper)
+    return build_legacy6_packet(vx_mps, wz_rps, args.gripper or "closed")
 
 
 def baud_constant(baudrate: int) -> int:
@@ -273,12 +273,14 @@ def make_parser() -> argparse.ArgumentParser:
                         help="线速度 m/s，默认 0；latest15 限幅 ±0.2")
     parser.add_argument("--wz", type=parse_finite_float, default=0.0,
                         help="角速度 rad/s，默认 0")
-    parser.add_argument("--gripper", choices=("open", "closed"), default="closed",
-                        help="夹爪目标状态，默认 closed")
+    parser.add_argument("--gripper", choices=("open", "closed"), default=None,
+                        help="仅供legacy6历史协议使用")
+    parser.add_argument("--frame-offset", type=int, default=0,
+                        help="latest15方框偏移角-20..20；0放下、+20抬起")
     parser.add_argument("--action-id", type=int, default=0,
                         help="latest15 夹爪动作编号 0..255；0 表示不触发新动作")
-    parser.add_argument("--pitch", type=parse_finite_float, default=0.0,
-                        help="latest15 相机目标角度，真实度数，限幅 ±40，默认 0")
+    parser.add_argument("--pitch", type=parse_finite_float, default=40.0,
+                        help="latest15 相机目标角度，真实度数，界面0..80，发送减40；默认40（TX0）")
     parser.add_argument("--rate", type=parse_finite_float, default=25.0,
                         help="重复发送频率 Hz，默认 25")
     parser.add_argument("--duration", type=parse_finite_float, default=1.0,
@@ -297,6 +299,8 @@ def make_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = make_parser().parse_args()
+    if args.protocol == "latest15" and args.gripper is not None:
+        raise SystemExit("latest15请使用--frame-offset角度；--gripper仅供legacy6")
     if args.rate <= 0:
         raise SystemExit("--rate must be greater than 0")
     if args.duration < 0:
@@ -308,7 +312,7 @@ def main() -> int:
         packet = build_packet(args, args.vx, args.wz)
         stop_packet = build_packet(args, 0.0, 0.0)
         print(f"协议: {args.protocol}; 帧 ({len(packet)} bytes): {packet_text(packet)}")
-        print(f"请求: vx={args.vx:g} m/s, wz={args.wz:g} rad/s, gripper={args.gripper}")
+        print(f"请求: vx={args.vx:g} m/s, wz={args.wz:g} rad/s, frame_offset={args.frame_offset} deg")
         if args.protocol == "latest15":
             print(f"动作编号: {args.action_id}; pitch={args.pitch:g} deg")
         if not args.send:

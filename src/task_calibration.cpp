@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "rescue/task_calibration.hpp"
 #include <opencv2/core.hpp>
 #include <cmath>
@@ -26,7 +27,24 @@ TaskCalibration loadTaskCalibration(const std::string& path,TaskTuning tuning,in
        result.task.grasp_trigger_y_m>result.task.mouth_y_m)
         throw std::runtime_error("Gripper geometry order is invalid");
     result.capture.corridor_half_width_m=number("corridor_half_width_m");
+    result.capture.mouth_y_m=result.task.mouth_y_m; // objects clearly beyond it are not held
+    if(!f["closed_front_y_m"].empty())result.task.closed_front_y_m=number("closed_front_y_m");
     result.load_radius_m=number("load_radius_m");
+    if(!f["robot_swept_radius_m"].empty()) result.robot_swept_radius_m=number("robot_swept_radius_m");
+    if(!f["load_half_width_m"].empty() || !f["load_half_depth_m"].empty()) {
+        result.load_half_width_m=number("load_half_width_m");
+        result.load_half_depth_m=number("load_half_depth_m");
+        if(std::hypot(result.load_half_width_m,result.load_half_depth_m)>result.load_radius_m+.0001f)
+            throw std::runtime_error("Load radius must enclose the rectangular footprint");
+    }
+    if(!f["body_front_m"].empty()) {
+        const char* keys[]={"body_front_m","body_rear_m","body_left_m","body_right_m","open_width_m","open_front_m"};
+        for(int i=0;i<6;++i)result.body_envelope[i]=number(keys[i]);
+        const float front=std::max(result.body_envelope[0],result.body_envelope[5]);
+        const float side=std::max({result.body_envelope[2],result.body_envelope[3],result.body_envelope[4]/2});
+        if(std::hypot(std::max(front,result.body_envelope[1]),side)>result.robot_swept_radius_m)
+            throw std::runtime_error("Body/open jaw exceeds rotation envelope");
+    }
     const auto views=f["holding_views"];
     if(!views.isSeq() || views.empty())throw std::runtime_error("Missing measured holding_views");
     bool near=false;

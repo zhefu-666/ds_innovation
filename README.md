@@ -164,11 +164,14 @@ python3 tools/remote_camera_telemetry/manage_project.py stop
 
 Foxglove 通道：
 
+安全区 pose 模型将 `zone_left`（类别 0）识别为物资安全区半区，`zone_right`（类别 1）识别为伤员安全区半区。左右按安全区入口面向区内的坐标系定义，不是图像中的左右排列；区域属于红方还是蓝方仍需独立颜色识别。角点顺序和几何映射见 [阶段3双模型说明](STAGE3_TWO_MODELS.md)。
+
 | 通道 | 内容 | 推荐面板 |
 |---|---|---|
 | `/camera/image` | 主程序绘制检测框后的 JPEG 图像 | Image |
 | `/detections` | 类别、置信度、检测框、目标 ID | Raw Messages |
 | `/fsm/state` | 状态、批次、交付计数、目标信息 | Raw Messages |
+| `/decision/live` | 当前阶段、预检原因、目标和区域证据、安全许可、夹持、落点及计算输出 | Raw Messages、Plot |
 | `/system/health` | 主循环帧率、推理耗时、图像延迟、遥测丢帧 | Plot |
 | `/cmd/motion` | 算法计算出的速度值 | Plot |
 | `/runtime/config` | 相机、模型和阈值配置 | Raw Messages |
@@ -209,13 +212,13 @@ tail -f telemetry_logs/main.log
 tail -f telemetry_logs/bridge.log
 ```
 
-本机可以运行协议验证脚本：
+在有 Node.js 22+ 的电脑上、从项目工作副本运行协议验证脚本（板子无需安装 Node.js）：
 
 ```bash
 node tools/remote_camera_telemetry/verify_project.mjs <板子IP>
 ```
 
-它会检查 HTTP 状态、六个 Foxglove 通道、JPEG、时间戳递增以及只读能力。
+它会检查 HTTP 状态、八个 Foxglove 通道、JPEG、时间戳递增以及只读能力。
 
 网页状态中应看到：
 
@@ -377,7 +380,7 @@ tools/gripper/gripper_close.sh    # 合上
 
 ```bash
 tools/camera_pitch/pitch_status.sh     # 查看动作编号/夹爪开关状态/pitch读回（不发包）
-tools/camera_pitch/pitch_set.sh 5     # 张开夹爪，相机向下20°；直接输入真实角度
+tools/camera_pitch/pitch_set.sh 80     # 张开夹爪，相机向下20°；直接输入真实角度
 tools/camera_pitch/pitch_set.sh -5     # 相机向上5°；限位±40°
 tools/camera_pitch/pitch_repl.sh       # 交互模式：终端输入角度实时调整
 ```
@@ -486,3 +489,20 @@ python3 tools/send_velocity.py --vx 0 --wz 0 --duration 2 --send --show-rx
 `RX A6 [CRC OK]` 是校验通过的完整8字节反馈，随后显示夹爪状态、动作编号与pitch。
 结束时汇总收到的字节数和有效帧数；不加参数保持原有状态变化显示。
 当前A6不包含实际线速度或角速度；此参数只显示已有回包，不能让固件自动增加速度反馈。
+
+
+## 2026-10-04：相机+IMU受控空场
+
+用户确认的仅己方安全区、前后范围清空、无人/对手进入的封闭测试场景，使用
+`bash tools/match/start_controlled_empty_field.sh --check` 进行不接触硬件的配置检查。
+具体预览、等待开始、停止命令及边界见 [CONTROLLED_FIELD_20261004.md](CONTROLLED_FIELD_20261004.md)。
+每趟最多两个物资；0.32米为车体旋转半径，投放包络单独定义。此模式不做全局定位，
+不把人工清场说成自主避障；按用户要求不将MCU独立断联停车列为本次待办。
+
+
+### 受控空场开局与找物更新
+
+`start_controlled_empty_field.sh` 现在先累计下发40秒、0.2米/秒的前进指令，搜索及投放后回转为1弧度/秒。
+没有普通物资时，`--search-cues` 可用伤员/蓝色/核心模型物块作方向线索，
+闭爪低速短推后停车重新搜索，最多两次；不授予首趟非普通物资搬运许可。
+参数、停止条件和指令距离与实测距离的区别见 `CONTROLLED_FIELD_20261004.md`。

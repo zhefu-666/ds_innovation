@@ -5,6 +5,10 @@
 #include <iostream>
 using namespace rescue;
 int main(){
+    assert(!loadFitsHalf(.32f,.6f,.3f,.02f));
+    assert(loadFitsHalf(.04f,.6f,.3f,.02f));
+    assert(!loadFitsHalf(.14f,.6f,.3f,.02f));
+    assert(!loadFitsHalf(0,.6f,.3f,.02f));
     char file[]="/tmp/rescue-calibration-test-XXXXXX";int fd=mkstemp(file);assert(fd>=0);close(fd);
     const auto write=[&](int measured,int pitch,float mouth,const char* area){
         std::ofstream f(file);f<<"{\"schema_version\":1,\"measured\":"<<measured<<",\"image_width\":1280,\"image_height\":720,"

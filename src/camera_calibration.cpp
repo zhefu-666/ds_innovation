@@ -27,7 +27,7 @@ bool readInt16(const cv::FileNode &node, int16_t &out, int limit = 9000) {
 }
 } // namespace
 
-bool CameraCalibration::load(const std::string &path) {
+bool CameraCalibration::load(const std::string &path, bool allow_mechanical_assumption) {
     *this = CameraCalibration{};
     cv::FileStorage file(path, cv::FileStorage::READ);
     if (!file.isOpened()) return false;
@@ -56,9 +56,12 @@ bool CameraCalibration::load(const std::string &path) {
     cv::Mat extrinsic;
     int validated = 0;
     if (!file["extrinsics_validated"].empty()) file["extrinsics_validated"] >> validated;
+    int mechanical = 0;
+    if (!file["mechanical_assumption"].empty()) file["mechanical_assumption"] >> mechanical;
+    if (mechanical && !allow_mechanical_assumption) return false;
     file["T_camera_from_robot"] >> extrinsic;
     int16_t reference = 0, low = 0, high = 0;
-    if (validated == 1 && !extrinsic.empty() && readInt16(file["pitch_model_reference_cdeg"], reference)) {
+    if ((validated == 1 || (mechanical == 1 && allow_mechanical_assumption)) && !extrinsic.empty() && readInt16(file["pitch_model_reference_cdeg"], reference)) {
         low = high = reference;
         if (!file["pitch_model_min_cdeg"].empty() && !readInt16(file["pitch_model_min_cdeg"], low)) return false;
         if (!file["pitch_model_max_cdeg"].empty() && !readInt16(file["pitch_model_max_cdeg"], high)) return false;

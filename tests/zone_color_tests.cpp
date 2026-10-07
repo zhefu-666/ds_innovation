@@ -8,6 +8,12 @@ int main(){
         const float x=10+i*100;h.keypoints={cv::Point2f(x,10),{x,100},{x+100,10},{x+100,100}};h.confidence={.9,.9,.9,.9};}
     cv::Mat frame(120,230,CV_8UC3,cv::Scalar(0,0,255));
     assert(!ZoneColorClassifier{}.classify(frame,halves,{},.5).verified);
+    auto assumed=previewBlueZoneDefault(ZoneColorClassifier{}.classify(frame,halves,{},.5),true,"blue",true);
+    assert(assumed.color=="blue" && assumed.assumed && !assumed.verified &&
+           assumed.reason=="blue_pose_model_assumption_preview_only");
+    assert(!previewBlueZoneDefault({},false,"blue",true).assumed);
+    assert(!previewBlueZoneDefault({},true,"red",true).assumed);
+    assert(!previewBlueZoneDefault({},true,"blue",false).assumed);
     ZoneColorConfig c;c.measured=true;ZoneColorClassifier detector(c);
     auto r=detector.classify(frame,halves,{},.5);assert(r.verified&&r.color=="red");
     frame.setTo(cv::Scalar(255,0,0));r=detector.classify(frame,halves,{},.5);assert(r.verified&&r.color=="blue");

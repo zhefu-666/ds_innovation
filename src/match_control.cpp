@@ -26,14 +26,14 @@ void MatchControl::tick(uint64_t now) {
     last_tick_us_=now;
     if(status_.started_us) {
         status_.elapsed_us=now-status_.started_us;
-        status_.remaining_us=status_.elapsed_us>=config_.duration_us?0:config_.duration_us-status_.elapsed_us;
-        if(status_.state!=MatchState::FINISHED && !status_.remaining_us) {
+        status_.remaining_us=(!config_.time_limit_enabled || status_.elapsed_us>=config_.duration_us)?0:config_.duration_us-status_.elapsed_us;
+        if(config_.time_limit_enabled && status_.state!=MatchState::FINISHED && !status_.remaining_us) {
             status_.state=MatchState::FINISHED;status_.reason="match_timeout";
         }
     }
     if(status_.state==MatchState::RUNNING) {
         if(!ready(now)) {status_.state=MatchState::FAULT;status_.reason=health_ok_?"health_stale":health_reason_;}
-        else if(now-progress_us_>=config_.no_movement_us) {
+        else if(config_.require_measured_progress && now-progress_us_>=config_.no_movement_us) {
             status_.state=MatchState::FAULT;status_.reason="no_measured_movement";
         }
     }
@@ -63,7 +63,7 @@ bool MatchControl::command(MatchCommand c,uint64_t now) {
     if(c==MatchCommand::FINISH) {status_.state=MatchState::FINISHED;status_.reason="operator_finish";status_.permit=false;return true;}
     if(status_.state==MatchState::FINISHED)return false;
     if(c==MatchCommand::STOP) {status_.state=MatchState::PAUSED;status_.reason="operator_stop";status_.permit=false;return true;}
-    if(!config_.duration_us) {status_.reason="match_duration_required";return false;}
+    if(config_.time_limit_enabled && !config_.duration_us) {status_.reason="match_duration_required";return false;}
     if(!ready(now)) {status_.reason=health_ok_?"health_stale":health_reason_;return false;}
     if(c==MatchCommand::START && !status_.started_us && (status_.state==MatchState::WAITING || status_.state==MatchState::PAUSED)) {
         status_.started_us=now; progress_us_=now;pose_valid_=false;
@@ -72,7 +72,7 @@ bool MatchControl::command(MatchCommand c,uint64_t now) {
     if(c==MatchCommand::RESUME && status_.started_us &&
        (status_.state==MatchState::PAUSED || status_.state==MatchState::FAULT)) {
         // A movement watchdog expiry cannot be bypassed by repeatedly issuing RESUME.
-        if(now-progress_us_>=config_.no_movement_us) {status_.reason="no_movement_requires_new_session";return false;}
+        if(config_.require_measured_progress && now-progress_us_>=config_.no_movement_us) {status_.reason="no_movement_requires_new_session";return false;}
         status_.state=MatchState::RUNNING;status_.reason="resumed";tick(now);return status_.permit;
     }
     return false;

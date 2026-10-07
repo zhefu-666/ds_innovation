@@ -63,11 +63,12 @@ public:
     // 当前动作：id为0表示尚未发送过。
     uint8_t gripperActionId() const;
     ActionResult gripperActionResult() const;
-    // 首包前以下位机当前编号为基准，使第一包用“当前编号+1”：主程序重启时下位机可能仍停在
-    // 上次的编号，若沿用1会被当作重复包而误报完成。等待有效A6反馈至多timeout，超时返回false且不改编号。
+    // 首包前接管下位机当前编号和夹爪状态：主程序重启时下位机不重启，仍停在上次的编号。
+    // 首包保持该状态则沿用该编号（0表示不触发动作），之后每次换状态用编号+1，与下位机计数一致。
+    // 等待有效A6反馈至多timeout，超时返回false且不改编号。
     bool syncGripperActionId(std::chrono::milliseconds timeout);
     // 夹爪确认：同一把锁内读取结果与对应目标，避免发送线程在两次读取之间换目标。
-    // target为-1表示尚未发送，0关闭，1张开；result为Done时target即已完成的目标状态。
+    // target为-1表示尚未发送或角度不能由二值A6确认，0放下，1抬起；result为Done时target即已完成的目标状态。
     struct GripperAck { ActionResult result = ActionResult::Idle; int target = -1; };
     GripperAck gripperAck() const;
     // 最近一次下发的相机pitch目标（限幅后），0.01°。
@@ -110,7 +111,8 @@ private:
     // 以下受io_mutex_保护
     uint8_t gripper_action_id_ = 0; // 已发送时为当前编号；同步后未发送时为下位机编号
     bool gripper_sent_ = false;
-    uint8_t gripper_target_ = 0; // 0关闭，1张开
+    bool gripper_synced_ = false; // 已接管下位机编号/状态，尚未发送时gripper_target_为下位机状态
+    int16_t gripper_target_ = 0; // 已限幅方框偏移角，0放下、20抬起
     bool camera_sent_ = false;
     int16_t camera_pitch_target_ = 0; // 0.01°，已限幅
 };

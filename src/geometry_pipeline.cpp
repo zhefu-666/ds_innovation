@@ -139,7 +139,13 @@ void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const E
         in.target_region_valid=inside||outside;in.target_in_zone=inside;
         // Delivery is a direct local observation of the carried target entering our
         // independently identified zone. It does not depend on inventory counts.
-        if (inside && in.zone_own) in.delivery_observed=true;
+        const bool supply = d.label=="ordinary_supply" || d.label=="core_supply";
+        const bool injured = d.label=="injured_person";
+        const bool left = supply ? geometry_.supply_left : !geometry_.supply_left;
+        const bool correct_half = (supply || injured) &&
+            (left ? q.x < -geometry_.divider_exclusion_half_width_m-radius
+                  : q.x > geometry_.divider_exclusion_half_width_m+radius);
+        if (inside && correct_half && in.zone_own) in.delivery_observed=true;
     }
     if(!in.zone_identity_verified || !stop.valid||!in.target_valid||stop.target_id!=in.target_id||stop.frame_id!=r.zone.frame_id||stop.capture_us!=r.zone.timestamp_us)return;
     const auto decision=classifyExpectedStop(geometry_,r.zone,stop.body_m,stop.radius_m,now);

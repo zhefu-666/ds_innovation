@@ -12,6 +12,7 @@ find_package(OpenCV REQUIRED)
 
 add_executable(rescue_upper_host
     src/main.cpp
+    src/controlled_field.cpp
     src/match_control.cpp
     src/match_server.cpp
     src/task_calibration.cpp
@@ -207,4 +208,30 @@ if(BUILD_TESTING)
     target_link_libraries(rescue_zone_color_tests PRIVATE ${OpenCV_LIBS})
     target_compile_options(rescue_zone_color_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_zone_color_tests COMMAND rescue_zone_color_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_controlled_field_tests tests/controlled_field_tests.cpp
+        src/controlled_field.cpp src/zone_geometry.cpp src/zone_estimate.cpp src/transport_rules.cpp)
+    target_include_directories(rescue_controlled_field_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_controlled_field_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_controlled_field_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_controlled_field_tests COMMAND rescue_controlled_field_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME rescue_controlled_config_check COMMAND rescue_upper_host --check-config
+        --controlled-empty-field --team blue
+        --calibration ${CMAKE_CURRENT_SOURCE_DIR}/config/camera.yaml
+        --zone-geometry ${CMAKE_CURRENT_SOURCE_DIR}/config/zone_geometry.json
+        --task-calibration ${CMAKE_CURRENT_SOURCE_DIR}/config/task_calibration.40_runtime.json
+        --pose-model-blue models/zone_pose_fp.rknn)
+    set_tests_properties(rescue_controlled_config_check PROPERTIES PASS_REGULAR_EXPRESSION "hardware_output=disabled")
+endif()
+
+if(BUILD_TESTING)
+    add_executable(async_log_tests tests/async_log_tests.cpp)
+    target_include_directories(async_log_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(async_log_tests PRIVATE pthread)
+    add_test(NAME async_log_tests COMMAND async_log_tests)
 endif()

@@ -19,6 +19,7 @@ const HoldingView *CaptureMonitor::view(int16_t pitch, bool stable) const {
 void CaptureMonitor::update(PushObservation &in, const std::vector<SegDetection> &detections, uint64_t now) {
     in.held = {}; in.captured = false; in.held_complete = false; in.hold_observable = false;
     in.corridor = {}; in.corridor_complete = false; in.corridor_occlusion_free = false;
+    diag_ = {};
     // Image positions are only comparable at one fixed, settled camera pitch.
     if (!in.camera_pitch_stable || in.camera_pitch_cdeg == kCameraPitchInvalid) { reset(); return; }
     std::vector<const SegDetection *> fresh;
@@ -45,19 +46,24 @@ void CaptureMonitor::update(PushObservation &in, const std::vector<SegDetection>
         const bool touches = b.x <= h.x2 + c_.edge_margin_px && b.x + b.width >= h.x1 - c_.edge_margin_px &&
                              b.y <= h.y2 + c_.edge_margin_px && b.y + b.height >= h.y1 - c_.edge_margin_px;
         if (!touches) continue;
-        if (!inside && !h.contains(c.x, c.y)) { ambiguous = true; continue; } // straddles from outside
-        if (!inside) ambiguous = true; // centre inside but box crosses the edge
-        if (b.y + b.height < v->min_visible_bottom_y_px) { ambiguous = true; continue; }
+        // Measured contact ahead of the mouth: an object in front of the jaw (field 2026-10-05:
+        // blocks at y~0.29-0.31 m crossed the 40deg region top while one block was held).
+        if (d->ground_contact_valid && d->ground_position_valid && std::isfinite(d->body_xy_m.y) &&
+            d->body_xy_m.y > c_.mouth_y_m + c_.outside_margin_m) { diag_.outside.push_back(d->track_id); continue; }
+        if (!inside && !h.contains(c.x, c.y)) { ambiguous = true; diag_.ambiguous.push_back(d->track_id); continue; } // straddles from outside
+        if (!inside) { ambiguous = true; diag_.ambiguous.push_back(d->track_id); } // centre inside but box crosses the edge
+        if (b.y + b.height < v->min_visible_bottom_y_px) { ambiguous = true; diag_.ambiguous.push_back(d->track_id); continue; }
         in.held.add(labelOf(*d));
-        if (d->track_id < 0) { followed = false; continue; }
+        if (d->track_id < 0) { followed = false; diag_.unfollowed.push_back(-1); continue; }
         auto &track = next[d->track_id];
         const auto it = history_.find(d->track_id);
         if (it != history_.end()) track = it->second;
         track.push_back(c);
         if (int(track.size()) > c_.follow_frames) track.erase(track.begin());
-        if (int(track.size()) < c_.follow_frames) followed = false;
+        bool still = int(track.size()) >= c_.follow_frames;
         for (const auto &p : track)
-            if (cv::norm(p - c) > c_.follow_tolerance_px) followed = false;
+            if (cv::norm(p - c) > c_.follow_tolerance_px) still = false;
+        if (!still) { followed = false; diag_.unfollowed.push_back(d->track_id); }
     }
     history_ = std::move(next);
     in.hold_observable = v != nullptr;

@@ -22,7 +22,7 @@ class CameraCalibration {
 public:
     enum class GroundMode { NONE, FIXED_PITCH, PITCH_MODEL };
 
-    bool load(const std::string &path);
+    bool load(const std::string &path, bool allow_mechanical_assumption = false);
     void setIntrinsics(const cv::Mat &camera_matrix, const cv::Mat &dist_coeffs);
     // H：像素→地面；undistorted_pixels为false时H作用于原图像素。
     void setGroundHomography(const cv::Mat &homography, int16_t camera_pitch_cdeg,

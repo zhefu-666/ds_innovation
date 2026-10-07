@@ -12,6 +12,26 @@
 using namespace rescue;
 int main(){
     assert(Config{}.match_seconds==180);
+    { // Explicit debugging override survives 180s, but STOP and health still latch.
+        MatchConfig c;c.duration_us=180000000;c.time_limit_enabled=false;c.require_measured_progress=false;
+        MatchControl m(c);m.health(1000000,true,"");assert(m.command(MatchCommand::START,1000000));
+        for(uint64_t t=1100000;t<=182000000;t+=100000)m.health(t,true,"");
+        assert(m.status(182000000).permit && m.status(182000000).elapsed_us>180000000);
+        assert(m.command(MatchCommand::STOP,182000000));assert(!m.status(182000000).permit);
+        assert(m.command(MatchCommand::RESUME,182000000));
+        m.health(182100000,false,"imu_stale");assert(!m.status(182100000).permit);
+        m.health(182200000,true,"");assert(!m.status(182200000).permit);
+        assert(m.command(MatchCommand::RESUME,182200000));
+        assert(m.command(MatchCommand::FINISH,182200000));assert(!m.status(182200000).permit);
+    }
+
+    { // Controlled local-vision tests retain timing/health gates without requiring odometry.
+        MatchConfig c;c.duration_us=180000000;c.require_measured_progress=false;
+        MatchControl m(c);m.health(1000000,true,"");assert(m.command(MatchCommand::START,1000000));
+        for(uint64_t t=1100000;t<=21000000;t+=100000)m.health(t,true,"");
+        assert(m.status(21000000).permit);
+        m.health(21100000,false,"imu_stale");assert(!m.status(21100000).permit);
+    }
     {
         MatchControl m({180000000});m.health(1000000,true,"");
         m.command(MatchCommand::STOP,1000000);assert(m.command(MatchCommand::START,1000000));

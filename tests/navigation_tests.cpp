@@ -36,6 +36,12 @@ int main(){
     assert(!drops.plan(g,z,false,true,{},false,.03,1000000).valid);
     assert(!drops.plan(g,z,true,false,{},false,.03,1000000).valid);
     assert(!drops.plan(g,z,true,true,{},false,.2,1000000).valid);
+    DropPlanner rectangle(.0785f,.064f);
+    auto rectangular_first=rectangle.plan(g,z,true,true,{},false,.102f,1000000);
+    assert(rectangular_first.valid);
+    auto rectangular_second=rectangle.plan(g,z,true,true,{{rectangular_first.centre_zone_m,.03f,false}},false,.102f,1000000);
+    assert(rectangular_second.valid);
+    assert(!rectangle.positionClear(g,z,rectangular_first.centre_zone_m,{{rectangular_first.centre_zone_m,.03f,false}},false,.102f));
     auto injured=drops.plan(g,z,true,true,{},true,.03,1000000);
     assert(injured.valid && injured.centre_zone_m.x>0);
     CarryNavigator nav(g,TaskTuning{},.03);PushObservation in;PushOutput previous;
@@ -46,5 +52,18 @@ int main(){
     previous.drop_locked=true;previous.drop_centre_zone=in.drop_centre_zone;
     in.zone_occupied={{in.drop_centre_zone,.03,false}};nav.update(in,previous);
     assert(!in.carry_plan_valid&&!in.drop_plan_valid); // don't relocate a locked drop silently
+    { // Controlled release uses only the previously observed static background,
+      // never the entering cargo as a new obstacle or as credited inventory.
+        CarryNavigator controlled(g,TaskTuning{},.03,true);
+        in.zone_occupied.clear();in.zone_counts_valid=in.zone_inventory_complete=true;
+        previous.state=PushState::GATE;previous.drop_locked=false;
+        controlled.update(in,previous);assert(in.drop_plan_valid);
+        previous.drop_locked=true;previous.drop_centre_zone=in.drop_centre_zone;
+        previous.state=PushState::ENTER;
+        in.zone_counts_valid=in.zone_inventory_complete=false;
+        controlled.update(in,previous);assert(in.drop_plan_valid&&!in.zone_counts_valid);
+        in.now_us+=21000000;in.zone_estimate.timestamp_us=in.zone_estimate.observed_us=in.now_us;
+        controlled.update(in,previous);assert(!in.drop_plan_valid);
+    }
     std::cout<<"Carry detours, unknown-space rejection and multi-trip drop occupancy passed\n";
 }

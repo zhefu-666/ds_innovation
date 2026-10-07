@@ -1,10 +1,12 @@
-// Node 22+: subscribe to the real main program and validate all six channels.
+// Node 22+: subscribe to the real main program and validate all channels.
 import { writeFileSync } from 'node:fs';
-const host = process.argv[2] || '192.168.1.123';
+const host = process.argv[2] || '192.168.34.7';
 const output = process.argv[3] || '/tmp/rescue-project-preview.jpg';
 const status = await (await fetch(`http://${host}:8080/status`, {signal: AbortSignal.timeout(5000)})).json();
 if (!status.health.robot_data_connected) throw new Error(JSON.stringify(status));
-console.log('HTTP status:', JSON.stringify(status));
+console.log('HTTP:', JSON.stringify({health:status.health,
+ decision:{phase:status.decision?.phase,preflight_reason:status.decision?.preflight_reason,
+ valid:status.decision?.valid,hardware_output_enabled:status.decision?.hardware_output_enabled}}));
 await new Promise((resolve,reject)=>{
  const ws = new WebSocket(`ws://${host}:8765`, 'foxglove.websocket.v1');
  ws.binaryType='arraybuffer';
@@ -19,7 +21,7 @@ await new Promise((resolve,reject)=>{
     if(msg.op==='serverInfo' && msg.capabilities.length!==0) throw new Error('Unexpected writable capability');
     if(msg.op==='advertise'){
      const topics=msg.channels.map(c=>c.topic);
-     for(const topic of ['/camera/image','/system/health','/detections','/fsm/state','/cmd/motion','/runtime/config'])
+     for(const topic of ['/camera/image','/system/health','/detections','/fsm/state','/cmd/motion','/runtime/config','/imu/data','/decision/live'])
       if(!topics.includes(topic)) throw new Error('Missing '+topic);
      ws.send(JSON.stringify({op:'subscribe',subscriptions:msg.channels.map(c=>({id:c.id,channelId:c.id}))}));
      started=Date.now(); console.log('Topics:',topics.join(', '));
@@ -40,9 +42,11 @@ await new Promise((resolve,reject)=>{
     if(!payload.robot_data_connected||!payload.camera_ok) throw new Error('Stale source');
     if(payload.sequence<lastSequence) throw new Error('Sequence moved backwards');
     lastSequence=payload.sequence;fps.push(payload.loop_fps);timings.push(payload.inference_ms);
-   } else if(!payload.valid) throw new Error('Invalid structured data');
+   } else if(id!==7 && !payload.valid) throw new Error('Invalid structured data');
    if(id===5 && payload.hardware_output_enabled!==0) throw new Error('Unexpected hardware output');
-   if(Object.keys(counts).length===6 && counts[1]>=20 && Date.now()-started>=5000){
+   if(id===8 && (!Array.isArray(payload.missing_evidence) || payload.hardware_output_enabled!==0))
+    throw new Error('Invalid read-only decision payload');
+   if(Object.keys(counts).length===8 && counts[1]>=20 && Date.now()-started>=5000){
     clearTimeout(timer);ws.close();
     console.log('Verification:',JSON.stringify({counts,seconds:(Date.now()-started)/1000,receivedKiB:bytes/1024,KiBPerSecond:bytes/1024/((Date.now()-started)/1000),averageLoopFps:fps.reduce((a,b)=>a+b,0)/fps.length,averageInferenceMs:timings.reduce((a,b)=>a+b,0)/timings.length,image:output}));
     resolve();

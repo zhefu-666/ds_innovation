@@ -1,11 +1,23 @@
 #pragma once
 #include "rescue/capture_monitor.hpp"
+#include <cmath>
 namespace rescue {
 struct TaskCalibration {
+    cv::Vec<float,6> body_envelope{}; // front,rear,left,right,open width,open front; zero disables
     TaskTuning task;
     CaptureConfig capture;
+    float load_half_width_m = 0, load_half_depth_m = 0;
+    float robot_swept_radius_m = 0; // body rotation envelope, independent of deposited objects
     float load_radius_m = 0; // enclosing radius of the maximum validated load footprint
 };
+// Necessary empty-half fit only; the live planner adds pose uncertainty/occupancy.
+inline bool loadFitsHalf(float radius, float zone_width, float zone_depth, float divider, float half_width=0, float half_depth=0) {
+    const float mx = (half_width>0?half_width:radius) + .01f;
+    const float my = (half_depth>0?half_depth:radius) + .01f;
+    return std::isfinite(radius) && radius > 0 && std::isfinite(zone_width) &&
+        std::isfinite(zone_depth) && std::isfinite(divider) && divider >= 0 &&
+        std::isfinite(mx) && std::isfinite(my) && 2*my < zone_depth && 2*mx + divider < zone_width/2;
+}
 // Explicit measured gripper geometry + pitch-specific image region. No defaults
 // are silently marked calibrated; invalid/incomplete files fail before opening hardware.
 TaskCalibration loadTaskCalibration(const std::string& path,TaskTuning tuning,int width,int height);

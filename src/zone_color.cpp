@@ -3,6 +3,16 @@
 #include <stdexcept>
 #include <cmath>
 namespace rescue {
+ZoneColorResult previewBlueZoneDefault(ZoneColorResult result, bool dry_run, const std::string& team,
+                                       bool blue_model_detected_both_halves) {
+    if (dry_run && team == "blue" && blue_model_detected_both_halves &&
+        !result.verified && result.reason == "color_unmeasured") {
+        result.color = "blue";
+        result.reason = "blue_pose_model_assumption_preview_only";
+        result.assumed = true;
+    }
+    return result;
+}
 ZoneColorConfig ZoneColorConfig::load(const std::string& path){
     cv::FileStorage f(path,cv::FileStorage::READ);ZoneColorConfig c;
     if(!f.isOpened()||int(f["schema_version"])!=1||int(f["measured"])!=1)

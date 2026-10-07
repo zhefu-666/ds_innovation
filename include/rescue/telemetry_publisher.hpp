@@ -11,6 +11,14 @@
 #include <vector>
 
 namespace rescue {
+struct DecisionTelemetry {
+    std::string preflight_reason;
+    std::string zone_color;
+    std::string zone_color_reason;
+    std::string geometry_reason;
+    bool pose_model_ran = false;
+};
+
 // A bounded, optional observation path. The worker never opens the camera or UART.
 // One atomic snapshot in tmpfs is consumed by the separate Foxglove bridge.
 class TelemetryPublisher {
@@ -22,7 +30,8 @@ public:
     void submit(const cv::Mat& annotated, const std::vector<SegDetection>& detections,
                 const PushObservation& observation, const PushOutput& output,
                 uint64_t epoch_ns, uint64_t sequence, double loop_fps,
-                double inference_ms, double capture_ms, const ImuSnapshot& imu = {}) noexcept;
+                double inference_ms, double capture_ms, const ImuSnapshot& imu = {},
+                const DecisionTelemetry& decision = {}) noexcept;
 private:
     struct Snapshot {
         cv::Mat frame;
@@ -30,6 +39,7 @@ private:
         PushObservation observation;
         PushOutput output;
         ImuSnapshot imu;
+        DecisionTelemetry decision;
         uint64_t epoch_ns = 0, sequence = 0;
         double loop_fps = 0, inference_ms = 0, capture_ms = 0;
     };

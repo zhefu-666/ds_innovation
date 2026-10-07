@@ -1,7 +1,12 @@
 #include "rescue/config.hpp"
+#include "rescue/async_log.hpp"
+#include <sstream>
+#include <limits>
+#include "rescue/controlled_field.hpp"
 #include "rescue/geometry_pipeline.hpp"
 #include "rescue/uart_controller.hpp"
 #include "rescue/motion_link.hpp"
+#include "rescue/motion_readiness.hpp"
 #include "rescue/match_control.hpp"
 #include "rescue/match_server.hpp"
 #include "rescue/hipnuc_imu.hpp"
@@ -20,6 +25,7 @@
 #include "rescue/vision_logic.hpp"
 #include <opencv2/opencv.hpp>
 #include <csignal>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
@@ -42,6 +48,8 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
         if (!n[key].empty()) value = static_cast<int>(n[key]) != 0;
     };
     flag("run", in.run); flag("reset", in.reset); flag("safety_ok", in.safety_ok);
+    flag("target_is_search_cue",in.target_is_search_cue);
+    flag("gripper_closed_observed",in.gripper_closed_observed);
     flag("target_valid", in.target_valid); flag("geometry_valid", in.geometry_valid);
     flag("path_safe", in.path_safe); flag("retreat_safe", in.retreat_safe);
     flag("target_region_valid", in.target_region_valid);
@@ -59,6 +67,7 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
     const auto point=[&](const char* key,cv::Point2f& p){const auto v=n[key];if(!v.empty()) {
         if(!v.isSeq()||v.size()!=2)throw std::runtime_error("Invalid replay navigation point");p={float(v[0]),float(v[1])};}};
     point("carry_waypoint_body",in.carry_waypoint_body);point("drop_centre_zone",in.drop_centre_zone);
+    flag("zone_inventory_complete", in.zone_inventory_complete);
     flag("zone_counts_valid", in.zone_counts_valid); flag("heading_valid", in.heading_valid);
     auto integer = [&](const char *key, int &value) { if (!n[key].empty()) n[key] >> value; };
     integer("target_id", in.target_id); integer("gripper_feedback_open", in.gripper_feedback_open);
@@ -107,12 +116,16 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
     }
     return in;
 }
-void report(const rescue::PushOutput &out) {
-    std::cout << "state=" << rescue::PushTask::name(out.state) << " batch=" << out.batch_size
+void report(const rescue::PushOutput &out, std::ostream& stream = std::cout) {
+    stream << "state=" << rescue::PushTask::name(out.state) << " batch=" << out.batch_size
               << " delivered=" << out.delivered_total << " first=" << out.first_ordinary_delivered
               << " vx=" << out.motion.vx_mps << " wz=" << out.motion.wz_rps
-              << " gripper_open=" << int(out.motion.gripper_open)
-              << " pitch_cmd=" << out.motion.camera_pitch_cdeg << " stop="
+              << " frame_offset_deg=" << int(out.motion.gripper_offset)
+              << " startup_forward_ms=" << out.startup_commanded_us/1000
+              << " search_cue_id=" << out.search_cue_id << " capture_target_id=" << out.capture_target_id
+              << " cue=" << out.target_is_search_cue << " clear_attempts=" << out.clearing_attempts
+              << " pitch_cmd=" << out.motion.camera_pitch_cdeg
+              << " camera_protocol_cmd_deg=" << rescue::cameraPitchToWire(out.motion.camera_pitch_cdeg) << " stop="
               << (out.motion.vx_mps == 0.0f && out.motion.wz_rps == 0.0f)
               << " reason=" << (out.reason.empty() ? "-" : out.reason) << "\n";
 }
@@ -204,18 +217,71 @@ int main(int argc, char **argv) {
     std::signal(SIGTERM, signalHandler);
     try {
         const Config config = parseArgs(argc, argv);
+        std::cout << "MATCH_TIME_LIMIT=" << (config.no_match_time_limit ? "disabled_debug" : "enabled") << "\n";
+        if(config.allow_mechanical_pitch_model)
+            std::cout << "GEOMETRY_SOURCE=mechanical_assumption NOT_FIELD_VALIDATED\n";
         TaskTuning tuning;
         tuning.far_pitch_cdeg = config.pitch_presets_cdeg[0];
         tuning.track_pitch_cdeg = config.pitch_presets_cdeg[1];
         tuning.near_pitch_cdeg = config.pitch_presets_cdeg[2];
+        if(config.allow_mechanical_pitch_model && tuning.track_pitch_cdeg>2000) {
+            tuning.intermediate_pitch_cdeg=2000;
+            tuning.track_near_m=.4f;
+            // 20deg loses the box at the image bottom below ~0.22-0.25 m forward (field logs 2026-10-05).
+            tuning.intermediate_to_near_m=.27f;
+            std::cout << "PITCH_SWITCH mid20_distance_m=0.4 near40_distance_m=0.27 open_jaw_handoff_m="
+                      << tuning.open_jaw_handoff_m << "\n";
+        }
+        tuning.enable_search_cues=config.search_cues;
+        tuning.enable_lost_search=true;
+        tuning.enable_short_push=config.controlled_empty_field && config.search_cues;
+        tuning.startup_advance_speed=config.startup_speed_mps;
+        tuning.max_speed=std::max(tuning.max_speed,tuning.startup_advance_speed);
+        tuning.scan_wz=config.scan_wz_rps;tuning.turn_wz=config.turn_wz_rps;
+        tuning.max_wz=std::max({tuning.max_wz,tuning.scan_wz,tuning.turn_wz});
         tuning.startup_advance_us = uint64_t(config.startup_advance_ms) * 1000;
-        float measured_load_radius=0;
+        // A full sweep at 0.25 rad/s already takes ~25s, before stopped hold checks.
+        // Controlled start-to-zone tests reserve time for both searching and transport.
+        if(config.controlled_empty_field) tuning.carry_budget_us = 90000000;
+        cv::Vec<float,6> body_envelope{};
+        float measured_load_radius=0, measured_body_radius=0, load_half_width=0, load_half_depth=0;
         CaptureConfig capture_config;capture_config.holding.clear(); // uncalibrated is unobservable
         capture_config.image_height_px=config.frame_height;
         const bool task_calibrated=!config.task_calibration_file.empty();
         if(task_calibrated) {
             const auto measured=loadTaskCalibration(config.task_calibration_file,tuning,config.frame_width,config.frame_height);
-            tuning=measured.task;capture_config=measured.capture;measured_load_radius=measured.load_radius_m;
+            body_envelope=measured.body_envelope;
+            tuning=measured.task;capture_config=measured.capture;measured_load_radius=measured.load_radius_m;measured_body_radius=measured.robot_swept_radius_m;
+            load_half_width=measured.load_half_width_m;load_half_depth=measured.load_half_depth_m;
+        }
+        if (config.check_config) {
+            int missing = 0;
+            const auto check = [&](bool ok, const char* reason) {
+                std::cout << (ok ? "OK " : "MISSING ") << reason << "\n";
+                missing += !ok;
+            };
+            check(task_calibrated, "task_calibration");
+            const auto g = ZoneGeometry::load(config.zone_geometry_file, config.team+"_safe_zone");
+            check(loadFitsHalf(measured_load_radius,g.width_m,g.depth_m,g.divider_exclusion_half_width_m,load_half_width,load_half_depth),
+                  "load_footprint_fits_half");
+            CameraCalibration c;
+            const bool mapped = !config.calibration_file.empty() && c.load(config.calibration_file,config.allow_mechanical_pitch_model);
+            check(mapped && c.pitchUsable(tuning.far_pitch_cdeg) && c.pitchUsable(tuning.track_pitch_cdeg),
+                  "far_track_ground_calibration");
+            if(tuning.intermediate_pitch_cdeg!=kCameraPitchInvalid)
+                check(mapped && c.pitchUsable(tuning.intermediate_pitch_cdeg), "intermediate_ground_model");
+            check(config.controlled_empty_field || (!config.zone_color_file.empty() && ZoneColorConfig::load(config.zone_color_file).measured),
+                  "zone_identity_source");
+            if(config.controlled_empty_field) check(measured_body_radius>0,"robot_swept_radius");
+            check(!config.pose_model_path.empty() || !config.keypoints_file.empty(), "zone_pose_source");
+            std::cout << "STARTUP forward_ms=" << config.startup_advance_ms
+                      << " speed_mps=" << tuning.startup_advance_speed
+                      << " scan_wz_rps=" << tuning.scan_wz << " turn_wz_rps=" << tuning.turn_wz
+                      << " angular_limit_rps=" << tuning.max_wz
+                      << " clearance_checks_disabled=" << config.controlled_ignore_clearance << " search_cues=" << config.search_cues << "\n";
+            std::cout << "STATIC_ONLY: live observations, sensor timing and actual motion/holding "
+                         "still require independent evidence. hardware_output=disabled\n";
+            return missing ? 2 : 0;
         }
         PushTask task(tuning);
 #ifndef RESCUE_ENABLE_TELEMETRY
@@ -257,6 +323,10 @@ int main(int argc, char **argv) {
         if (!config.dry_run && !config.hardware)
             throw std::runtime_error("Select --dry-run (perception only) or --hardware (MCU output). "
                 "No serial port was opened.");
+        AsyncLog async_log;
+        std::string last_stop_signature;
+        uint64_t last_stale_count = 0;
+        auto last_submit_time = Clock::now();
         std::unique_ptr<HipnucImu> imu;
         if (config.imu) {
             imu = std::make_unique<HipnucImu>(config.imu_port, config.imu_baud, config.imu_timeout_ms);
@@ -270,15 +340,18 @@ int main(int argc, char **argv) {
         ZoneGeometry zone_geometry;
         if (!config.calibration_file.empty()) {
             CameraCalibration calibration;
-            if (!calibration.load(config.calibration_file)) throw std::runtime_error("Invalid ground calibration file");
+            if (!calibration.load(config.calibration_file,config.allow_mechanical_pitch_model)) throw std::runtime_error("Invalid ground calibration file");
             zone_geometry=ZoneGeometry::load(config.zone_geometry_file,config.team+"_safe_zone");
             GroundContactConfig contact;contact.min_confidence=config.confidence;
             geometry=std::make_unique<GeometryPipeline>(calibration,zone_geometry,contact);
         }
-        CarryNavigator navigator(zone_geometry,tuning,measured_load_radius);
+        CarryNavigator navigator(zone_geometry,tuning,measured_load_radius,config.controlled_empty_field,load_half_width,load_half_depth);
+        ControlledField controlled_field(zone_geometry,measured_body_radius,body_envelope);
         // --hardware: one exclusive RDWR port carries motion out and A6 feedback in.
         // The link is declared after the port, so unwinding stops the wheels before closing it.
         MatchConfig match_config; match_config.duration_us=uint64_t(config.match_seconds)*1000000;
+        match_config.time_limit_enabled=!config.no_match_time_limit;
+        match_config.require_measured_progress=!config.controlled_empty_field;
         MatchControl match(match_config);
         MatchServer match_server(match,config.match_socket);
         bool auto_start_requested=false;
@@ -289,6 +362,9 @@ int main(int argc, char **argv) {
             // Continue from the MCU's current action id so a restart is never taken as a repeat.
             if(!feedback->syncGripperActionId(Ms(500)))
                 throw std::runtime_error("No A6 feedback from "+config.uart_port+" within 500 ms; nothing was sent");
+            {const auto mcu=feedback->latestActuatorFeedback();
+             std::cout<<"[MCU] synced gripper_id="<<int(mcu.gripper_action_id)<<" open="<<int(mcu.gripper_open)
+                      <<"; keeping this state reuses the id, each state change uses id+1\n";}
             link=std::make_unique<MotionLink>(*feedback,MotionLinkConfig{},[&match]{return match.status(imuNowUs()).permit;});
             std::cout<<"[MCU] "<<config.uart_port<<" output enabled; 25 Hz resend, zero velocity after 150 ms stall\n";
         } else if(config.pitch_feedback) {
@@ -354,7 +430,16 @@ int main(int argc, char **argv) {
             if(vision_result.pose_ran)zone_points=zoneHalvesToKeypoints(vision_result.halves,config.pose_keypoint_confidence);
             const auto observed_at = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                 Clock::now().time_since_epoch()).count());
-            const auto zone_color=zone_colors.classify(frame,vision_result.halves,detections,config.pose_keypoint_confidence);
+            const bool blue_model_detected_both_halves = !config.pose_model_blue_path.empty() &&
+                vision_result.pose_ran && vision_result.halves[0].valid && vision_result.halves[1].valid;
+            auto zone_color=previewBlueZoneDefault(
+                zone_colors.classify(frame,vision_result.halves,detections,config.pose_keypoint_confidence),
+                config.dry_run,config.team,blue_model_detected_both_halves);
+            if(config.controlled_empty_field && vision_result.pose_ran &&
+               vision_result.halves[0].valid && vision_result.halves[1].valid) {
+                zone_color.color=config.team;zone_color.verified=true;zone_color.assumed=false;
+                zone_color.reason="controlled_field_operator_identity";
+            }
             GeometryResult geometry_result;ExpectedStop expected_stop;
             // Servo readback at capture time; without the feedback port it stays invalid.
             const FrameSensors frame_sensors=feedback?feedback->feedbackAt(timestamp):FrameSensors{};
@@ -368,9 +453,9 @@ int main(int argc, char **argv) {
                 // Stage 3 supplies measured same-frame points. Missing input is invalid,
                 // never reconstructed from a bounding rectangle.
                 if(vision_result.pose_ran) {
-                    // --team only selects ownership; observed red/blue supplies identity.
+                    // Preview may fit blue geometry from the selected model, but only observed color verifies ownership.
                     points.identity_verified=zone_color.verified;
-                    points.zone_label=zone_color.verified?zone_color.color+"_safe_zone":"unknown";
+                    points.zone_label=zone_color.color.empty()?"unknown":zone_color.color+"_safe_zone";
                     points.geometry_id=zone_geometry.id;points.points=zone_points;
                 } else if(!config.keypoints_file.empty()) {
                     try {
@@ -381,18 +466,24 @@ int main(int argc, char **argv) {
                 geometry_result=geometry->process(geometry_frame,points,detections);
                 detections=geometry_result.detections;
             }
-            const bool locked=previous.state==PushState::APPROACH || previous.state==PushState::PREPARE ||
-                previous.state==PushState::RUSH || previous.state==PushState::CLOSE ||
+            const bool cue_locked=previous.state==PushState::CUE_APPROACH || previous.state==PushState::CUE_PREPARE ||
+                previous.state==PushState::CLEAR_PILE;
+            const bool locked=cue_locked || previous.state==PushState::MID_APPROACH || previous.state==PushState::APPROACH || previous.state==PushState::PREPARE ||
+                previous.state==PushState::RUSH || previous.state==PushState::LOWER_FRAME ||
                 previous.state==PushState::VERIFY_CAPTURE || previous.state==PushState::CARRY ||
-                previous.state==PushState::GATE || previous.state==PushState::OPEN_RELEASE ||
+                previous.state==PushState::GATE || previous.state==PushState::RAISE_RELEASE ||
                 previous.state==PushState::ENTER || previous.state==PushState::BACK_OUT ||
                 previous.state==PushState::VERIFY_DELIVERY;
             auto input = makePushObservation(detections, observed_at,
                 previous.first_ordinary_delivered, config.confidence,
-                locked?previous.target_id:-1,task.rejectedTargets(observed_at));
+                locked?previous.target_id:-1,task.rejectedTargets(observed_at),
+                config.search_cues && (previous.state==PushState::SCAN || previous.state==PushState::CUE_APPROACH ||
+                                      previous.state==PushState::WAIT_START || previous.state==PushState::START_ADVANCE),
+                cue_locked,bool(geometry));
             input.run = false; // MatchControl supplies the final authorization below.
             if(geometry)geometry->apply(input,geometry_result,expected_stop,config.team,imuNowUs());
             if(frame_sensors.actuator.valid){
+                input.gripper_closed_observed=frame_sensors.actuator.gripper_open==0;
                 input.camera_pitch_cdeg=frame_sensors.actuator.camera_pitch_cdeg;
                 input.camera_pitch_stable=frame_sensors.pitch_stable;
             }
@@ -405,6 +496,8 @@ int main(int argc, char **argv) {
             }
             // Holding-region and rush-corridor inventory; uncertainty leaves them incomplete.
             capture.update(input, detections, observed_at);
+            if(config.controlled_empty_field)
+                controlled_field.update(input,detections,vision_result.halves,frame.size(),previous,geometry_result.mapping_valid,config.controlled_ignore_clearance);
             // Raw boxes do not establish metric distance, route safety or delivery.
             // Keep unconnected evidence invalid; never synthesize successful observations.
             const auto imu_data = imu ? imu->snapshot() : ImuSnapshot{};
@@ -423,13 +516,25 @@ int main(int argc, char **argv) {
             std::string preflight_reason;
             if(!imu || !input.safety_ok) preflight_reason="imu_not_ready";
             else if(!task_calibrated) preflight_reason="gripper_calibration_required";
+            else if(!loadFitsHalf(measured_load_radius,zone_geometry.width_m,zone_geometry.depth_m,
+                                 zone_geometry.divider_exclusion_half_width_m,load_half_width,load_half_depth)) preflight_reason="load_footprint_does_not_fit";
+            else if(!config.controlled_empty_field && config.zone_color_file.empty()) preflight_reason="zone_color_calibration_required";
+            else if(config.controlled_empty_field && measured_body_radius<=0) preflight_reason="robot_swept_radius_required";
             else if(frame.cols!=config.frame_width || frame.rows!=config.frame_height) preflight_reason="camera_size_mismatch";
             else if(!geometry) preflight_reason="ground_mapping_not_ready";
             else if(config.pose_model_path.empty() && config.keypoints_file.empty()) preflight_reason="zone_pose_source_required";
-            else if(config.zone_color_file.empty() && config.keypoints_file.empty()) preflight_reason="zone_identity_source_required";
             else if(link && !feedback->latestActuatorFeedback().valid) preflight_reason="mcu_feedback_stale";
             else if(link && link->stats().sent && !link->stats().last_ok) preflight_reason="mcu_write_failed";
             else if(!frame_sensors.actuator.valid || input.camera_pitch_cdeg==kCameraPitchInvalid) preflight_reason="camera_pitch_feedback_invalid";
+            else if(!match.status(imuNowUs()).started_us &&
+                    (!frame_sensors.pitch_stable ||
+                     std::abs(int(input.camera_pitch_cdeg) - int(tuning.far_pitch_cdeg)) > tuning.pitch_tolerance_cdeg))
+                preflight_reason="startup_pitch_not_5deg";
+            else if(!geometry_result.mapping_valid &&
+                    !stationaryPitchWork(previous, geometry_result.reason))
+                preflight_reason=geometry_result.reason.empty()?"ground_mapping_unavailable":geometry_result.reason;
+            else if(!match.status(imuNowUs()).started_us && (!input.path_safe || !input.opponent_zone_clear))
+                preflight_reason="startup_clearance_required";
             input.now_us=imuNowUs();
             match.health(input.now_us,preflight_reason.empty(),preflight_reason);
             // Only independently identified, observed (not predicted) fixed-zone poses
@@ -449,11 +554,52 @@ int main(int argc, char **argv) {
             input.safety_ok=match_status.permit && preflight_reason.empty();
             navigator.update(input,previous);
             auto out = task.update(input);
+            // Independent final gate: stationary image checks never authorize wheels.
+            inhibitUnmappedMotion(out.motion, geometry_result.mapping_valid);
             out.match_state=MatchControl::name(match_status.state);out.match_reason=match_status.reason;
             out.match_remaining_us=match_status.remaining_us;
             out.hardware_output_enabled=bool(link)&&match_status.permit;
             previous = out;
-            if(link)link->submit(out.motion);
+            const auto submit_time = Clock::now();
+            const auto submit_gap_ms = std::chrono::duration<double, std::milli>(submit_time-last_submit_time).count();
+            last_submit_time = submit_time;
+            if(link) {
+                const auto stale_count = link->stats().stale;
+                link->submit(out.motion);
+                if (stale_count != last_stale_count) {
+                    async_log.submit("[WATCHDOG] timestamp_us=" + std::to_string(input.now_us)
+                        + " stale_zero_delta=" + std::to_string(stale_count-last_stale_count)
+                        + " submit_gap_ms=" + std::to_string(submit_gap_ms) + "\n");
+                    last_stale_count = stale_count;
+                }
+            }
+            // Record every changed stop condition, including one-frame stops.
+            // task_reason is historical state-machine context; evidence is current.
+            const bool stopped = out.motion.vx_mps == 0 && out.motion.wz_rps == 0;
+            std::ostringstream stop_detail;
+            stop_detail << "stopped=" << stopped << " state=" << PushTask::name(out.state)
+                << " task_reason=" << out.reason << " preflight=" << preflight_reason
+                << " match=" << match_status.reason << " locked_id=" << out.target_id
+                << " observed_id=" << input.target_id << " target_valid=" << input.target_valid
+                << " id_match=" << (out.target_id >= 0 && out.target_id == input.target_id)
+                << " geometry=" << input.geometry_valid << " mapping=" << geometry_result.mapping_valid
+                << " geometry_reason=" << geometry_result.reason
+                << " region=" << input.target_region_valid << " in_zone=" << input.target_in_zone
+                << " path=" << input.path_safe << " opponent_clear=" << input.opponent_zone_clear
+                << " pitch_stable=" << input.camera_pitch_stable << " gripper_done=" << input.gripper_done
+                << " corridor_complete=" << input.corridor_complete;
+            if (feedback) {
+                const auto fb = feedback->latestActuatorFeedback();
+                stop_detail << " command_id=" << int(feedback->gripperActionId())
+                    << " feedback_id=" << int(fb.gripper_action_id) << " feedback_valid=" << fb.valid;
+            }
+            const auto signature = stopped ? stop_detail.str() : std::string("moving");
+            if (signature != last_stop_signature) {
+                async_log.submit("[CONTROL_CHANGE] timestamp_us=" + std::to_string(input.now_us)
+                    + " " + stop_detail.str() + "\n");
+                last_stop_signature = signature;
+            }
+
             ++rate_frames;
             const auto rate_now = Clock::now();
             const double rate_seconds = std::chrono::duration<double>(rate_now - rate_started).count();
@@ -462,22 +608,54 @@ int main(int argc, char **argv) {
                 rate_frames = 0; rate_started = rate_now;
             }
             if (now - last_report >= Ms(500)) {
-                report(out);
-                std::cout<<"[MATCH] state="<<MatchControl::name(match_status.state)<<" reason="<<match_status.reason
+                std::ostringstream log;
+                if(config.controlled_empty_field) log<<"[CONTROLLED_TEST] clearance=" << (config.controlled_ignore_clearance?"DISABLED_CONTACT_TEST":"operator_confirmed") << " identity=own_zone_only "
+                    <<"inventory="<<controlled_field.reason()<<" translation_watchdog=disabled phase_budgets=enabled\n";
+                for(const auto& d:detections) log<<"[TARGET] id="<<d.track_id<<" label="<<d.label
+                    <<" position="<<d.ground_position_valid<<" contact="<<d.ground_contact_valid
+                    <<" reason="<<d.ground_contact_reason<<" xy="<<d.body_xy_m.x<<","<<d.body_xy_m.y
+                    <<" conf="<<d.confidence<<" box="<<d.box.x<<","<<d.box.y<<","<<d.box.width<<","<<d.box.height<<"\n";
+                {
+                    const auto ids=[&](const char* key,const std::vector<int>& v){
+                        log<<" "<<key<<"=";
+                        if(v.empty()) log<<"-";
+                        for(size_t i=0;i<v.size();++i) log<<(i?",":"")<<v[i];
+                    };
+                    const auto& hd=capture.diagnostics();
+                    log<<"[HOLD] observable="<<input.hold_observable<<" captured="<<input.captured
+                       <<" complete="<<input.held_complete<<" held=o"<<input.held.ordinary<<"/c"<<input.held.core
+                       <<"/i"<<input.held.injured<<"/d"<<input.held.dangerous<<"/u"<<input.held.unknown;
+                    ids("ambiguous",hd.ambiguous);ids("outside",hd.outside);ids("unfollowed",hd.unfollowed);
+                    log<<"\n";
+                }
+                report(out, log);
+                const bool range_valid = input.target_valid && input.geometry_valid;
+                const float target_y = range_valid ? input.distance_m * std::cos(input.heading_error)
+                    : std::numeric_limits<float>::quiet_NaN();
+                log << "[GRASP_GEOMETRY] target_valid=" << range_valid
+                    << " body_range_m=" << (range_valid ? input.distance_m : std::numeric_limits<float>::quiet_NaN())
+                    << " body_forward_m=" << target_y << " front_y_m=" << tuning.closed_front_y_m
+                    << " front_gap_m=" << target_y-tuning.closed_front_y_m
+                    << " open_prepare_range_m=" << tuning.rush_start_m
+                    << " close_trigger_y_m=" << tuning.grasp_trigger_y_m
+                    << " open_distance_ok=" << (range_valid && input.distance_m<=tuning.rush_start_m)
+                    << " open_heading_ok=" << (range_valid && std::abs(input.heading_error)<=tuning.rush_heading_rad)
+                    << " path=" << input.path_safe << " gripper_command=" << int(out.motion.gripper_offset) << "\n";
+                log<<"[MATCH] state="<<MatchControl::name(match_status.state)<<" reason="<<match_status.reason
                          <<" remaining_ms="<<match_status.remaining_us/1000<<" preflight="<<preflight_reason<<"\n";
-                std::cout<<"[EVIDENCE] identity="<<input.zone_identity_verified<<" target_region="<<input.target_region_valid
+                log<<"[EVIDENCE] identity="<<input.zone_identity_verified<<" target_region="<<input.target_region_valid
                          <<" color="<<zone_color.color<<" color_reason="<<zone_color.reason<<" path="<<input.path_safe<<" opponent_clear="<<input.opponent_zone_clear
                          <<" retreat="<<input.retreat_safe<<" zone_counts="<<input.zone_counts_valid<<"\n";
-                if(geometry)std::cout<<"[GEOMETRY] mapped="<<geometry_result.mapping_valid
+                if(geometry)log<<"[GEOMETRY] mapped="<<geometry_result.mapping_valid
                     <<" zone_valid="<<input.zone_estimate.trusted(input.now_us)<<" reason="<<geometry_result.reason
                     <<" inliers="<<input.zone_estimate.inlier_ids.size()<<" residual_m="<<input.zone_estimate.residual_m<<"\n";
-                std::cout << "[PERF] loop_fps=" << loop_fps << " inference_ms=" << inference_ms
+                log << "[PERF] loop_fps=" << loop_fps << " inference_ms=" << inference_ms
                           << " detect_ms=" << vision_result.detect_ms << " pose_ms=" << vision_result.pose_ms
                           << " zone_points=" << zone_points.size()
                           << " capture_ms=" << capture_ms << " detections=" << detections.size() << "\n";
                 if (imu) {
                     const auto& p = imu_data.sample;
-                    std::cout << "[IMU] fresh=" << imu_data.fresh << " age_ms=" << imu_data.age_ms
+                    log << "[IMU] fresh=" << imu_data.fresh << " age_ms=" << imu_data.age_ms
                               << " numeric_ok=" << p.measurements_valid << " seq=" << p.sequence
                               << " body_rpy_rad=" << p.body_rpy_rad[0] << "," << p.body_rpy_rad[1] << "," << p.body_rpy_rad[2]
                               << " status=" << p.status << " crc_errors=" << imu_data.crc_errors
@@ -487,21 +665,36 @@ int main(int argc, char **argv) {
                     static const char *ack_names[] = {"idle", "no_feedback", "not_done", "done"};
                     const auto st = link->stats();
                     const auto fb = feedback->latestActuatorFeedback();
-                    std::cout << "[MCU] healthy=" << link->healthy() << " sent=" << st.sent << " failed=" << st.failed
+                    log << "[MCU] healthy=" << link->healthy() << " sent=" << st.sent << " failed=" << st.failed
                               << " stale_zero=" << st.stale << " gripper_id=" << int(feedback->gripperActionId())
                               << " target=" << gripper_ack.target << " ack=" << ack_names[int(gripper_ack.result)]
                               << " fb_valid=" << fb.valid << " fb_id=" << int(fb.gripper_action_id)
-                              << " fb_open=" << int(fb.gripper_open) << " pitch_rb=" << fb.camera_pitch_cdeg << "\n";
+                              << " fb_open=" << int(fb.gripper_open) << " pitch_rb=" << fb.camera_pitch_cdeg
+                              << " camera_protocol_readback_deg=" << (fb.camera_pitch_cdeg == kCameraPitchInvalid ? kCameraPitchInvalid : cameraPitchToFeedbackDeg(fb.camera_pitch_cdeg)) << "\n";
                 }
+                log << "[LOG] dropped=" << async_log.dropped() << "\n";
+                async_log.submit(log.str());
                 last_report = now;
             }
             vision.drawDetections(frame, detections);
             drawZone(frame, zone_points);
-            cv::putText(frame, link ? "PUSH LIVE - MCU OUTPUT ENABLED" : "PUSH PREVIEW - HARDWARE DISABLED", {10,25},
-                        cv::FONT_HERSHEY_SIMPLEX, 0.6, link ? cv::Scalar(0,0,255) : cv::Scalar(0,255,255), 2);
+            const char *output_label = !link ? "PREVIEW - NO MCU LINK" :
+                out.hardware_output_enabled ? "MCU LINK OPEN - MOTION PERMITTED" :
+                "MCU LINK OPEN - MOTION BLOCKED";
+            const cv::Scalar output_color = !link ? cv::Scalar(0,255,255) :
+                out.hardware_output_enabled ? cv::Scalar(0,0,255) : cv::Scalar(0,190,255);
+            cv::putText(frame, output_label, {10,25}, cv::FONT_HERSHEY_SIMPLEX, 0.6, output_color, 2);
 #ifdef RESCUE_ENABLE_TELEMETRY
-            if (telemetry) telemetry->submit(frame, detections, input, out, epoch_ns,
-                                             frame_sequence, loop_fps, inference_ms, capture_ms, imu_data);
+            if (telemetry) {
+                DecisionTelemetry decision;
+                decision.preflight_reason=preflight_reason;
+                decision.zone_color=zone_color.color;
+                decision.zone_color_reason=zone_color.reason;
+                decision.geometry_reason=geometry_result.reason;
+                decision.pose_model_ran=vision_result.pose_ran;
+                telemetry->submit(frame, detections, input, out, epoch_ns,
+                                  frame_sequence, loop_fps, inference_ms, capture_ms, imu_data, decision);
+            }
 #endif
             if (writer.isOpened()) writer.write(frame);
             if (config.show) {

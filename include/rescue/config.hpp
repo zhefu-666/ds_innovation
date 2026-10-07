@@ -51,6 +51,10 @@ struct Config {
     bool show = true;
     bool save_output = false;
     bool dry_run = false;
+    bool controlled_ignore_clearance = false; // explicit contact-test override, never default
+    bool search_cues = false; // explicitly enabled controlled-field pile exploration
+    bool controlled_empty_field = false; // explicit operator attestation, never a competition default
+    bool check_config = false; // files only; never initializes camera, NPU, sockets or serial
     // Live MCU link: one exclusive RDWR port for motion output and A6 feedback (implies feedback).
     bool hardware = false;
     bool imu = false;
@@ -61,8 +65,11 @@ struct Config {
     int telemetry_fps = 10;
     std::string telemetry_file = "/dev/shm/rescue-telemetry.bin";
     bool auto_run = false;
+    bool allow_mechanical_pitch_model = false;
+    bool no_match_time_limit = false; // explicit debugging override
     uint32_t match_seconds = 180; // confirmed competition duration: 3 minutes
-    uint32_t startup_advance_ms = 10000; // 0.1 m/s for 10 s before the first scan
+    uint32_t startup_advance_ms = 15000; // CLI startup duration: 1.0 m/s for 15 s by default
+    float startup_speed_mps = 1.0f, scan_wz_rps = .25f, turn_wz_rps = .3f;
     std::string task_calibration_file, zone_color_file;
     std::string match_socket = "/tmp/rescue-match.sock";
     bool require_instance_masks = false;

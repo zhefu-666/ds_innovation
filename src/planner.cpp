@@ -125,6 +125,27 @@ PlannedRoute LocalPlanner::planCarry(const cv::Point2f& goal,const NavigationSce
     std::reverse(out.waypoints_m.begin(),out.waypoints_m.end());
     out.valid=true;out.kind=out.waypoints_m.size()==2?"carry_direct":"carry_detour";out.cost=distance[1];return out;
 }
+bool DropPlanner::positionClear(const ZoneGeometry& g,const ZoneEstimate& z,const cv::Point2f& q,
+        const std::vector<PlannerObstacle>& occupied,bool injured,float radius) const {
+    if(!finitePoint(q)||!std::isfinite(radius)||radius<=0)return false;
+    const bool rectangle=half_width_>0&&half_depth_>0;
+    const float extra=.01f+2*z.position_sigma_m+2*cv::norm(q)*z.yaw_sigma_rad;
+    const float mx=(rectangle?half_width_:radius)+extra;
+    const float my=(rectangle?half_depth_:radius)+extra;
+    const bool left=injured?!g.supply_left:g.supply_left;
+    if(!std::isfinite(mx)||!std::isfinite(my)||
+       !(left?q.x < -g.divider_exclusion_half_width_m-mx:q.x > g.divider_exclusion_half_width_m+mx)||
+       std::abs(q.x)>=g.width_m/2-mx||q.y<=my||q.y>=g.depth_m-my)return false;
+    for(const auto& o:occupied) {
+        if(!finitePoint(o.center_m)||!std::isfinite(o.radius_m)||o.radius_m<0)return false;
+        if(rectangle) {
+            const float dx=std::max(0.f,std::abs(q.x-o.center_m.x)-mx);
+            const float dy=std::max(0.f,std::abs(q.y-o.center_m.y)-my);
+            if(std::hypot(dx,dy)<=o.radius_m)return false;
+        } else if(cv::norm(q-o.center_m)<=mx+o.radius_m)return false;
+    }
+    return true;
+}
 DropPlan DropPlanner::plan(const ZoneGeometry& g,const ZoneEstimate& z,bool identity,bool complete,
                            const std::vector<PlannerObstacle>& occupied,bool injured,float radius,uint64_t now) const {
     DropPlan out;
@@ -136,10 +157,7 @@ DropPlan DropPlanner::plan(const ZoneGeometry& g,const ZoneEstimate& z,bool iden
     float best=std::numeric_limits<float>::infinity();
     for(float y=.02f;y<g.depth_m;y+=.02f)for(float x=.02f;x<g.width_m/2;x+=.02f) {
         const cv::Point2f candidate{sign*x,y};
-        const float margin=radius+.01f+2*z.position_sigma_m+2*cv::norm(candidate)*z.yaw_sigma_rad;
-        if(x<=g.divider_exclusion_half_width_m+margin||x>=g.width_m/2-margin||y<=margin||y>=g.depth_m-margin)continue;
-        bool clear=true;for(const auto& o:occupied)if(cv::norm(candidate-o.center_m)<=margin+o.radius_m) {clear=false;break;}
-        if(!clear)continue;
+        if(!positionClear(g,z,candidate,occupied,injured,radius))continue;
         // Fill the rear first to preserve the entry; prefer each half's centreline.
         const float cost=(g.depth_m-y)+.2f*std::abs(x-g.width_m/4);
         if(cost<best){best=cost;out.valid=true;out.centre_zone_m=candidate;out.radius_m=radius;out.reason="ok";}

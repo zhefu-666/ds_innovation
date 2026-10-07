@@ -37,6 +37,29 @@ void detectorTests() {
     assert(!makePushObservation(out,1050000,false,.25f,-1,{1}).target_valid);
     // The danger object is never a push target, even after the first ordinary delivery.
     std::vector<SegDetection> danger{out[1]};assert(!makePushObservation(danger,1050000,true,.25f).target_valid);
+    { // All known colours are search cues, with metric distance and stable locks.
+        auto objects=out;
+        for(auto& d:objects){d.ground_position_valid=d.ground_contact_valid=true;d.body_xy_m={0,.7f};}
+        objects[1].body_xy_m={0,.4f}; // blue nearest, green still visible
+        auto picked=makePushObservation(objects,1050000,false,.25f,-1,{},true,false,true);
+        assert(picked.target_id==1 && picked.target_is_search_cue);
+        picked=makePushObservation(objects,1050000,false,.25f,2,{},true,true,true);
+        assert(picked.target_id==1); // valid green replaces a non-green search cue
+        objects[0].ground_contact_valid=false;
+        assert(makePushObservation(objects,1050000,false,.25f,2,{},true,true,true).target_id==2);
+        objects[0].ground_contact_valid=true;
+        assert(makePushObservation(objects,1050000,false,.25f,2,{1},true,true,true).target_id==2);
+        assert(makePushObservation(objects,1050000,false,.25f,1,{},true,true,true).target_id==1);
+        picked=makePushObservation(objects,1050000,false,.25f,-1,{},false,false,true);
+        assert(picked.target_id==1 && !picked.target_is_search_cue);
+        picked=makePushObservation(objects,1050000,true,.25f,-1,{},false,false,true);
+        assert(picked.target_id==3); // black wins despite farther distance
+        objects[2].ground_contact_valid=false;
+        assert(makePushObservation(objects,1050000,true,.25f,-1,{},false,false,true).target_id==1);
+        assert(!makePushObservation(objects,1300000,false,.25f,-1,{},true,false,true).target_valid);
+        objects[1].label="unknown";objects[0].ground_contact_valid=false;
+        assert(!makePushObservation(objects,1050000,false,.25f,-1,{},true,false,true).target_valid);
+    }
     assert(taskLabel("blue")=="dangerous_object"&&taskLabel("orange")=="injured_person");
     assert(taskLabel("green")=="ordinary_supply"&&taskLabel("black")=="core_supply");
     assert(taskLabel("red")=="unmapped_red"&&taskLabel("core")=="unmapped_core");

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ds_innovation 运行观测</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #121616; color: #e7eeeb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { border-bottom: 1px solid #34403c; padding: 14px 22px; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+    h1 { font-size: 19px; margin: 0 auto 0 0; font-weight: 650; }
+    h2 { font-size: 15px; margin: 0 0 12px; font-weight: 650; }
+    .status { font-size: 13px; color: #b5c4be; }
+    .good { color: #59dda8; } .warn { color: #f3ba6e; } .bad { color: #f18b83; }
+    main { max-width: 1510px; margin: auto; padding: 18px 22px 32px; display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr); gap: 18px; }
+    section { min-width: 0; background: #1c2422; border: 1px solid #34403c; border-radius: 6px; padding: 15px; margin-bottom: 16px; }
+    .image { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #080a09; overflow: hidden; }
+    .image img { width: 100%; height: 100%; object-fit: contain; }
+    .facts { display: grid; grid-template-columns: minmax(95px, 0.42fr) minmax(0, 1fr); gap: 6px 12px; font-size: 13px; }
+    .facts .key { color: #9fada7; } .facts .value { overflow-wrap: anywhere; }
+    .mono { font-family: ui-monospace, SFMono-Regular, monospace; }
+    .evidence { margin: 12px 0 0; padding: 10px 12px 10px 28px; background: #252c25; border-left: 3px solid #f3ba6e; font-size: 12px; line-height: 1.6; }
+    .evidence:empty { display: none; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; border-bottom: 1px solid #34403c; padding: 7px 5px; }
+    th { color: #9fada7; font-weight: 500; }
+    .empty { color: #9fada7; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px; gap: 0; } header { padding: 12px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ds_innovation 运行观测</h1>
+    <span id="connection" class="status">连接中</span>
+    <span id="link" class="status"></span>
+    <span id="permit" class="status"></span>
+  </header>
+  <main>
+    <div>
+      <section>
+        <h2>相机与检测</h2>
+        <div class="image"><img id="camera" src="/stream.mjpg" alt="实时相机画面"></div>
+      </section>
+      <section>
+        <h2>检测目标</h2>
+        <table><thead><tr><th>ID</th><th>类别</th><th>置信度</th><th>框 (像素)</th></tr></thead><tbody id="detections"></tbody></table>
+      </section>
+    </div>
+    <div>
+      <section>
+        <h2>当前决策</h2>
+        <div class="facts">
+          <span class="key">阶段</span><span id="phase" class="value mono">--</span>
+          <span class="key">比赛状态</span><span id="match" class="value mono">--</span>
+          <span class="key">预检</span><span id="preflight" class="value mono">--</span>
+          <span class="key">目标</span><span id="target" class="value">--</span>
+          <span class="key">己方安全区</span><span id="zone" class="value">--</span>
+          <span class="key">夹持 / 落点</span><span id="capture" class="value">--</span>
+          <span class="key">计算速度</span><span id="motion" class="value mono">--</span>
+        </div>
+        <ul id="evidence" class="evidence"></ul>
+      </section>
+      <section>
+        <h2>主程序与图像</h2>
+        <div id="health" class="facts"></div>
+      </section>
+      <section>
+        <h2>HiPNUC IMU</h2>
+        <div id="imu" class="facts"></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const el = id => document.getElementById(id);
+    const number = (value, digits = 2) => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '--';
+    const reasonName = {
+      startup_clearance_required: '起步区域安全证据缺失', imu_not_ready: 'IMU 未就绪',
+      gripper_calibration_required: '夹爪标定缺失', camera_pitch_feedback_invalid: '相机角度反馈无效',
+      zone_pose_source_required: '安全区位姿模型缺失', zone_identity_source_required: '安全区颜色来源缺失'
+    };
+    const evidenceName = {
+      match_not_running: '比赛未进入运行状态', target_not_selected: '尚未选定目标',
+      target_geometry_unavailable: '目标距离未确认', target_region_unknown: '目标与安全区关系未知',
+      clearance_checks_disabled: '受控碰撞测试：前后、转向及张爪避障已关闭',
+      path_safety_unavailable: '前方路径安全证据缺失', retreat_safety_unavailable: '后退安全证据缺失',
+      opponent_zone_clearance_unavailable: '对方安全区避让证据缺失',
+      zone_identity_unverified: '己方安全区身份未确认', zone_inventory_incomplete: '区内库存未清点',
+      zone_counts_unavailable: '区内计数未确认'
+    };
+    function facts(id, rows) {
+      const parent = el(id); parent.replaceChildren();
+      for (const [label, value] of rows) {
+        const key = document.createElement('span'); key.className = 'key'; key.textContent = label;
+        const text = document.createElement('span'); text.className = 'value'; text.textContent = value;
+        parent.append(key, text);
+      }
+    }
+    let busy = false;
+    async function update() {
+      if (busy) return;
+      busy = true;
+      try {
+        const response = await fetch('/status', {signal: AbortSignal.timeout(3000), cache: 'no-store'});
+        const data = await response.json();
+        const h = data.health || {}, d = data.decision || {}, imu = data.imu || {};
+        const live = h.robot_data_connected === true && d.valid === true;
+        el('connection').textContent = live ? `主程序在线 · ${number(h.frame_age_s)} s` : `数据未更新 · ${h.error || '等待主程序'}`;
+        el('connection').className = `status ${live ? 'good' : 'bad'}`;
+        el('camera').style.visibility = live ? 'visible' : 'hidden';
+        el('link').textContent = live ? (d.mode === 'hardware' ? 'MCU 链路已打开' : '只读预览') : '';
+        el('link').className = `status ${d.mode === 'hardware' ? 'warn' : 'good'}`;
+        el('permit').textContent = live ? (d.hardware_output_enabled ? '运动许可：开启' : '运动许可：关闭') : '';
+        el('permit').className = `status ${d.hardware_output_enabled && live ? 'bad' : 'good'}`;
+        el('phase').textContent = live ? `${d.phase || '--'} · ${d.phase_reason || '--'}` : '--';
+        el('match').textContent = live ? `${d.match_state || '--'} · ${d.match_reason || '--'}` : '--';
+        const preflight = d.preflight_reason || '';
+        el('preflight').textContent = live ? (d.preflight_ready ? '通过' : `${reasonName[preflight] || preflight || '未通过'} (${preflight || '--'})`) : '--';
+        el('preflight').className = `value mono ${live && !d.preflight_ready ? 'warn' : ''}`;
+        el('target').textContent = live ? (d.target_valid ? `${d.target_label || '--'} #${d.target_id}` : '未选定') : '--';
+        el('zone').textContent = live ? (d.zone_own ? '已确认' : d.zone_color_reason || '未确认') : '--';
+        el('capture').textContent = live ? `${d.captured ? '检测到' : '未确认'} / ${d.drop_plan_valid ? '落点有效' : '无落点'}` : '--';
+        el('motion').textContent = live ? `${number(d.computed_vx_mps)} m/s · ${number(d.computed_wz_rps)} rad/s` : '--';
+        const missing = el('evidence'); missing.replaceChildren();
+        if (live) for (const code of d.missing_evidence || []) {
+          const item = document.createElement('li');
+          item.textContent = code.startsWith('preflight:') ? `预检：${reasonName[code.slice(10)] || code.slice(10)}` : evidenceName[code] || code;
+          missing.append(item);
+        }
+        facts('health', [['主循环', live ? `${number(h.loop_fps)} FPS` : '--'],
+          ['推理及跟踪', live ? `${number(h.inference_ms)} ms` : '--'],
+          ['采集等待', live ? `${number(h.capture_ms)} ms` : '--'],
+          ['采集 / 预览', live ? `${h.source_width}×${h.source_height} / ${h.image_width}×${h.image_height}` : '--'],
+          ['遥测丢帧', live ? String(h.dropped_publish_frames ?? '--') : '--']]);
+        const rpy = Array.isArray(imu.body_rpy_rad) ? imu.body_rpy_rad.map(x => number(x)).join(', ') : '--';
+        facts('imu', [['数据', live ? (imu.valid ? '新鲜有效' : imu.enabled ? '无效或过期' : '未启用') : '--'],
+          ['年龄', live ? `${number(imu.age_ms)} ms` : '--'],
+          ['车体姿态 (rad)', live ? rpy : '--'],
+          ['CRC 错误', live ? String(imu.crc_errors ?? '--') : '--'],
+          ['姿态控制标志', live ? (imu.attitude_valid_for_control ? '有效' : '未确认') : '--']]);
+        const body = el('detections'); body.replaceChildren();
+        const detections = live ? data.detections || [] : [];
+        if (!detections.length) {
+          const row = document.createElement('tr'); const cell = document.createElement('td');
+          cell.colSpan = 4; cell.className = 'empty'; cell.textContent = live ? '当前帧无检测目标' : '等待实时数据';
+          row.append(cell); body.append(row);
+        }
+        for (const detection of detections) {
+          const row = document.createElement('tr');
+          const box = detection.box || {};
+          for (const value of [detection.track_id, detection.label,
+            `${number((detection.confidence || 0) * 100, 1)}%`,
+            `${box.x ?? '--'}, ${box.y ?? '--'}, ${box.width ?? '--'}×${box.height ?? '--'}`]) {
+            const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
+          }
+          body.append(row);
+        }
+      } catch (error) {
+        el('connection').textContent = '连接中断，正在重试';
+        el('connection').className = 'status bad';
+        el('camera').style.visibility = 'hidden';
+      } finally { busy = false; }
+    }
+    setInterval(update, 500); update();
+    el('camera').onerror = () => setTimeout(() => {el('camera').src = `/stream.mjpg?t=${Date.now()}`;}, 2000);
+  </script>
+</body>
+</html>
