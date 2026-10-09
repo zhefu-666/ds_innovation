@@ -1,20 +1,41 @@
 {
   "schema_version": 1,
   "measured": 1,
-  "note": "Operator-confirmed runtime candidate: fixed wires, photo-based body envelope, 40-degree holding review, and real gripper operation. Dynamic obstacle clearance and MCU disconnect stop remain separate acceptance items.",
+  "note": "Controlled-field setup, max two supplies. robot_swept_radius_m=0.32 is the operator-confirmed body rotation radius. Load planning uses the enclosing circle of the existing gripper interior rectangle: x=+-0.0785, y=0.097..0.225m, centre y=0.161m. This is a derived conservative envelope, not a new measurement or dynamic acceptance. Nominal object centres retained separately. Drop planner uses the 0.157 x 0.128m rectangle at the entrance alignment, including yaw/position margins, instead of unnecessarily reserving its enclosing circle. User confirmed 2026-10-05: gripper front is robot-frame y=0.220 m. Mouth and closed front updated; grasp trigger remains y=0.200 m inside the mouth. Existing load envelope remains conservative, not remeasured.",
   "image_width": 1280,
   "image_height": 720,
-  "grasp_trigger_y_m": 0.20,
-  "hold_center_y_m": 0.12,
-  "injured_hold_center_y_m": 0.14,
-  "mouth_y_m": 0.21,
-  "closed_front_y_m": 0.225,
+  "grasp_trigger_y_m": 0.2,
+  "hold_center_y_m": 0.161,
+  "injured_hold_center_y_m": 0.161,
+  "mouth_y_m": 0.22,
+  "closed_front_y_m": 0.22,
   "rear_grip_boundary_y_m": 0.097,
   "max_inner_width_m": 0.157,
   "max_outer_width_m": 0.172,
   "corridor_half_width_m": 0.11,
-  "load_radius_m": 0.32,
+  "load_radius_m": 0.10128301930728566,
   "holding_views": [
-    {"pitch_cdeg": 4000, "area": [440, 210, 930, 720], "min_visible_bottom_y_px": 440}
-  ]
+    {
+      "pitch_cdeg": 4000,
+      "area": [
+        440,
+        210,
+        930,
+        720
+      ],
+      "min_visible_bottom_y_px": 440
+    }
+  ],
+  "robot_swept_radius_m": 0.32,
+  "nominal_ordinary_center_y_m": 0.12,
+  "nominal_injured_center_y_m": 0.14,
+  "load_half_width_m": 0.0785,
+  "load_half_depth_m": 0.064,
+  "body_front_m": 0.22,
+  "body_rear_m": 0.1,
+  "body_left_m": 0.15,
+  "body_right_m": 0.15,
+  "open_width_m": 0.18,
+  "open_front_m": 0.22,
+  "body_envelope_note": "User 2026-10-05: front22/rear10/left15/right15 cm, open diameter18cm interpreted as width. Open front assumed unchanged at22cm; claw lateral sweep assumed within body width30cm."
 }

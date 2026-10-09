@@ -88,8 +88,8 @@ def start(extra):
                 with urlopen('http://127.0.0.1:8080/status', timeout=1) as response:
                     status = json.load(response)
                 if status['health']['robot_data_connected']:
-                    print('Project preview is running. Foxglove: ws://192.168.1.123:8765')
-                    print('Browser: http://192.168.1.123:8080/')
+                    print('Project preview is running. Foxglove: ws://192.168.34.7:8765')
+                    print('Browser: http://192.168.34.7:8080/')
                     print('Logs:', LOGS)
                     return
             except (OSError, ValueError, KeyError):

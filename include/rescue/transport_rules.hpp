@@ -10,7 +10,7 @@ namespace rescue {
 //  - Dangerous/unknown objects are never transported.
 //  - Anything inside the opponent zone scores for the opponent: never release there.
 enum class TargetKind { ORDINARY, CORE, INJURED, DANGEROUS, UNKNOWN };
-// The current field strategy carries at most two supply objects per trip.
+// The current field strategy carries at most two supply objects per trip (first trip: ordinary only).
 constexpr int kMaxSuppliesPerTrip = 2;
 
 TargetKind targetKind(const std::string& label);

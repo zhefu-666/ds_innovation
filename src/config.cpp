@@ -44,6 +44,10 @@ void printUsage(const char *program) {
         << "Usage: " << program << " [options]\n\n"
         << "Ground-pushing task\n"
         << "Options:\n"
+        << "  --demo-mode MODE    recognize (no serial), search (stop on lock), carry_once (stop after one trip)\n"
+        << "  --demo-seconds N    Demonstration wall limit, 1..60 seconds (default 60)\n"
+        << "  --assume-all-safe   TEMP_ASSUMPTION carry_once only: treat clearance/zone/capture evidence as true\n"
+        << "  --assume-injured-trip  TEMP_ASSUMPTION with --assume-all-safe: start as if the first ordinary supply was delivered and prefer injured_person\n"
         << "  --detect-image PATH Infer one image without camera or serial\n"
         << "  --rknn-library PATH Runtime library (default benchmark_results/librknnrt.so)\n"
         << "  --push-replay PATH  Replay validated task observations without camera or serial\n"
@@ -53,7 +57,7 @@ void printUsage(const char *program) {
         << "  --pitch-feedback   Open MCU feedback read-only for synchronized ground mapping\n"
         << "  --keypoints-file P Optional atomic same-frame landmark JSON (no box-derived points)\n"
         << "  --model PATH        Detector model, default models/detect_fp.rknn\n"
-        << "  --pose-model PATH   Safe-zone YOLOv8-pose RKNN (zone_left/zone_right, 4 kpts); replaces --keypoints-file\n"
+        << "  --pose-model PATH   Safe-zone pose RKNN: zone_left=supply, zone_right=injured (4 kpts each); replaces --keypoints-file\n"
         << "  --pose-model-blue P Blue-team pose model override; same thresholds and output schema\n"
         << "  --pose-model-red P  Red-team pose model override; same thresholds and output schema\n"
         << "  --pose-conf X       Safe-zone half score threshold, default 0.25\n"
@@ -85,17 +89,26 @@ void printUsage(const char *program) {
         << "  --hardware          Send PushTask motion/gripper/pitch to the MCU (25 Hz, zero velocity on stall/exit);\n"
         << "                      needs --imu, reads gripper and pitch feedback from the same port\n"
         << "  --auto-run          Request START once after live preflight; never auto-resume faults\n"
+        << "  --no-match-time-limit Disable total duration limit for debugging; phase/health gates remain\n"
         << "  --match-seconds N   Competition duration, default 180 s (1..86400)\n"
-        << "  --startup-advance-ms N  Initial straight advance before scan, default 10000 (0..60000)\n"
+        << "  --startup-advance-ms N  Initial straight advance before scan, default 15000 (0..60000)\n"
+        << "  --startup-speed V        Startup forward speed in m/s (0 < V <= 1.0)\n"
+        << "  --scan-wz W              Target/zone search rotation in rad/s (0 < W <= 3)\n"
+        << "  --turn-wz W              Post-delivery rotation in rad/s (0 < W <= 3)\n"
+        << "  --search-cues             Closed-gripper short pushes before first ordinary delivery (controlled test only)\n"
+        << "  --controlled-ignore-clearance  Disable travel/jaw collision checks in controlled test mode only\n"
+        << "  --controlled-empty-field  Attest own-zone-only, cleared forward/rear test area; no people/opponents\n"
+        << "  --check-config           Validate files only; no devices opened\n"
         << "  --zone-color-calibration P  Validated red/blue zone color thresholds\n"
         << "  --task-calibration P  Measured gripper geometry and NEAR image region JSON\n"
         << "  --match-socket P    Local control socket, default /tmp/rescue-match.sock\n"
         << "  --require-masks     Reject box-only detections (safety mode)\n"
+        << "  --known-frame-angle 0|20 --known-frame-id N  Done-flag A6 only: last frame command/id of this session\n"
         << "  --sensor-timeout-ms N  Sensor freshness timeout, default 200\n"
         << "  --tof-stop-m X      ToF emergency-stop distance, default 0.18\n"
         << "  --imu-tilt-deg X    Body pitch/roll stop limit, default 12 (ground mapping uses its own tighter limit)\n"
-        << "  --pitch-presets F,T,N  Camera FAR,TRACK,NEAR presets in 0.01 deg, positive down, default 500,500,4000\n"
-        << "                      (wire pitch uses integer degrees); needs -4000<=F<=T<=N<=4000\n"
+        << "  --pitch-presets F,T,N  Calibrated FAR,TRACK,NEAR in 0.01 deg, default 500,500,4000\n"
+        << "                      (TX=calibration/100; RX=TX+40: defaults TX5,5,40 / RX45,45,80); needs -4000<=F<=T<=N<=4000\n"
         << "  --classes CSV       Raw model class names in tensor order\n"
         << "  --help              Show this help\n";
 }
@@ -128,7 +141,33 @@ Config parseArgs(int argc, char **argv) {
             return argv[++i];
         };
 
-        if (arg == "--detect-image") {
+        if (arg == "--demo-mode") {
+            config.demo_mode=needValue(arg);
+        } else if(arg=="--demo-seconds") {
+            const auto text=needValue(arg);size_t used=0;int value=std::stoi(text,&used);
+            if(used!=text.size()||value<1||value>60)throw std::runtime_error("--demo-seconds must be 1..60");
+            config.demo_seconds=value;
+        } else if (arg == "--startup-speed" || arg == "--scan-wz" || arg == "--turn-wz") {
+            const auto value=needValue(arg);size_t used=0;const float v=std::stof(value,&used);
+            const float limit=arg=="--startup-speed"?1.f:3.f;
+            if(used!=value.size() || !std::isfinite(v) || v<=0 || v>limit)
+                throw std::runtime_error(arg+" must be finite and in (0,"+std::to_string(limit)+"]");
+            if(arg=="--startup-speed")config.startup_speed_mps=v;
+            else if(arg=="--scan-wz")config.scan_wz_rps=v;
+            else config.turn_wz_rps=v;
+        } else if (arg == "--search-cues") {
+            config.search_cues = true;
+        } else if (arg == "--controlled-ignore-clearance") {
+            config.controlled_ignore_clearance = true;
+        } else if (arg == "--controlled-empty-field") {
+            config.controlled_empty_field = true;
+        } else if (arg == "--assume-all-safe") {
+            config.assume_all_safe = true;
+        } else if (arg == "--assume-injured-trip") {
+            config.assume_injured_trip = true;
+        } else if (arg == "--check-config") {
+            config.check_config = true;
+        } else if (arg == "--detect-image") {
             config.detect_image = needValue(arg);
         } else if (arg == "--rknn-library") {
             config.rknn_library = needValue(arg);
@@ -228,6 +267,15 @@ Config parseArgs(int argc, char **argv) {
             config.dry_run = true;
         } else if (arg == "--hardware") {
             config.hardware = true;
+        } else if (arg == "--known-frame-angle" || arg == "--known-frame-id") {
+            const auto text=needValue(arg);size_t used=0;const int v=std::stoi(text,&used);
+            if(used!=text.size())throw std::runtime_error(arg+" must be an integer");
+            if(arg=="--known-frame-angle"){if(v!=0&&v!=20)throw std::runtime_error("--known-frame-angle must be 0 or 20");config.known_frame_angle=v;}
+            else {if(v<1||v>255)throw std::runtime_error("--known-frame-id must be 1..255");config.known_frame_id=v;}
+        } else if (arg == "--allow-mechanical-pitch-model") {
+            config.allow_mechanical_pitch_model=true;
+        } else if (arg == "--no-match-time-limit") {
+            config.no_match_time_limit=true;
         } else if (arg == "--match-seconds") {
             const auto text=needValue(arg); size_t used=0; const long v=std::stol(text,&used);
             if(used!=text.size() || v<1 || v>86400) throw std::runtime_error("--match-seconds must be 1..86400");
@@ -256,6 +304,30 @@ Config parseArgs(int argc, char **argv) {
         }
     }
 
+    if(config.demo_mode!="none" && config.demo_mode!="recognize" && config.demo_mode!="search" && config.demo_mode!="carry_once")
+        throw std::runtime_error("Unknown demo mode");
+    if(config.assume_all_safe) {
+        // TEMP_ASSUMPTION: only a bounded carry_once demo on an operator-cleared field may assume evidence.
+        if(config.demo_mode!="carry_once"||!config.controlled_empty_field)
+            throw std::runtime_error("--assume-all-safe requires --demo-mode carry_once and --controlled-empty-field");
+        config.controlled_ignore_clearance=true;
+    }
+    if(config.assume_injured_trip&&!config.assume_all_safe)
+        throw std::runtime_error("--assume-injured-trip requires --assume-all-safe");
+    if(config.demo_mode!="none") {
+        if(config.no_match_time_limit||(config.controlled_ignore_clearance&&!config.assume_all_safe)||config.search_cues||(config.allow_mechanical_pitch_model&&!config.assume_all_safe)) // TEMP_ASSUMPTION：目标贴近时下压相机继续跟踪需机械俯仰模型
+            throw std::runtime_error("Demo modes require bounded timing and validated geometry/clearance");
+        if(!config.push_replay.empty()||!config.geometry_replay.empty()||!config.detect_image.empty())
+            throw std::runtime_error("Use replay/image separately from live demo modes");
+        if(config.demo_mode=="recognize") {
+            if(config.hardware||config.imu||config.pitch_feedback||config.auto_run||!config.calibration_file.empty())
+                throw std::runtime_error("Recognition demo never opens serial ports or sends START");
+            config.dry_run=true;
+        }
+        config.startup_advance_ms=0;config.startup_speed_mps=.10f;
+        config.scan_wz_rps=std::min(config.scan_wz_rps,.25f);config.turn_wz_rps=std::min(config.turn_wz_rps,.25f);
+        config.match_seconds=std::min(config.match_seconds,config.demo_seconds);
+    }
     if (config.team != "red" && config.team != "blue") {
         throw std::runtime_error("--team must be red or blue");
     }
@@ -293,6 +365,10 @@ Config parseArgs(int argc, char **argv) {
     if (config.imu_port.empty() || (config.imu_baud != 9600 && config.imu_baud != 115200 &&
         config.imu_baud != 230400 && config.imu_baud != 460800 && config.imu_baud != 921600))
         throw std::runtime_error("Invalid IMU port or unsupported baudrate");
+    if(config.controlled_ignore_clearance && !config.controlled_empty_field)
+        throw std::runtime_error("--controlled-ignore-clearance requires --controlled-empty-field");
+    if(config.search_cues && !config.controlled_empty_field)
+        throw std::runtime_error("--search-cues requires --controlled-empty-field");
     const int modes = int(!config.push_replay.empty()) + int(!config.detect_image.empty()) + int(!config.geometry_replay.empty());
     if (modes > 1) throw std::runtime_error("Select only one replay/image mode");
     if ((!config.geometry_replay.empty() || !config.keypoints_file.empty()) && config.calibration_file.empty())
@@ -309,7 +385,7 @@ Config parseArgs(int argc, char **argv) {
     if (config.pitch_feedback && modes) throw std::runtime_error("Pitch receiver is live-preview only");
     if (!config.geometry_replay.empty() && (!config.keypoints_file.empty() || config.imu))
         throw std::runtime_error("Geometry replay must use recorded sensors/keypoints, no live sources");
-    if (!config.calibration_file.empty() && modes==0 && (!config.imu || !(config.pitch_feedback || config.hardware)))
+    if (!config.check_config && !config.calibration_file.empty() && modes==0 && (!config.imu || !(config.pitch_feedback || config.hardware)))
         throw std::runtime_error("Live ground mapping requires --imu and --pitch-feedback (or --hardware)");
     if ((config.pitch_feedback || config.hardware) && config.imu && config.uart_port==config.imu_port)
         throw std::runtime_error("MCU feedback and IMU must use different serial ports");

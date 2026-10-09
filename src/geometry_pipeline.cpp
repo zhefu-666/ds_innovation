@@ -125,7 +125,7 @@ void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const E
     in.zone_estimate=r.zone;
     for(const auto& d:r.detections)if(in.target_valid&&d.track_id==in.target_id&&d.ground_position_valid&&
         now>=d.timestamp_us&&now-d.timestamp_us<=200000) {
-        in.geometry_valid=d.ground_contact_valid;in.distance_m=cv::norm(d.body_xy_m);
+        in.geometry_valid=d.ground_contact_valid||(contact_.accept_size_mismatch&&d.ground_contact_reason=="size_mismatch");in.distance_m=cv::norm(d.body_xy_m);
         in.heading_error=std::atan2(-d.body_xy_m.x,d.body_xy_m.y); // positive left/CCW
     }
     in.zone_valid=r.zone.trusted(now);in.zone_own=in.zone_identity_verified&&in.zone_valid&&r.zone.zone_label==team+"_safe_zone";
@@ -139,7 +139,13 @@ void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const E
         in.target_region_valid=inside||outside;in.target_in_zone=inside;
         // Delivery is a direct local observation of the carried target entering our
         // independently identified zone. It does not depend on inventory counts.
-        if (inside && in.zone_own) in.delivery_observed=true;
+        const bool supply = d.label=="ordinary_supply" || d.label=="core_supply";
+        const bool injured = d.label=="injured_person";
+        const bool left = supply ? geometry_.supply_left : !geometry_.supply_left;
+        const bool correct_half = (supply || injured) &&
+            (left ? q.x < -geometry_.divider_exclusion_half_width_m-radius
+                  : q.x > geometry_.divider_exclusion_half_width_m+radius);
+        if (inside && correct_half && in.zone_own) in.delivery_observed=true;
     }
     if(!in.zone_identity_verified || !stop.valid||!in.target_valid||stop.target_id!=in.target_id||stop.frame_id!=r.zone.frame_id||stop.capture_us!=r.zone.timestamp_us)return;
     const auto decision=classifyExpectedStop(geometry_,r.zone,stop.body_m,stop.radius_m,now);

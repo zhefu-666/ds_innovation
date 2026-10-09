@@ -17,6 +17,8 @@ struct RectArea {
 };
 
 struct Config {
+    std::string demo_mode="none"; // none, recognize, search, carry_once
+    uint32_t demo_seconds=60; // hard wall limit for standalone demonstrations
     std::string push_replay;
     std::string geometry_replay, calibration_file, keypoints_file;
     std::string zone_geometry_file = "./config/zone_geometry.json";
@@ -51,6 +53,14 @@ struct Config {
     bool show = true;
     bool save_output = false;
     bool dry_run = false;
+    bool controlled_ignore_clearance = false; // explicit contact-test override, never default
+    bool search_cues = false; // explicitly enabled controlled-field pile exploration
+    bool controlled_empty_field = false; // explicit operator attestation, never a competition default
+    // TEMP_ASSUMPTION（2026-10-08用户要求“默认全都安全”）：所有安全/净空/区域/确认证据视为成立，仅用于跑通决策链。
+    bool assume_all_safe = false;
+    // TEMP_ASSUMPTION：演示伤员趟——启动即视为已送达首个普通物资，并优先锁定 injured_person。仅与 --assume-all-safe 同用。
+    bool assume_injured_trip = false;
+    bool check_config = false; // files only; never initializes camera, NPU, sockets or serial
     // Live MCU link: one exclusive RDWR port for motion output and A6 feedback (implies feedback).
     bool hardware = false;
     bool imu = false;
@@ -61,8 +71,13 @@ struct Config {
     int telemetry_fps = 10;
     std::string telemetry_file = "/dev/shm/rescue-telemetry.bin";
     bool auto_run = false;
+    bool allow_mechanical_pitch_model = false;
+    // TEMP_ASSUMPTION done-flag A6: operator-supplied frame angle/action id from this session's last command.
+    int known_frame_angle = -1, known_frame_id = 0;
+    bool no_match_time_limit = false; // explicit debugging override
     uint32_t match_seconds = 180; // confirmed competition duration: 3 minutes
-    uint32_t startup_advance_ms = 10000; // 0.1 m/s for 10 s before the first scan
+    uint32_t startup_advance_ms = 15000; // CLI startup duration: 1.0 m/s for 15 s by default
+    float startup_speed_mps = 1.0f, scan_wz_rps = .25f, turn_wz_rps = .3f;
     std::string task_calibration_file, zone_color_file;
     std::string match_socket = "/tmp/rescue-match.sock";
     bool require_instance_masks = false;

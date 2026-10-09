@@ -70,8 +70,7 @@ bool SensorPacketParser::consume(uint8_t byte, uint64_t received_us, ActuatorFee
         decoded.timestamp_us = received_us;
         decoded.gripper_open = packet.gripper_open;
         decoded.gripper_action_id = packet.gripper_action_id;
-        decoded.camera_pitch_cdeg = packet.camera_pitch_deg >= -40 && packet.camera_pitch_deg <= 40
-            ? static_cast<int16_t>(packet.camera_pitch_deg * 100) : kCameraPitchInvalid;
+        decoded.camera_pitch_cdeg = cameraPitchFromWire(packet.camera_pitch_deg);
         decoded.valid = received_us != 0;
         // ToF尚未安装；IMU独立接入，不能用执行器反馈刷新姿态数据。
         state = decoded;
@@ -214,7 +213,19 @@ bool UARTController::syncGripperActionId(std::chrono::milliseconds timeout) {
         if (fb.valid) {
             std::lock_guard<std::mutex> guard(io_mutex_);
             if (gripper_sent_) return true; // 已经开始发送，编号由发送序列决定
+            // 下位机未随上位机重启：接管其当前编号和夹爪状态，保持该状态不算新动作，状态变化才用编号+1。
+            if (done_flag_) {
+                // 完成位不能区分开闭：只接受与操作者记录一致的编号且上一动作已完成，再采用已知角度。
+                gripper_synced_ = fb.gripper_action_id == known_id_ && fb.gripper_open == 1;
+                if(!gripper_synced_) return false;
+                gripper_action_id_ = fb.gripper_action_id;
+                gripper_target_ = static_cast<int16_t>(known_angle_);
+                return true;
+            }
             gripper_action_id_ = fb.gripper_action_id;
+            gripper_synced_ = feedback_open_>=0 && (fb.gripper_open == feedback_open_ || fb.gripper_open == feedback_close_);
+            if(!gripper_synced_) return false;
+            gripper_target_ = fb.gripper_open == feedback_open_ ? frameAngle(FrameAction::Open) : frameAngle(FrameAction::Close);
             return true;
         }
         if (Clock::now() >= until) return false;
@@ -229,10 +240,10 @@ int16_t UARTController::cameraPitchTarget() const {
 
 namespace {
 // 编号不一致说明完成标志属于上一次动作，不能采信。
-ActionResult judgeAction(uint8_t id, bool feedback_valid, uint8_t feedback_id, uint8_t state, uint8_t target) {
+ActionResult judgeAction(uint8_t id, bool feedback_valid, uint8_t feedback_id, uint8_t state, int expected) {
     if (id == 0) return ActionResult::Idle;
     if (!feedback_valid) return ActionResult::NoFeedback;
-    return feedback_id == id && state <= 1 && state == target ? ActionResult::Done : ActionResult::NotDone;
+    return feedback_id == id && expected >= 0 && state == expected ? ActionResult::Done : ActionResult::NotDone;
 }
 
 int16_t clampPitch(int16_t cdeg) {
@@ -248,7 +259,27 @@ UARTController::GripperAck UARTController::gripperAck() const {
     std::lock_guard<std::mutex> guard(io_mutex_);
     if (!gripper_sent_) return {};
     const auto fb = freshFeedback(actuator_feedback_);
-    return {judgeAction(gripper_action_id_, fb.valid, fb.gripper_action_id, fb.gripper_open, gripper_target_), gripper_target_};
+    const int logical_open = gripper_target_ == frameAngle(FrameAction::Open) ? 1 : 0;
+    const int expected = done_flag_ ? 1 : logical_open ? feedback_open_ : feedback_close_;
+    auto result = judgeAction(gripper_action_id_, fb.valid, fb.timestamp_us > action_started_us_ ? fb.gripper_action_id : 0, fb.gripper_open, expected);
+    // 完成位模式：新动作至少经过settle时间才算完成；接管的已完成动作（action_started_us_=0）不再等待。
+    if (done_flag_ && result == ActionResult::Done && action_started_us_ && fb.timestamp_us < action_started_us_ + done_settle_us_)
+        result = ActionResult::NotDone;
+    return {result, logical_open};
+}
+
+int UARTController::confirmedFrameOpen(const ActuatorFeedback& fb) const {
+    if (!fb.valid) return -1;
+    if (!done_flag_) {
+        if (feedback_open_ < 0) return -1;
+        return fb.gripper_open == feedback_open_ ? 1 : fb.gripper_open == feedback_close_ ? 0 : -1;
+    }
+    {
+        std::lock_guard<std::mutex> guard(io_mutex_);
+        if (!gripper_sent_) return gripper_synced_ ? (gripper_target_ == frameAngle(FrameAction::Open) ? 1 : 0) : -1;
+    }
+    const auto ack = gripperAck();
+    return ack.result == ActionResult::Done ? ack.target : -1;
 }
 
 ActionResult UARTController::cameraPitchResult(int16_t tolerance_cdeg) const {
@@ -270,13 +301,19 @@ bool UARTController::sendMotion(const MotionCommand &command) {
     if (command.header != MotionPacket::kHeader) throw std::invalid_argument("Motion header must be 0x56");
     std::lock_guard<std::mutex> guard(io_mutex_);
     if (feedback_only_) return false;
-    // 夹爪首次发送或目标变化才算新动作；写失败后重发沿用同一编号。
-    const uint8_t gripper = command.gripper_open ? 1 : 0;
-    if (!gripper_sent_ || gripper != gripper_target_) {
+    // 夹爪目标变化才算新动作；写失败后重发沿用同一编号。未同步时首包也算新动作；
+    // 同步后首包若与下位机当前状态相同，沿用下位机编号，不消耗编号。
+    const int16_t gripper = command.gripper_offset;
+    if(gripper!=0 && gripper!=20) return false;
+    const bool retry = command.frame_transaction != transaction_;
+    const bool keep_mcu_action = !retry && !gripper_sent_ && gripper_synced_ && gripper == gripper_target_;
+    if (!keep_mcu_action && (!gripper_sent_ || gripper != gripper_target_ || retry)) {
         gripper_action_id_ = nextGripperActionId(gripper_action_id_);
         gripper_target_ = gripper;
-        gripper_sent_ = true;
+        action_started_us_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
     }
+    transaction_=command.frame_transaction;
+    gripper_sent_ = true;
     camera_pitch_target_ = clampPitch(command.camera_pitch_cdeg);
     camera_sent_ = true;
     const auto packet = buildMotionPacket(command, gripper_action_id_);
@@ -344,9 +381,10 @@ std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand &comm
     // 下位机对速度有限制：vx硬限幅，任何上层请求都不能超过±kMaxLinearSpeedMps。
     packet.vx_mps = valid ? std::clamp(command.vx_mps, -kMaxLinearSpeedMps, kMaxLinearSpeedMps) : 0.0f;
     packet.wz_rps = valid ? command.wz_rps : 0.0f;
-    packet.gripper_open = command.gripper_open ? 1 : 0;
+    if(command.gripper_offset!=0 && command.gripper_offset!=20)throw std::invalid_argument("Frame requires OPEN=0 or CLOSE=20");
+    packet.gripper_offset = static_cast<int8_t>(command.gripper_offset);
     packet.gripper_action_id = gripper_action_id;
-    packet.camera_pitch_deg = static_cast<int16_t>(std::round(clampPitch(command.camera_pitch_cdeg) / 100.0));
+    packet.camera_pitch_offset = cameraPitchToWire(command.camera_pitch_cdeg);
     std::vector<uint8_t> bytes(sizeof(packet));
     std::memcpy(bytes.data(), &packet, sizeof(packet));
     // CRC覆盖帧头到相机pitch，与A6反馈同一算法；按字节写入，低字节在前。

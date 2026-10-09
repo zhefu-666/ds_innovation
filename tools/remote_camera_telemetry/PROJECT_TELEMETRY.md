@@ -4,11 +4,25 @@
 
 ## 查看
 
-- Foxglove：Open connection → Foxglove WebSocket → `ws://192.168.1.123:8765`。
+- Foxglove：Open connection → Foxglove WebSocket → `ws://192.168.34.7:8765`。
 - Image 面板：`/camera/image`，画面已经绘制检测框和类别，无需另设叠加层。
-- Raw Messages：`/detections`、`/fsm/state`、`/runtime/config`。
+- Raw Messages：`/detections`、`/fsm/state`、`/decision/live`、`/runtime/config`。
 - Plot：`/system/health.loop_fps`、`/system/health.inference_ms`、`/system/health.frame_age_s`。
-- 浏览器：`http://192.168.1.123:8080/`，显示图像、检测列表、状态和运行参数。
+- 浏览器：`http://192.168.34.7:8080/`，显示图像、检测列表、状态和运行参数。
+
+安全区 pose 模型的 `zone_left`（类别 0）表示物资安全区半区，`zone_right`（类别 1）表示伤员安全区半区。左右以安全区入口面向区内的坐标系为准，不等于图像中的左右；模型类别不表示红蓝归属，仍需独立颜色证据。普通/核心物资投放左半区，伤员单独投放右半区。
+
+`/decision/live` 同帧发布当前状态机阶段及原因、比赛/预检状态、候选目标、
+区域身份与几何、安全许可、走廊和夹持证据、区内库存、规划落点以及计算指令。
+`missing_evidence` 列出当前缺少的输入，不表示状态机会执行相应动作。
+`valid=false` 表示主程序快照过期或尚未升级到提供决策数据的版本。
+默认 `--dry-run` 下比赛状态保持 WAITING；不会为展示而伪造抓取流程。
+蓝方单模型预览在两半区都被 pose 模型检测到、且未加载颜色标定时，
+`zone_color_reason=blue_pose_model_assumption_preview_only` 表示按蓝方模型暂定蓝色。
+这不是实测颜色，`zone_identity_verified` 仍为 false；`--hardware` 不采用该默认值。
+在 Foxglove 的 Raw Messages 面板选择 `/decision/live`；Plot 可选择
+`/decision/live.computed_vx_mps`、`/decision/live.target_distance_m`。
+HTTP `http://192.168.34.7:8080/status` 也包含同一帧的 `decision` 字段。
 
 `/cmd/motion` 是任务计算值，`hardware_output_enabled=0`，不是已发送命令或实际车速。IMU 和 ToF 未接入，健康状态明确为 false。`/fsm/state` 的 WAIT_START 是默认未开启任务运行请求的真实状态；不会为展示而伪造状态变化。
 
@@ -63,6 +77,22 @@ cd /home/cat/ds_innovation
 ```
 
 两个进程都在板子上运行。任何一方退出都不会给底盘发送动作。主程序停止或超过 2 秒未更新时，网页隐藏旧画面，健康通道 `robot_data_connected=false`；Foxglove Image 可能保留最后一帧，应同时关注健康通道。
+
+蓝方模型与已有5°标定的只读预览（先停止正在占用相机的旧主程序，保留 bridge）：
+
+```bash
+./build-pitch40-telemetry-20261004/rescue_upper_host \
+  --dry-run --no-show --telemetry --team blue \
+  --imu --imu-port /dev/ttyUSB0 \
+  --pitch-feedback --calibration config/camera.yaml \
+  --model models/detect_fp.rknn --pose-model-blue models/zone_pose_fp.rknn \
+  --task-calibration config/task_calibration.40_runtime.json \
+  --startup-advance-ms 10000
+```
+
+`--pitch-feedback` 只读 A6，不下发 pitch 命令。当前 `camera.yaml` 仅验证 5°；
+若实际读回为 0°，地面映射会以 `pitch_not_calibrated` 拒绝，不能靠默认蓝色绕过。
+启动命令也不会把 `--startup-advance-ms` 变成已实测前进距离。
 
 ## 实现与边界
 

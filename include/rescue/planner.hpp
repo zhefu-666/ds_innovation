@@ -69,10 +69,15 @@ struct DropPlan {
 };
 class DropPlanner {
 public:
+    explicit DropPlanner(float half_width=0,float half_depth=0):half_width_(half_width),half_depth_(half_depth){}
+    bool positionClear(const ZoneGeometry&,const ZoneEstimate&,const cv::Point2f&,
+                       const std::vector<PlannerObstacle>&,bool injured,float radius) const;
     // Occupancy is expressed in the fixed zone frame; all objects (not just the
     // intended class) reserve space. Complete inventory is required even if empty.
     DropPlan plan(const ZoneGeometry& geometry,const ZoneEstimate& zone,bool identity_verified,
                   bool inventory_complete,const std::vector<PlannerObstacle>& occupied,
                   bool injured,float load_radius_m,uint64_t now_us) const;
+private:
+    float half_width_,half_depth_;
 };
 } // namespace rescue

@@ -1,0 +1,97 @@
+{
+  "schema_version": 2,
+  "version": "frame-20261008-assume",
+  "status": "TEMP_ASSUMPTION_assume_all_safe_NOT_ACCEPTANCE",
+  "dimensions_source": "user_table_2026-10-08_mm_converted_to_m; front 181.07 derived from 281.07-100 pending check",
+  "image_width": 1280,
+  "image_height": 720,
+  "coordinate_transform_verified": 1,
+  "action_mapping_verified": 1,
+  "capture_stop_verified": 1,
+  "body_envelope_verified": 1,
+  "visual_acceptance_passed": 1,
+  "box_area_accepted": 1,
+  "a6_open_state": -1,
+  "a6_close_state": -1,
+  "forward_sign": 1,
+  "rotation_origin_x_m": 0,
+  "rotation_origin_y_m": 0,
+  "outer_width_m": 0.165,
+  "outer_depth_m": 0.09515,
+  "inner_width_m": 0.15,
+  "inner_depth_m": 0.08008,
+  "entrance_width_m": 0.15,
+  "edge_height_m": 0.01,
+  "near_inner_m": 0.09092,
+  "far_inner_m": 0.171,
+  "body_left_m": 0.145,
+  "body_right_m": 0.145,
+  "body_rear_m": 0.1,
+  "body_front_m": 0.18107,
+  "body_front_source": "derived_0.28107_minus_0.100; reported 176.07 has ~5mm push recess",
+  "grasp_trigger_y_m": 0.131,
+  "maximum_block_depth_m": 0.04,
+  "stopping_margin_m": 0.015,
+  "open_width_m": 0.15,
+  "open_front_m": 0.2,
+  "robot_swept_radius_m": 0.26,
+  "frame_views": [
+    {
+      "pitch_cdeg": 4000,
+      "calibrated": 1,
+      "fully_observable": 1,
+      "polygon": [
+        [
+          330,
+          525
+        ],
+        [
+          1085,
+          530
+        ],
+        [
+          1235,
+          719
+        ],
+        [
+          165,
+          719
+        ]
+      ]
+    },
+    {
+      "pitch_cdeg": 3500,
+      "calibrated": 1,
+      "fully_observable": 1,
+      "polygon": [
+        [
+          340,
+          470
+        ],
+        [
+          1075,
+          475
+        ],
+        [
+          1230,
+          719
+        ],
+        [
+          170,
+          719
+        ]
+      ]
+    }
+  ],
+  "pending": [
+    "ALL values above marked verified are TEMP_ASSUMPTION; real measurement still pending"
+  ],
+  "maximum_block_width_m": 0.04,
+  "action_mapping_source": "user_confirmed_2026-10-08: open=0 close=+20 (new MCU -20..20, 0=mid 90deg, negative up); A6 byte1 accepted as done flag",
+  "a6_semantics": "done_flag",
+  "a6_done_settle_ms": 1000,
+  "a6_done_settle_source": "estimate; field echo 10ms precedes servo motion; not measured",
+  "frame_view_matching": "image_polygon",
+  "frame_view_matching_source": "user_choice_2026-10-08 TEMP_ASSUMPTION; only 5deg ground model validated",
+  "assume_source": "user_2026-10-08: 直接默认全都安全吧，先尝试能全部跑通所有比赛决策再说"
+}

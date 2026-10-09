@@ -24,7 +24,14 @@ int main() {
         detection.track_id = 42; detection.confidence = 0.9f;
         detection.box = {1, 2, 30, 40};
         rescue::PushObservation observation;
+        observation.target_valid = true; observation.target_id = 42;
+        observation.label = "ordinary_supply";
         rescue::PushOutput output;
+        output.reason = "waiting_for_permission";
+        rescue::DecisionTelemetry decision;
+        decision.preflight_reason = "camera_pitch_feedback_invalid";
+        decision.zone_color_reason = "color_unmeasured";
+        decision.geometry_reason = "pitch_unusable";
         rescue::ImuSnapshot imu;
         imu.connected = imu.fresh = imu.sample.measurements_valid = true;
         imu.sample.sequence = 100;
@@ -32,7 +39,7 @@ int main() {
         imu.sample.status = 0x2323;
         imu.sample.angular_velocity_rps = {0.1f, 0.2f, 0.3f};
         imu.sample.body_angular_velocity_rps = {0.1f, -0.2f, -0.3f};
-        publisher.submit(frame, {detection}, observation, output, 1790000000123456789ULL, 5, 25, 20, 5, imu);
+        publisher.submit(frame, {detection}, observation, output, 1790000000123456789ULL, 5, 25, 20, 5, imu, decision);
         // Changing main's image must not race with or change the published snapshot.
         frame.setTo(cv::Scalar(0, 0, 0));
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -55,6 +62,12 @@ int main() {
         assert(static_cast<int>(data["detections"][0]["track_id"]) == 42);
         assert(static_cast<std::string>(data["detections"][0]["model_label"]) == detection.model_label);
         assert(static_cast<int>(data["motion"]["hardware_output_enabled"]) == 0);
+        assert(static_cast<std::string>(data["decision"]["phase"]) == "WAIT_START");
+        assert(static_cast<std::string>(data["decision"]["preflight_reason"]) == decision.preflight_reason);
+        assert(static_cast<int>(data["decision"]["target_id"]) == 42);
+        assert(static_cast<int>(data["decision"]["path_safe"]) == 0);
+        assert(static_cast<std::string>(data["decision"]["missing_evidence"][0]) ==
+               "preflight:camera_pitch_feedback_invalid");
         assert(static_cast<int>(data["imu"]["sequence"]) == 100);
         assert(static_cast<int>(data["imu"]["attitude_valid_for_control"]) == 0);
         assert(static_cast<int>(data["imu"]["status_raw"]) == 0x2323);
@@ -64,7 +77,7 @@ int main() {
         assert(std::abs(static_cast<double>(data["imu"]["body_angular_velocity_rps"][2]) + 0.3) < 1e-6);
         auto image = cv::imdecode(jpeg, cv::IMREAD_COLOR);
         assert(image.cols == 640 && image.rows == 360);
-        assert(cv::mean(image)[2] > 190); // Owned source pixels, not the black reused frame.
+        assert(cv::mean(image(cv::Rect(0,60,image.cols,image.rows-60)))[2] > 190); // Owned source pixels, not the black reused frame.
     }
     assert(access(config.telemetry_file.c_str(), F_OK) != 0);
     unlink((config.telemetry_file + ".lock").c_str()); rmdir(dir);

@@ -19,7 +19,7 @@
   → PushObservation → PushTask 的质量门控
 ```
 
-只有 PushTask 是当前构建/主入口的任务状态机。旧 RescueStateMachine 的删除和已有 IMU 适配在本次改动之前已经存在，本次保留并接续这些未提交修改。UART::buildMotionPacket 保留 ±0.2 m/s 硬限幅和非有限速度归零。
+只有 PushTask 是当前构建/主入口的任务状态机。旧 RescueStateMachine 的删除和已有 IMU 适配在本次改动之前已经存在，本次保留并接续这些未提交修改。UART::buildMotionPacket 保留 ±1.0 m/s 硬限幅和非有限速度归零。
 
 `zone_valid=true` 不再足以通过任务层门控：PushTask 同时检查 `zone_estimate.trusted(now_us)`。旧观测 JSON 若没有质量字段，不能再凭几个布尔值进入推送；已更新示例回放。
 

@@ -10,6 +10,8 @@ struct MatchConfig {
     uint64_t duration_us = 0; // Required explicitly; do not guess the competition duration.
     uint64_t evidence_timeout_us = 200000, no_movement_us = 15000000;
     double movement_threshold_m = .02; // Translation, not motor commands or IMU yaw.
+    bool time_limit_enabled = true;
+    bool require_measured_progress = true; // only controlled local-vision tests disable this
 };
 struct MatchStatus {
     MatchState state = MatchState::WAITING;

@@ -32,6 +32,7 @@ struct GroundContactConfig {
     int edge_margin_px=4;
     float max_range_m=3.f;
     float size_tolerance=.35f; // relative slack for loose detector boxes
+    bool accept_size_mismatch=false; // TEMP_ASSUMPTION only: 20/40 deg view size model is not field-validated; keep the bottom-edge position
 };
 // Resting poses of the class solid: vertices in metres, footprint centred at the origin,
 // z up. False for labels whose physical shape is unknown.

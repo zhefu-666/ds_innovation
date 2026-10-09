@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "status": "TEMP_ASSUMPTION_assume_all_safe_NOT_ACCEPTANCE",
+  "watchdog_verified": true,
+  "watchdog_max_ms": 200,
+  "stationary_mapping_trials_passed": true,
+  "manual_wheel_test_passed": true,
+  "ground_geometry_verified": true,
+  "multi_view_dataset_passed": true,
+  "evidence_record": "TEMP_ASSUMPTION: 用户2026-10-08要求默认全都安全以跑通决策链；无实测证据，不是验收",
+  "operator": "TEMP_ASSUMPTION user 2026-10-08",
+  "verified_date": "2026-10-08",
+  "note": "临时假设文件，仅配合 --assume-all-safe 使用；原 pending 文件未改"
+}

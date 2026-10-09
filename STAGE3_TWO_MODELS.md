@@ -8,6 +8,15 @@
 
 类别映射：blue→dangerous_object（不搬运，永远不会成为推送目标），orange→injured_person，green→ordinary_supply，black→core_supply。
 
+安全区 pose 模型的类别顺序及用途：
+
+| 类别 ID | 模型类别 | 对应半区 | 允许投放 |
+|---|---|---|---|
+| 0 | `zone_left` | 左半区，物资安全区 | 普通物资、核心物资 |
+| 1 | `zone_right` | 右半区，伤员安全区 | 单独运送的伤员 |
+
+这里的左右沿用安全区坐标系：站在入口面向区内，`x<0` 为左半区，`x>0` 为右半区；不是画面中检测框的左右顺序。红色、蓝色安全区都采用相同的物资左/伤员右映射。pose 类别只表示半区几何，不证明它属于红方或蓝方；区域颜色仍需独立观测确认。
+
 ## 运行
 ```
 ./build-arm64-telemetry/rescue_upper_host --detect-image IMG \
@@ -19,7 +28,7 @@
 - 两个独立 RKNN 上下文（RknnModel），共用一次 640 letterbox，同一 frame_id / capture_us。
 - 角点映射：0=L.near_left，1=mean(L.near_right,R.near_left)，2=R.near_right，3=L.far_left，4=mean(L.far_right,R.far_left)，5=R.far_right。隔板点需两半都可见且相距 <25% 半宽；缺失的点不补。
 - 几何（PDF p.37）：标注点在围栏顶面（前沿斜坡脊线、后围栏外上沿，z=20 mm），landmark 模型 660×330 mm @ z=0.02；投放判定仍用内框 600×300。投影改为按高度的平面单应（FIXED_PITCH 只支持 z=0）。
-- 安全区颜色由 --team 给出，pose 模型不区分红蓝；两区中心对称，物资区均在机器人左侧。
+- `--team` 选择己方颜色，实际区域身份仍需独立颜色观测；pose 模型不区分红蓝。红蓝两区都按安全区坐标系左半区为物资区、右半区为伤员区，不能直接用机器人或图像的左右代替。
 
 ## 验证
 - 本地 x86 与板上 build 均无错误；ctest 本地 8/8、板上 9/9 通过。新增单测：640 letterbox、新类别、pose 解码、角点映射、隔板拒绝、高度投影。

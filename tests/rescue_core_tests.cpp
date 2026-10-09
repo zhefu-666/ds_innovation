@@ -80,10 +80,17 @@ int main() {
         // 金向量：15字节帧（夹爪动作编号 + int16相机pitch + CRC16/Modbus覆盖0..12，低字节在前）。
         assert((UARTController::buildMotionPacket(MotionCommand{}, 0) ==
                 Bytes{0x56,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xCA,0x7D}));
+        for (const auto requested : {-32768, -21, -20, -1, 0, 1, 20, 21, 32767}) {
+            MotionCommand signed_frame;
+            signed_frame.gripper_offset = requested;
+            if(requested!=0 && requested!=20){bool rejected=false;try{UARTController::buildMotionPacket(signed_frame,7);}catch(const std::invalid_argument&){rejected=true;}assert(rejected);continue;}
+            const auto bytes=UARTController::buildMotionPacket(signed_frame,7);
+            assert(bytes.size()==15&&bytes[9]==requested&&bytes[10]==7);
+        }
         MotionCommand opened;
-        opened.gripper_open = 1;
+        opened.gripper_offset = 20;
         assert((UARTController::buildMotionPacket(opened, 1) ==
-                Bytes{0x56,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x01,0x00,0x00,0x9A,0x41}));
+                Bytes{0x56,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x14,0x01,0x00,0x00,0x9E,0x4D}));
         MotionCommand tilted;
         tilted.camera_pitch_cdeg = 3000; // 向下30°
         assert((UARTController::buildMotionPacket(tilted, 1) ==
@@ -100,14 +107,14 @@ int main() {
         command.wz_rps = -0.25f;
         auto packet = UARTController::buildMotionPacket(command, 1);
         assert((packet == Bytes{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x00,0x01,0x00,0x00,0x48,0x35}));
-        command.gripper_open = 7; // 非0值统一归一为1
+        command.gripper_offset = 20; // only explicit CLOSE accepted
         command.camera_pitch_cdeg = 4550;
         packet = UARTController::buildMotionPacket(command, 2);
-        assert((packet == Bytes{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x01,0x02,0x28,0x00,0xA7,0xC9}));
+        assert((packet == Bytes{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x14,0x02,0x28,0x00,0xA3,0xC5}));
         assert(packet.size() == MotionPacket::kSize);
         const auto ids = UARTController::buildMotionPacket(command, 255);
         assert(ids[10] == 0xFF);
-        command.gripper_open = 1;
+        command.gripper_offset = 20;
 
         // 编号1..255循环，跳过0
         assert(UARTController::nextGripperActionId(0) == 1);
@@ -137,15 +144,15 @@ int main() {
         packet = UARTController::buildMotionPacket(command, 1);
         for (int i = 1; i <= 8; ++i) assert(packet[i] == 0);
         assert(crcOk(packet));
-        // 线速度硬限幅±0.2m/s：-0.25与-0.2打包结果相同。
-        command.vx_mps = -0.25f; command.wz_rps = 0; command.gripper_open = 0; command.camera_pitch_cdeg = 0;
+        // 线速度硬限幅±1.0m/s：-1.25与-1.0打包结果相同。
+        command.vx_mps = -1.25f; command.wz_rps = 0; command.gripper_offset = 0; command.camera_pitch_cdeg = 0;
         packet = UARTController::buildMotionPacket(command, 1);
-        assert((packet == Bytes{0x56,0xCD,0xCC,0x4C,0xBE,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x0D,0x30}));
+        assert((packet == Bytes{0x56,0x00,0x00,0x80,0xBF,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0xE8,0x62}));
         command.vx_mps = -kMaxLinearSpeedMps;
         assert(UARTController::buildMotionPacket(command, 1) == packet);
         command.vx_mps = 5.0f;
         packet = UARTController::buildMotionPacket(command, 1);
-        assert((packet == Bytes{0x56,0xCD,0xCC,0x4C,0x3E,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x6C,0xF6}));
+        assert((packet == Bytes{0x56,0x00,0x00,0x80,0x3F,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x89,0xA4}));
         command.vx_mps = 0.15f;
         packet = UARTController::buildMotionPacket(command, 1);
         float unclamped = 0; std::memcpy(&unclamped, packet.data() + 1, 4);

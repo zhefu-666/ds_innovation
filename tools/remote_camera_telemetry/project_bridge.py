@@ -15,6 +15,7 @@ import socket
 import struct
 import threading
 import time
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from websockets.server import serve
 from server import IMAGE_SCHEMA, channel
@@ -47,6 +48,8 @@ def read_packet(path):
     for key in ('state', 'health', 'motion', 'config'):
         if not isinstance(data[key], dict):
             raise ValueError('Missing snapshot section: ' + key)
+    if 'decision' in data and not isinstance(data['decision'], dict):
+        raise ValueError('Invalid decision section')
     for key in ('source_width', 'source_height', 'image_width', 'image_height'):
         if type(data[key]) is not int or not 0 < data[key] <= 16384:
             raise ValueError('Invalid image size')
@@ -103,7 +106,8 @@ class Source:
                       frame_age_s=round(age, 3) if age is not None else None,
                       sequence=data['sequence'] if data else 0,
                       error=error or (None if live else 'Main program frames are stale'),
-                      hardware_output_enabled=False, imu_connected=imu_view(data, live)['fresh'], tof_connected=False)
+                      hardware_output_enabled=bool(live and data and data['motion'].get('hardware_output_enabled')),
+                      imu_connected=imu_view(data, live)['fresh'], tof_connected=False)
         if data:
             health.update(source_width=data['source_width'], source_height=data['source_height'],
                           image_width=data['image_width'], image_height=data['image_height'])
@@ -122,6 +126,12 @@ HEALTH_SCHEMA = schema({**fields('loop_fps inference_ms capture_ms publish_fps_l
     'frame_age_s': {'type': ['number', 'null']}})
 STATE_SCHEMA = schema({**fields('name target_label', 'string'), **fields('valid', 'boolean'),
     **fields('batch_size delivered_total first_ordinary_delivered run_requested target_valid target_id geometry_valid path_safe safety_ok zone_valid')})
+DECISION_SCHEMA = schema({
+    **fields('pixel_mode pixel_reason multi_view_reason mode phase phase_reason match_state match_reason preflight_reason target_label zone_color zone_color_reason geometry_reason zone_estimate_reason', 'string'),
+    **fields('pixel_ratio_raw pixel_ratio_smoothed pixel_locked multi_view_verdict multi_view_finished observation_round observation_view observation_frames match_remaining_ms preflight_ready run_permitted safety_ok target_id target_valid target_geometry_valid target_region_known target_in_own_zone target_distance_m target_heading_error_rad pose_model_ran zone_identity_verified zone_valid zone_own path_safe retreat_safe opponent_zone_clear corridor_complete corridor_occlusion_free corridor_total hold_observable captured held_complete held_total gripper_feedback_confirmed gripper_feedback_open camera_pitch_readback_cdeg camera_protocol_readback_deg camera_protocol_cmd_deg camera_pitch_stable zone_inventory_complete zone_counts_valid zone_supply_count zone_injured_count carry_plan_valid drop_plan_valid drop_locked drop_x_zone_m drop_y_zone_m computed_vx_mps computed_wz_rps frame_offset_cmd_deg camera_pitch_cmd_cdeg hardware_output_enabled'),
+    'missing_evidence': {'type': 'array', 'items': {'type': 'string'}},
+    'valid': {'type': 'boolean'},
+})
 MOTION_SCHEMA = schema({**fields('vx_mps wz_rps hardware_output_enabled'), **fields('valid', 'boolean')})
 CONFIG_SCHEMA = schema({**fields('camera_index requested_width requested_height requested_fps confidence nms input_size dry_run'),
     **fields('team model imu_port', 'string'), **fields('imu_baud imu_enabled'), **fields('valid', 'boolean')})
@@ -140,7 +150,8 @@ CHANNELS = [channel(1, '/camera/image', 'foxglove.CompressedImage', IMAGE_SCHEMA
             channel(4, '/fsm/state', 'rescue.PushState', STATE_SCHEMA),
             channel(5, '/cmd/motion', 'rescue.ComputedMotion', MOTION_SCHEMA),
             channel(6, '/runtime/config', 'rescue.RuntimeConfig', CONFIG_SCHEMA),
-            channel(7, '/imu/data', 'rescue.Hi91Imu', IMU_SCHEMA)]
+            channel(7, '/imu/data', 'rescue.Hi91Imu', IMU_SCHEMA),
+            channel(8, '/decision/live', 'rescue.DecisionLive', DECISION_SCHEMA)]
 
 async def client(ws, source):
     if ws.subprotocol != 'foxglove.websocket.v1':
@@ -163,7 +174,8 @@ async def client(ws, source):
                                     'source_height': data['source_height']},
                                  4: dict(data['state'], valid=live),
                                  5: dict(data['motion'], valid=live),
-                                 6: dict(data['config'], valid=live)})
+                                 6: dict(data['config'], valid=live),
+                                 8: dict(data.get('decision') or {}, valid=bool(live and isinstance(data.get('decision'), dict)))})
             encoded = {}
             for sid, cid in list(subscriptions.items()):
                 if cid == 1:
@@ -194,7 +206,7 @@ async def client(ws, source):
                 if msg.get('op') == 'subscribe':
                     for sub in msg['subscriptions']:
                         sid, cid = sub['id'], sub['channelId']
-                        if type(sid) is not int or not 0 <= sid <= 0xffffffff or type(cid) is not int or cid not in range(1, 8):
+                        if type(sid) is not int or not 0 <= sid <= 0xffffffff or type(cid) is not int or cid not in range(1, 9):
                             raise ValueError('Invalid subscription')
                         if len(subscriptions) >= 12 and sid not in subscriptions:
                             raise ValueError('Too many subscriptions')
@@ -223,14 +235,7 @@ async def client(ws, source):
         except asyncio.TimeoutError:
             ws.transport.abort()
 
-PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ds_innovation 实时观测</title><style>
-body{margin:0;background:#101722;color:#e3eaf3;font:16px system-ui}main{max-width:1150px;margin:auto;padding:24px}h1{font-size:24px;margin:0 0 10px}.sub{color:#9eb0c6;margin-bottom:20px}.grid{display:grid;grid-template-columns:2fr 1fr;gap:20px}.card{background:#1c2736;border-radius:12px;padding:18px;margin-bottom:16px}img{width:100%;display:block;min-height:200px;background:#101722}h2{font-size:17px;margin:0 0 12px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:14px ui-monospace,monospace}.good{color:#79e2ad}.bad{color:#ffb685}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #334155}th{color:#9eb0c6}@media(max-width:750px){.grid{grid-template-columns:1fr}}
-</style><main><h1>ds_innovation 实时观测</h1><div class="sub">来自板子主程序的检测画面与运行状态 · 当前为预览模式，未下发运动指令</div><div id="connection" class="card">正在连接…</div><div class="grid"><section><div class="card"><h2>检测画面</h2><img id="camera" src="/stream.mjpg" alt="等待主程序图像"></div><div class="card"><h2>检测结果</h2><table><thead><tr><th>目标 ID</th><th>类别</th><th>置信度</th></tr></thead><tbody id="detections"></tbody></table></div></section><aside><div class="card"><h2>运行状态</h2><pre id="state"></pre></div><div class="card"><h2>性能与图像</h2><pre id="health"></pre></div><div class="card"><h2>运行参数</h2><pre id="config"></pre></div><div class="card"><h2>HiPNUC IMU</h2><pre id="imu">等待数据</pre></div><div class="card sub">IMU 数值为设备自身坐标；安装方向和状态位尚待确认，姿态未用于运动控制。ToF 尚未接入。</div></aside></div></main><script>
-const byId=id=>document.getElementById(id);let busy=false;
-async function update(){if(busy)return;busy=true;try{const r=await fetch('/status',{signal:AbortSignal.timeout(3000)});const s=await r.json();const h=s.health;const live=h.robot_data_connected;byId('connection').textContent=live?'主程序在线 · 图像持续更新':'主程序未更新：'+h.error;byId('connection').className='card '+(live?'good':'bad');byId('camera').style.visibility=live?'visible':'hidden';const f=s.state||{};byId('state').textContent=`状态：${f.name??'等待数据'}\n批次数量：${f.batch_size??'-'}\n累计交付：${f.delivered_total??'-'}\n目标 ID：${f.target_id??'-'}\n运动输出：未启用`;const n=v=>typeof v==='number'?v.toFixed(2):'-';byId('health').textContent=`主循环：${n(h.loop_fps)} FPS\n推理及跟踪：${n(h.inference_ms)} ms\n采集等待：${n(h.capture_ms)} ms\n图像延迟：${n(h.frame_age_s)} s\n采集尺寸：${h.source_width??'-'} × ${h.source_height??'-'}\n预览尺寸：${h.image_width??'-'} × ${h.image_height??'-'}\n遥测丢帧：${h.dropped_publish_frames??'-'}`;const im=s.imu||{};const vec=v=>Array.isArray(v)?v.map(n).join(', '):'-';byId('imu').textContent=`接收：${im.fresh?'新鲜':im.enabled?'无数据或已过期':'未启用'}\n数据检查：${im.valid?'通过':'无有效新数据'}\n数据年龄：${n(im.age_ms)} ms\n帧序号：${im.sequence??0}\n设备时间：${im.device_time_ms??'-'} ms\n车体姿态 roll/pitch/yaw(rad)：${vec(im.body_rpy_rad)}\n车体角速度(rad/s)：${vec(im.body_angular_velocity_rps)}\n车体加速度(m/s²)：${vec(im.body_acceleration_mps2)}\n设备原始姿态(rad)：${vec(im.rpy_rad)}\n温度：${im.temperature_c??'-'} °C\n状态原值：0x${Number(im.status_raw||0).toString(16)}\nCRC 错误：${im.crc_errors??0}`;const c=s.config||{};byId('config').textContent=`相机编号：${c.camera_index??'-'}\n请求帧率：${c.requested_fps??'-'}\n检测阈值：${n(c.confidence)}\nNMS 阈值：${n(c.nms)}\n模型输入：${c.input_size??'-'}\n队伍：${c.team??'-'}`;byId('detections').replaceChildren();for(const d of live?(s.detections||[]):[]){const tr=document.createElement('tr');for(const value of [d.track_id,d.label,(d.confidence*100).toFixed(1)+'%']){const td=document.createElement('td');td.textContent=value;tr.append(td)}byId('detections').append(tr)}}catch(e){byId('connection').textContent='连接中断，正在重试';byId('connection').className='card bad';byId('camera').style.visibility='hidden';byId('imu').textContent='连接中断，当前数据不可用'}finally{busy=false}}setInterval(update,500);update();
-byId('camera').onerror=()=>setTimeout(()=>{byId('camera').src='/stream.mjpg?t='+Date.now()},2000);
-</script></html>'''.encode()
+PAGE = Path(__file__).with_name('dashboard.html').read_bytes()
 
 def handler(source):
     class Handler(BaseHTTPRequestHandler):
@@ -240,7 +245,9 @@ def handler(source):
                 body, mime = PAGE, 'text/html; charset=utf-8'
             elif path == '/status':
                 data, _, _, health = source.snapshot()
+                decision = dict(data.get('decision') or {}, valid=bool(health['robot_data_connected'] and isinstance(data.get('decision'), dict))) if data else None
                 body = json.dumps({'health': health, 'state': data['state'] if data else None,
+                    'decision': decision,
                     'motion': data['motion'] if data else None, 'config': data['config'] if data else None,
                     'detections': data['detections'] if data else [],
                     'imu': imu_view(data, health['robot_data_connected'])}).encode()

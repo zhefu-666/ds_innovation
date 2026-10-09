@@ -61,6 +61,15 @@ struct Scene {
     }
 };
 int main() {
+    { // Mechanical files require explicit opt-in; the measured 5-degree model is untouched.
+        std::string root=ZONE_GEOMETRY_PATH;root=root.substr(0,root.find_last_of('/'));
+        CameraCalibration assumed,measured;
+        assert(!assumed.load(root+"/camera.mechanical_5_40.yaml"));
+        assert(assumed.load(root+"/camera.mechanical_5_40.yaml",true));
+        assert(measured.load(root+"/camera.yaml"));
+        assert(assumed.pitchUsable(500)&&assumed.pitchUsable(4000)&&!assumed.pitchUsable(4001));
+    }
+
     {
         auto red=ZoneGeometry::load(ZONE_GEOMETRY_PATH,"red_safe_zone");
         auto blue=ZoneGeometry::load(ZONE_GEOMETRY_PATH,"blue_safe_zone");
@@ -297,13 +306,14 @@ int main() {
         in.corridor.add("ordinary_supply");in.corridor_complete=in.corridor_occlusion_free=true;
         PushOutput out;
         // Ideal servo: readback is the last command, settled; the frame is in view only at NEAR.
-        auto step=[&]{in.now_us+=50000;in.gripper_feedback_open=out.motion.gripper_open;
+        auto step=[&]{in.now_us+=50000;in.gripper_feedback_open=out.motion.gripper_offset==0?1:0;
             in.camera_pitch_cdeg=out.motion.camera_pitch_cdeg;in.camera_pitch_stable=true;
             in.hold_observable=in.camera_pitch_cdeg==TaskTuning{}.near_pitch_cdeg;out=task.update(in);};
         in.gripper_done=true;
         for(int i=0;i<12&&out.state!=PushState::RUSH;++i)step();
         assert(out.state==PushState::RUSH);
         in.captured=in.held_complete=true;in.held.add("ordinary_supply");
+        in.multi_view_finished=true;in.multi_view_verdict=1;in.multi_view_inventory=in.held;
         for(int i=0;i<20&&out.state!=PushState::CARRY;++i)step();
         assert(out.state==PushState::CARRY);
         for(int i=0;i<6;++i){step();assert(out.state==PushState::CARRY&&out.motion.vx_mps==0);}
@@ -328,7 +338,7 @@ int main() {
         int master=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);assert(master>=0&&grantpt(master)==0&&unlockpt(master)==0);
         UARTController uart;uart.initFeedbackOnly(ptsname(master),115200);
         assert(!uart.sendMotion(MotionCommand{}));assert(uart.gripperActionId()==0);
-        uint8_t packet[8]={0xA6,1,1,0x14,0x00,0,0,0x0A};
+        uint8_t packet[8]={0xA6,1,1,0x3C,0x00,0,0,0x0A};
         auto crc=UARTController::calculateCRC16(packet,0,4);packet[5]=crc&255;packet[6]=crc>>8;
         assert(write(master,packet,8)==8);
         for(int i=0;i<100&&!uart.latestActuatorFeedback().valid;++i)std::this_thread::sleep_for(std::chrono::milliseconds(5));

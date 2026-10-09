@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 import websockets
 from websockets.server import serve
-from project_bridge import Source, read_packet, client, imu_view
+from project_bridge import PAGE, Source, read_packet, client, imu_view
 
 
 def packet(stamp=None):
@@ -17,12 +17,21 @@ def packet(stamp=None):
             'frame_id': 'camera_optical', 'source_width': 1280, 'source_height': 720,
             'image_width': 640, 'image_height': 360, 'detections': [],
             'state': {'name': 'WAIT_START'}, 'motion': {'vx_mps': 0, 'wz_rps': 0, 'hardware_output_enabled': 0},
-            'health': {'loop_fps': 20}, 'config': {'confidence': 0.5}}
+            'health': {'loop_fps': 20}, 'config': {'confidence': 0.5},
+            'decision': {'mode': 'dry_run', 'phase': 'WAIT_START', 'preflight_reason': 'imu_not_ready',
+                         'target_valid': 0, 'path_safe': 0, 'computed_vx_mps': 0,
+                         'hardware_output_enabled': 0, 'missing_evidence': ['preflight:imu_not_ready']}}
     meta = json.dumps(data).encode()
     jpeg = b'\xff\xd8\xff\xd9'
     return b'RSTEL001' + struct.pack('<II', len(meta), len(jpeg)) + meta + jpeg
 
 class PacketTests(unittest.TestCase):
+    def test_dashboard_reports_live_hardware_mode(self):
+        self.assertIn(b"id=\"permit\"", PAGE)
+        self.assertIn(b"id=\"preflight\"", PAGE)
+        self.assertNotIn('当前为预览模式'.encode(), PAGE)
+        self.assertNotIn('运动输出：未启用'.encode(), PAGE)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / 'snapshot'
@@ -48,6 +57,13 @@ class PacketTests(unittest.TestCase):
         for raw in [b'', packet()[:-1], packet()+b'X', b'RSTEL001'+struct.pack('<II', 2**31, 4)]:
             self.path.write_bytes(raw)
             with self.assertRaises(ValueError): read_packet(self.path)
+        invalid = bytearray(packet())
+        metadata = json.loads(invalid[16:-4])
+        metadata['decision'] = []
+        encoded = json.dumps(metadata).encode()
+        self.path.write_bytes(b'RSTEL001' + struct.pack('<II', len(encoded), 4) + encoded + b'\xff\xd8\xff\xd9')
+        with self.assertRaisesRegex(ValueError, 'Invalid decision section'):
+            read_packet(self.path)
     def atomic_write(self, content):
         pending = self.path.with_suffix('.tmp')
         pending.write_bytes(content)
@@ -78,14 +94,15 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
     async def connect(self):
         ws = await websockets.connect(self.url, subprotocols=['foxglove.websocket.v1'])
         info = json.loads(await ws.recv()); self.assertEqual(info['capabilities'], [])
-        ad = json.loads(await ws.recv()); self.assertEqual(len(ad['channels']), 7)
+        ad = json.loads(await ws.recv()); self.assertEqual(len(ad['channels']), 8)
+        self.assertEqual(ad['channels'][7]['topic'], '/decision/live')
         return ws
     async def test_all_channels_and_timestamp(self):
         ws = await self.connect()
         try:
-            await ws.send(json.dumps({'op':'subscribe','subscriptions':[{'id':x,'channelId':x} for x in range(1,8)]}))
+            await ws.send(json.dumps({'op':'subscribe','subscriptions':[{'id':x,'channelId':x} for x in range(1,9)]}))
             received = {}
-            while len(received) < 7:
+            while len(received) < 8:
                 raw = await asyncio.wait_for(ws.recv(), 2)
                 op, sid, stamp = struct.unpack('<BIQ', raw[:13]); self.assertEqual(op,1)
                 received[sid] = json.loads(raw[13:])
@@ -95,6 +112,9 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(received[4]['valid'])
             self.assertEqual(received[5]['hardware_output_enabled'], 0)
             self.assertFalse(received[7]['valid'])
+            self.assertTrue(received[8]['valid'])
+            self.assertEqual(received[8]['preflight_reason'], 'imu_not_ready')
+            self.assertEqual(received[8]['missing_evidence'], ['preflight:imu_not_ready'])
         finally:
             await ws.close()
     async def test_reject_control_and_reconnect(self):

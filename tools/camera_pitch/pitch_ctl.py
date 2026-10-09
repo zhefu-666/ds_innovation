@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""终端手动控制相机pitch，同时保持夹爪张开（不启动主程序）。
+"""终端手动控制相机pitch，或在启动前安全设置45°（原5°）（不启动主程序）。
 
 用法：
   pitch_ctl.py status                 查看当前动作编号/done/pitch读回
-  pitch_ctl.py set <度>               夹爪张开并转到目标角，读回到位后退出
+  pitch_ctl.py set <度>               方框抬起并转到目标角，读回到位后退出
   pitch_ctl.py repl                   交互模式，终端输入角度实时调整
   pitch_ctl.py watch                  只读：持续显示下位机上传的pitch，不发任何包
+  pitch_ctl.py prepare45              零速度转到45°（原5°），保持当前方框状态和动作编号
 公共参数：[--port /dev/ttyACM0] [--baud 115200] [--timeout 3] [--tol 3] [--dry-run]
          [--watch 秒]（set 到位/超时后继续发包并显示读回的时长）
 
@@ -13,23 +14,23 @@ set/repl 下发后会在终端实时显示A6上传的pitch读回（变化时立�
 含原始cdeg值、目标的小端字节和整帧A6字节（pitch字节3–4用[]标出），便于核对下位机是否
 刷新该字段；结束时汇总读回出现过的值。
 A6帧：A6 | gripper_open | 编号 | pitch低 pitch高 | CRC低 CRC高 | 0A
-运动包：56 | vx(4) | wz(4) | gripper_open | 编号 | pitch低 pitch高 | CRC低 CRC高
+运动包：56 | vx(4) | wz(4) | int8偏移(0放下/20抬起) | 编号 | pitch低 pitch高 | CRC低 CRC高
 
-角度单位为度：0平视，正值向下，负值向上；暂时限位±40°，超出会截断。
-收发线上pitch均为整数度；工具内部换算为cdeg，支持±40°。
-启动时先读A6反馈拿到当前动作编号，用“当前编号+1”发一次张开并等状态与目标匹配，
-之后所有包沿用这个编号和gripper_open=1，调pitch不会再触发夹爪动作。
-速度固定为0。退出后下位机200ms超时停车，相机保持当前角度。
+角度单位为度：当前0..80，旧角度整体+40；当前40对应旧0，当前80对应旧40，超出会截断。
+界面和A6使用0..80°；TX仍是-40..40偏移角，发送前减40，工具内部用界面角的cdeg。
+set/repl 启动时先读A6反馈拿到当前动作编号，用“当前编号+1”发一次抬起并等状态与目标匹配，
+之后所有包沿用这个编号和偏移=20。prepare45（prepare5为兼容别名） 沿用当前方框状态与编号。
+速度固定为0；下位机断联停车能力需单独验收。
 """
-import argparse, os, struct, sys, termios, threading, time, tty
+import argparse, fcntl, os, struct, sys, termios, threading, time, tty
 
 INVALID_PITCH = -32768
-PITCH_LIMIT = 4000  # 内部cdeg；线上整数度，机械限位±40°
+PITCH_LIMIT = 8000  # 内部cdeg；线上整数度，线上范围0..80°
 
 
 
 def decode_pitch(deg):
-    return deg * 100 if -40 <= deg <= 40 else INVALID_PITCH
+    return deg * 100 if 0 <= deg <= 80 else INVALID_PITCH
 
 
 def crc16(data):
@@ -41,8 +42,17 @@ def crc16(data):
     return c
 
 
+from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from frame_semantics import DEFAULT_CONFIG, DONE_FLAG_NOTE, check_known_id, done_flag, load_mapping, hold_angle
+FRAME_MAPPING = None
+FRAME_KNOWN = None  # done_flag模式：(操作者记录的方框角度, 编号)
+FRAME_HOLD_STATE = None
+
 def motion_packet(gripper_open, action_id, pitch):
-    b = struct.pack('<BffBBh', 0x56, 0.0, 0.0, gripper_open, action_id, max(-40, min(40, int(round(pitch / 100)))))
+    if gripper_open not in (0, 1):
+        raise ValueError('A6方框状态必须是0或1，不能作为角度直接发送')
+    b = struct.pack('<BffbBh', 0x56, 0.0, 0.0, hold_angle(gripper_open, FRAME_MAPPING, FRAME_KNOWN), action_id, max(0, min(80, int(round(pitch / 100)))) - 40)
     return b + struct.pack('<H', crc16(b))
 
 
@@ -69,12 +79,24 @@ class Feedback:
 
 def open_port(port, baud):
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    tty.setraw(fd)
-    a = termios.tcgetattr(fd)
-    a[4] = a[5] = getattr(termios, 'B%d' % baud)
-    termios.tcsetattr(fd, termios.TCSANOW, a)
-    termios.tcflush(fd, termios.TCIFLUSH)
-    return fd
+    try:
+        fcntl.ioctl(fd, termios.TIOCEXCL)
+        tty.setraw(fd)
+        a = termios.tcgetattr(fd)
+        a[4] = a[5] = getattr(termios, 'B%d' % baud)
+        termios.tcsetattr(fd, termios.TCSANOW, a)
+        termios.tcflush(fd, termios.TCIFLUSH)
+        return fd
+    except BaseException:
+        close_port(fd)
+        raise
+
+
+def close_port(fd):
+    try:
+        fcntl.ioctl(fd, termios.TIOCNXCL)
+    finally:
+        os.close(fd)
 
 
 def read_frames(fd, parser):
@@ -105,12 +127,12 @@ def frame_hex(raw):
 
 
 def cdeg_hex(p):
-    """int16小端两个字节，如 1200 -> B0 04。"""
-    return struct.pack('<h', INVALID_PITCH if p == INVALID_PITCH else int(round(p / 100))).hex(' ').upper()
+    """TX偏移角int16小端；界面8000 cdeg -> TX40度 -> 28 00。"""
+    return struct.pack('<h', INVALID_PITCH if p == INVALID_PITCH else int(round(p / 100)) - 40).hex(' ').upper()
 
 
 def pitch_detail(p, raw):
-    """读回的度数、原始cdeg和整帧字节，如 0.25° (25 cdeg)  RX: A6 01 08 [19 00] 41 D3 0A。"""
+    """读回的度数、原始cdeg和整帧字节，如 25° (2500 cdeg)  RX: A6 01 08 [19 00] 41 D3 0A。"""
     return '%s (%d cdeg)  RX: %s' % (pitch_txt(p), p, frame_hex(raw))
 
 
@@ -164,9 +186,9 @@ class Tracer:
 def to_cdeg(deg):
     if not __import__('math').isfinite(deg):
         raise ValueError('角度必须为有限数值')
-    actual = max(-40, min(40, int(round(deg))))
+    actual = max(0, min(80, int(round(deg))))
     if actual != deg:
-        print('提示: 按整数度与±40°限位，实际目标为 %d°' % actual)
+        print('提示: 按整数度与0..80°限位，实际目标为 %d°' % actual)
     return actual * 100
 
 
@@ -175,6 +197,7 @@ class Link:
     def __init__(self, fd, dry_run):
         self.fd, self.dry_run = fd, dry_run
         self.parser = Feedback()
+        self.last_received=0.0
         self.last = None  # (done, id, pitch, raw)
         self.on_frame = None  # 可选回调，每帧反馈调用一次（用于实时显示读回）
 
@@ -182,6 +205,7 @@ class Link:
         frames = read_frames(self.fd, self.parser)
         if frames:
             self.last = frames[-1]
+            self.last_received=time.monotonic()
             if self.on_frame:
                 for f in frames:
                     self.on_frame(f)
@@ -189,6 +213,10 @@ class Link:
 
     def send(self, pkt):
         if not self.dry_run:
+            if self.last is None or time.monotonic()-self.last_received>.2:
+                raise TimeoutError('Camera tool lost fresh feedback; stopped transmitting')
+            if pkt[9]!=hold_angle(self.last[0],FRAME_MAPPING,FRAME_KNOWN) or pkt[10]!=self.last[1]:
+                raise ValueError('Frame state/transaction changed; stopped transmitting')
             os.write(self.fd, pkt)
 
     def send_until(self, pkt, ok, timeout):
@@ -203,21 +231,8 @@ class Link:
         return False
 
 
-def open_gripper(link, cur_id, pitch, timeout):
-    new_id = 1 if cur_id >= 255 else cur_id + 1
-    pkt = motion_packet(1, new_id, pitch)
-    print('TX (张开, 编号%d): %s' % (new_id, pkt.hex(' ').upper()))
-    if link.dry_run:
-        return new_id
-    if link.send_until(pkt, lambda f: f[1] == new_id and f[0] == 1, timeout):
-        print('夹爪已张开: 编号%d' % new_id)
-    else:
-        print('警告: %.1fs内未确认夹爪张开完成，继续调pitch' % timeout)
-    return new_id
-
-
 def move_pitch(link, action_id, target, timeout, tol, watch=0.0):
-    pkt = motion_packet(1, action_id, target)
+    pkt = motion_packet(FRAME_HOLD_STATE, action_id, target)
     print('TX (pitch %.2f°, 编号%d): %s' % (target / 100, action_id, pkt.hex(' ').upper()))
     if link.dry_run:
         return True
@@ -242,7 +257,45 @@ def move_pitch(link, action_id, target, timeout, tol, watch=0.0):
     return ok
 
 
-REPL_HELP = """输入角度(度)直接转，如 10 / -5 / 0；正值向下，暂时限位±25，固件档位 -25/0/25
+def prepare_pitch_forty_five(link, gripper_open, action_id, timeout):
+    if gripper_open not in (0, 1) or not 0 <= action_id <= 255:
+        raise ValueError('A6方框状态或动作编号无效，拒绝发送')
+    target = 4500
+    pkt = motion_packet(gripper_open, action_id, target)
+    print('TX (零速度、保持方框%d/编号%d、pitch 45°): %s' %
+          (gripper_open, action_id, pkt.hex(' ').upper()), flush=True)
+    if link.dry_run:
+        return True
+    stable_since = None
+    last_good = None
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        link.send(pkt)
+        for state, observed_id, pitch, raw in link.poll():
+            if state != gripper_open or observed_id != action_id:
+                print('拒绝继续：A6方框状态或动作编号变化: %s' % frame_hex(raw), file=sys.stderr)
+                return False
+            if pitch == target:
+                now = time.monotonic()
+                if stable_since is None or (last_good is not None and now - last_good > 0.15):
+                    stable_since = now
+                last_good = now
+                if now - stable_since >= 0.3:
+                    print('确认：A6连续读回45°且方框状态/编号未变: %s' % frame_hex(raw))
+                    return True
+            else:
+                stable_since = None
+                last_good = None
+        time.sleep(0.05)
+    print('超时：未取得稳定的45°反馈；最后A6: %s' %
+          (frame_hex(link.last[3]) if link.last else '无'), file=sys.stderr)
+    return False
+
+
+# Historical API: prepare5 means old calibrated 5 degrees, now wire 45.
+prepare_pitch_five = prepare_pitch_forty_five
+
+REPL_HELP = """输入角度(度)直接转，如 40 / 45 / 80；正值向下，线上范围0..80，40为原0度，80为原40度
   输入角度后实时显示读回，到位且稳定0.3s或超时后回到提示符（Ctrl+C 提前返回）
   s  查看读回    m  持续显示读回直到 Ctrl+C    x  打印当前包    h  帮助    q  退出"""
 
@@ -279,7 +332,7 @@ def repl(link, action_id, pitch, timeout, tol):
     def tx():
         while not stop.is_set():
             with lock:
-                pkt = motion_packet(1, action_id, state['pitch'])
+                pkt = motion_packet(FRAME_HOLD_STATE, action_id, state['pitch'])
             link.send(pkt)
             link.poll()
             time.sleep(0.05)
@@ -309,7 +362,7 @@ def repl(link, action_id, pitch, timeout, tol):
                 trace(link, state['pitch'], None, tol)
             elif line == 'x':
                 with lock:
-                    print(motion_packet(1, action_id, state['pitch']).hex(' ').upper())
+                    print(motion_packet(FRAME_HOLD_STATE, action_id, state['pitch']).hex(' ').upper())
             else:
                 try:
                     target = to_cdeg(float(line))
@@ -318,7 +371,7 @@ def repl(link, action_id, pitch, timeout, tol):
                     continue
                 with lock:
                     state['pitch'] = target
-                print('目标 -> %.2f°（夹爪保持张开，编号%d）' % (target / 100, action_id))
+                print('目标 -> %.2f°（方框保持已反馈状态，编号%d）' % (target / 100, action_id))
                 if timeout > 0:
                     trace(link, target, timeout, tol)
     except (KeyboardInterrupt, EOFError):
@@ -330,16 +383,27 @@ def repl(link, action_id, pitch, timeout, tol):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('action', choices=['status', 'set', 'repl', 'watch'])
+    ap.add_argument('action', choices=['status', 'set', 'repl', 'watch', 'prepare5', 'prepare45'])
     ap.add_argument('deg', nargs='?', type=float, help='set 的目标角（度，正值向下）')
+    ap.add_argument('--frame-config',default=str(DEFAULT_CONFIG))
     ap.add_argument('--port', default='/dev/ttyACM0')
     ap.add_argument('--baud', type=int, default=115200)
-    ap.add_argument('--timeout', type=float, default=3.0, help='等待夹爪完成/pitch到位的秒数')
+    ap.add_argument('--known-frame-angle', type=int, choices=[0, 20], help='done_flag模式必填：本轮已知方框角度')
+    ap.add_argument('--known-frame-id', type=int, help='done_flag模式必填：该角度对应的A6动作编号')
+    ap.add_argument('--timeout', type=float, default=3.0, help='等待方框完成/pitch到位的秒数')
     ap.add_argument('--tol', type=float, default=3.0, help='pitch到位容差（度），读回精度约1~3°')
     ap.add_argument('--dry-run', action='store_true', help='只读反馈并打印将发送的包，不写串口')
     ap.add_argument('--watch', type=float, default=0.0, metavar='秒',
                     help='set 到位/超时后继续保持目标并显示读回的秒数')
     args = ap.parse_args()
+    global FRAME_MAPPING, FRAME_KNOWN
+    if args.action not in ("status","watch"):
+        FRAME_MAPPING=load_mapping(args.frame_config)
+        if done_flag(FRAME_MAPPING):
+            if args.known_frame_angle is None or args.known_frame_id is None or not 1 <= args.known_frame_id <= 255:
+                ap.error('a6_semantics=done_flag：须给 --known-frame-angle 0|20 和 --known-frame-id 1..255')
+            FRAME_KNOWN=(args.known_frame_angle,args.known_frame_id)
+            print(DONE_FLAG_NOTE+'; known angle=%d id=%d' % FRAME_KNOWN, flush=True)
     if args.action == 'set' and args.deg is None:
         ap.error('set 需要目标角，例如: pitch_ctl.py set 10')
 
@@ -353,12 +417,13 @@ def main():
         if fb is None:
             sys.exit('0.5s内未收到A6反馈，检查下位机与串口')
         link.last = fb
+        link.last_received=time.monotonic()
         done, cur_id, cur_pitch, raw = fb
         print('当前: 动作编号=%d gripper_open=%d pitch=%s' % (cur_id, done, pitch_detail(cur_pitch, raw)))
         if args.action == 'status':
             return
         if args.action == 'watch':
-            # 只读：不发任何包，夹爪和相机都不会动
+            # 只读：不发任何包，方框和相机都不会动
             print('只读显示下位机上传的pitch，Ctrl+C 结束')
             tracer = Tracer(None)
             link.on_frame = tracer.frame
@@ -372,9 +437,21 @@ def main():
             tracer.summary()
             return
 
-        # 张开时先保持当前角，避免夹爪和相机同时动
-        keep = 0 if cur_pitch == INVALID_PITCH else max(-PITCH_LIMIT, min(PITCH_LIMIT, cur_pitch))
-        action_id = open_gripper(link, cur_id, keep, args.timeout)
+        if FRAME_KNOWN is not None:
+            check_known_id(cur_id, FRAME_KNOWN)
+            hold_angle(done, FRAME_MAPPING, FRAME_KNOWN)  # flag须为1（上一动作已完成）
+        if args.action in ('prepare5', 'prepare45'):
+            if not prepare_pitch_forty_five(link, done, cur_id, args.timeout):
+                sys.exit(1)
+            return
+
+        if cur_pitch == INVALID_PITCH or done not in (0,1):
+            raise ValueError('Missing feedback; refusing to guess frame or camera hold position')
+        keep=cur_pitch
+        action_id=cur_id
+        # move_pitch/repl use the recorded raw state, not a guessed open state.
+        global FRAME_HOLD_STATE
+        FRAME_HOLD_STATE=done
         if args.action == 'set':
             ok = move_pitch(link, action_id, to_cdeg(args.deg), args.timeout, int(round(args.tol * 100)), args.watch)
             if not ok:
@@ -382,7 +459,7 @@ def main():
         else:
             repl(link, action_id, keep, args.timeout, int(round(args.tol * 100)))
     finally:
-        os.close(fd)
+        close_port(fd)
 
 
 if __name__ == '__main__':

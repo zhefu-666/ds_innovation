@@ -42,3 +42,10 @@ venv/
 /intelligence20260617.pdf
 calibration_runs/
 /build_*/
+
+# Demo deployment artifacts and local backups
+/backups_sync/
+/tool/demo/runtime/
+/tool/demo/backup-*/
+/tool/demo/logs/
+/tool/demo/view.lock

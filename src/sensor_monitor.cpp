@@ -15,9 +15,9 @@ int main(int argc, char **argv) {
         if (seconds <= 0) throw std::runtime_error("seconds must be positive");
         std::signal(SIGINT, signalHandler);
         std::signal(SIGTERM, signalHandler);
-        std::cout << "A6 actuator feedback monitor (7 bytes); IMU separate, ToF disabled.\n";
+        std::cout << "A6 actuator feedback monitor (8 bytes); IMU separate, ToF disabled.\n";
         UARTController uart;
-        uart.initUART(port, baud, false, false);
+        uart.initFeedbackOnly(port, baud);
         const auto end = Clock::now() + std::chrono::seconds(seconds);
         uint64_t last = 0;
         while (!g_should_exit.load() && Clock::now() < end) {
@@ -27,7 +27,8 @@ int main(int argc, char **argv) {
                 std::cout << "rx_us=" << last << " feedback_valid=" << s.valid
                     << " gripper_open=" << static_cast<unsigned>(s.gripper_open)
                     << " gripper_action_id=" << static_cast<unsigned>(s.gripper_action_id)
-                    << " camera_pitch_cdeg=" << s.camera_pitch_cdeg
+                    << " camera_protocol_deg=" << (s.camera_pitch_cdeg == kCameraPitchInvalid ? kCameraPitchInvalid : cameraPitchToFeedbackDeg(s.camera_pitch_cdeg))
+                    << " calibration_pitch_cdeg=" << s.camera_pitch_cdeg
                     << std::endl;
             }
             std::this_thread::sleep_for(Ms(10));

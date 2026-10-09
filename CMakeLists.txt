@@ -12,6 +12,7 @@ find_package(OpenCV REQUIRED)
 
 add_executable(rescue_upper_host
     src/main.cpp
+    src/controlled_field.cpp
     src/match_control.cpp
     src/match_server.cpp
     src/task_calibration.cpp
@@ -207,4 +208,55 @@ if(BUILD_TESTING)
     target_link_libraries(rescue_zone_color_tests PRIVATE ${OpenCV_LIBS})
     target_compile_options(rescue_zone_color_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_zone_color_tests COMMAND rescue_zone_color_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_controlled_field_tests tests/controlled_field_tests.cpp
+        src/controlled_field.cpp src/zone_geometry.cpp src/zone_estimate.cpp src/transport_rules.cpp)
+    target_include_directories(rescue_controlled_field_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_controlled_field_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_controlled_field_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_controlled_field_tests COMMAND rescue_controlled_field_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME rescue_controlled_config_check COMMAND rescue_upper_host --check-config
+        --controlled-empty-field --team blue
+        --calibration ${CMAKE_CURRENT_SOURCE_DIR}/config/camera.yaml
+        --zone-geometry ${CMAKE_CURRENT_SOURCE_DIR}/config/zone_geometry.json
+        --task-calibration ${CMAKE_CURRENT_SOURCE_DIR}/config/task_calibration.40_runtime.json
+        --pose-model-blue models/zone_pose_fp.rknn)
+    set_tests_properties(rescue_controlled_config_check PROPERTIES WILL_FAIL TRUE)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(async_log_tests tests/async_log_tests.cpp)
+    target_include_directories(async_log_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(async_log_tests PRIVATE pthread)
+    add_test(NAME async_log_tests COMMAND async_log_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_mechanical_tests tests/mechanical_integration_tests.cpp src/transport_rules.cpp)
+    target_include_directories(rescue_mechanical_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_mechanical_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_mechanical_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_mechanical_tests COMMAND rescue_mechanical_tests)
+endif()
+
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME frame_virtual_serial_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_frame_ctl.py)
+    add_test(NAME camera_hold_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pitch_prepare5.py)
+    set_tests_properties(frame_virtual_serial_tests camera_hold_tests PROPERTIES TIMEOUT 15)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(rescue_demo_mode_tests tests/demo_mode_tests.cpp src/config.cpp)
+    target_include_directories(rescue_demo_mode_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_demo_mode_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_demo_mode_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_demo_mode_tests COMMAND rescue_demo_mode_tests)
+    add_test(NAME demo_launcher_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_demo_launchers.py)
+    set_tests_properties(demo_launcher_tests PROPERTIES TIMEOUT 30)
 endif()

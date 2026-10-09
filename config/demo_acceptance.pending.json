@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "status": "pending_real_robot_evidence",
+  "watchdog_verified": false,
+  "watchdog_max_ms": null,
+  "stationary_mapping_trials_passed": false,
+  "manual_wheel_test_passed": false,
+  "ground_geometry_verified": false,
+  "multi_view_dataset_passed": false,
+  "evidence_record": "",
+  "operator": "",
+  "verified_date": "",
+  "note": "由实际记录填写，脚本不会自动改为通过。frame_config中的动作、几何、多档验收仍独立检查。"
+}

@@ -19,6 +19,8 @@ rknn_library: ./benchmark_results/librknnrt.so
 classes: blue,orange,green,black
 # blue=dangerous_object (never carried), orange=injured_person, green=ordinary_supply, black=core_supply
 # Safe-zone pose: zone_pose_v2 yolov8n-pose 640, [1,18,8400], zone_left/zone_right x 4 corners.
+# Class 0 zone_left = supply half (ordinary/core); class 1 zone_right = injured half.
+# Left/right use zone-frame x when facing into the entrance, not image order; pose does not identify red/blue ownership.
 pose_model_path: ./models/zone_pose_fp.rknn
 pose_confidence: 0.25
 pose_keypoint_confidence: 0.5
