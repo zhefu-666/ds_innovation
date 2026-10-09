@@ -16,7 +16,7 @@ def main():
  end=time.monotonic()+a.seconds
  try:
   with open(logs/'web.log','a') as web,open(logs/'preview.log','a') as preview:
-   bridge=subprocess.Popen([sys.executable,str(BASE/'runtime/tools/remote_camera_telemetry/project_bridge.py'),'--snapshot','/dev/shm/rescue-demo-%d.bin'%os.getuid(),'--host','127.0.0.1','--http-port','18080','--ws-port','18765'],stdout=web,stderr=subprocess.STDOUT,start_new_session=True);children.append(bridge)
+   bridge=subprocess.Popen([sys.executable,str(BASE/'runtime/tools/remote_camera_telemetry/project_bridge.py'),'--snapshot','/dev/shm/rescue-demo-%d.bin'%os.getuid(),'--host','127.0.0.1','--http-port','8080','--ws-port','18765'],stdout=web,stderr=subprocess.STDOUT,start_new_session=True);children.append(bridge)
    time.sleep(.4)
    if bridge.poll() is not None:raise RuntimeError('Web bridge failed; see logs/web.log')
    while end-time.monotonic()>=5:

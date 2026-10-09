@@ -27,6 +27,10 @@ struct SegDetection {
     bool ground_contact_valid = false; // explicit measured contact; a box bottom is only an estimate
     bool ground_position_valid = false; // metric projection succeeded; not a path/delivery guarantee
     std::string ground_contact_reason; // empty when ground_contact_valid; otherwise why not
+    bool injured_upright_rejected = false; // injured_person fits the on-end pose clearly better than the lying pose: never a transport target
+    float pose_err_lying = -1.f, pose_err_upright = -1.f; // log-size fit error per resting pose; -1 when not evaluated
+    float silhouette_hw = -1.f; // injured_person only: height/width of the orange blob inside the box; -1 when unavailable
+    int pose_vote_n = 0; float pose_diff_med = 0.f; // frames voting on the injured pose and their median (lying err - upright err); upright when > margin
     uint64_t frame_id = 0; // image sequence, not a coordinate-frame name
     int class_id = -1;
     uint64_t timestamp_us = 0; // 上位机单调时钟，微秒

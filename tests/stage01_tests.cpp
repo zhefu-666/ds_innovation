@@ -214,6 +214,146 @@ int main() {
         assert(ok.ground_contact_valid&&std::abs(ok.body_xy_m.x-.1f)<.01f&&std::abs(ok.body_xy_m.y-.58f)<.01f);
         assert(run(make("core_supply",s.cubeBox({-.1f,1.f},.0346f,.04f)),s.frame).ground_contact_valid);
         assert(run(make("injured_person",s.cubeBox({0,.9f},.04f,.08f)),s.frame).ground_contact_valid);
+        {   // Sideways-only injured grab: on-end (upright) is rejected, lying is kept at any yaw.
+            GroundContactConfig lc;lc.injured_lying_only=true;GeometryPipeline lying_only(s.camera,s.geometry,lc);
+            auto runL=[&](SegDetection d){return lying_only.process(s.frame,s.points(),{d}).detections[0];};
+            int up_total=0,up_rej=0,lie_total=0,lie_rej=0;
+            for(float y=.4f;y<=1.6f;y+=.1f)for(float x=-.6f;x<=.6f;x+=.2f) {
+                const auto upright=s.cubeBox({x,y},.04f)|s.cubeBox({x,y},.04f,0,.04f);
+                if(upright.x>=6&&upright.y>=6&&upright.br().x<=1274&&upright.br().y<=714) {
+                    auto r=runL(make("injured_person",upright));
+                    if(r.ground_contact_reason=="out_of_range")continue;
+                    ++up_total;if(r.injured_upright_rejected){++up_rej;assert(r.ground_contact_reason=="injured_upright"&&!r.ground_contact_valid);}
+                }
+                for(float yaw=0;yaw<3.1f;yaw+=.4f) {
+                    const auto lie=s.cubeBox({x,y},.04f,.08f,0,yaw);
+                    if(lie.x<6||lie.y<6||lie.br().x>1274||lie.br().y>714)continue;
+                    for(float jw:{1.f,.94f,1.06f})for(float jh:{1.f,.94f,1.06f}) { // loose detector boxes: +-6 % per axis
+                        cv::Rect jb(lie.x+int(lie.width*(1-jw)/2),lie.y+int(lie.height*(1-jh)/2),int(lie.width*jw),int(lie.height*jh));
+                        auto r=runL(make("injured_person",jb));
+                        if(r.ground_contact_reason=="out_of_range")continue;
+                        ++lie_total;if(r.injured_upright_rejected){++lie_rej;std::cerr<<"lying rejected "<<x<<","<<y<<" yaw "<<yaw<<" jw "<<jw<<" jh "<<jh<<" e "<<r.pose_err_lying<<"/"<<r.pose_err_upright<<"\n";}
+                    }
+                }
+            }
+            std::cerr<<"upright rejected "<<up_rej<<"/"<<up_total<<" lying rejected "<<lie_rej<<"/"<<lie_total<<"\n";
+            assert(up_total>20&&lie_total>1000);
+            assert(lie_rej==0);              // never drop a lying block
+            assert(up_rej*4>=up_total*3);    // most on-end views are caught (single-box cue, not a guarantee)
+            {   // Positive lying evidence (real-robot setting): everything the margin rule rejects stays rejected, ambiguous blocks are added.
+                GroundContactConfig cc=lc;cc.lying_confirm_diff=-.06f;GeometryPipeline confirm(s.camera,s.geometry,cc);
+                int up2=0,lie2=0,lie_n=0,not_lying=0;
+                for(float y=.4f;y<=1.6f;y+=.1f)for(float x=-.6f;x<=.6f;x+=.2f) {
+                    const auto upright=s.cubeBox({x,y},.04f)|s.cubeBox({x,y},.04f,0,.04f);
+                    if(upright.x>=6&&upright.y>=6&&upright.br().x<=1274&&upright.br().y<=714) {
+                        const auto r=confirm.process(s.frame,s.points(),{make("injured_person",upright)}).detections[0];
+                        if(r.ground_contact_reason=="out_of_range")continue;
+                        up2+=r.injured_upright_rejected;not_lying+=r.ground_contact_reason=="injured_not_lying";
+                    }
+                    for(float yaw=0;yaw<3.1f;yaw+=.4f) {
+                        const auto lie=s.cubeBox({x,y},.04f,.08f,0,yaw);
+                        if(lie.x<6||lie.y<6||lie.br().x>1274||lie.br().y>714)continue;
+                        const auto r=confirm.process(s.frame,s.points(),{make("injured_person",lie)}).detections[0];
+                        if(r.ground_contact_reason=="out_of_range")continue;
+                        ++lie_n;lie2+=r.injured_upright_rejected;
+                    }
+                }
+                std::cerr<<"confirm rule: upright rejected "<<up2<<"/"<<up_total<<" (not_lying "<<not_lying<<") lying rejected "<<lie2<<"/"<<lie_n<<"\n";
+                assert(up2>=up_rej&&lie_n>100);
+            }
+            {   // Silhouette cue: a clearly wide orange blob confirms lying, a clearly tall one rejects, the grey zone keeps the box fit.
+                GroundContactConfig sc=lc;sc.lying_confirm_diff=-.06f;sc.use_silhouette=true;
+                GeometryPipeline sil(s.camera,s.geometry,sc),plain(s.camera,s.geometry,[&]{auto c=sc;c.use_silhouette=false;return c;}());
+                int flipped_ok=0,flipped_rej=0,grey_same=0,n=0;
+                for(float y=.4f;y<=1.6f;y+=.1f)for(float x=-.6f;x<=.6f;x+=.2f) {
+                    const auto upright=s.cubeBox({x,y},.04f)|s.cubeBox({x,y},.04f,0,.04f);
+                    const auto lie=s.cubeBox({x,y},.04f,.08f,0,0);
+                    for(const auto& b:{upright,lie}) {
+                        if(b.x<6||b.y<6||b.br().x>1274||b.br().y>714)continue;
+                        auto d=make("injured_person",b);
+                        const auto base=plain.process(s.frame,s.points(),{d}).detections[0];
+                        if(base.ground_contact_reason=="out_of_range"||base.pose_err_lying<0)continue;
+                        ++n;
+                        d.silhouette_hw=.7f;auto wide=sil.process(s.frame,s.points(),{d}).detections[0];
+                        d.silhouette_hw=1.5f;auto tall=sil.process(s.frame,s.points(),{d}).detections[0];
+                        d.silhouette_hw=1.0f;auto grey=sil.process(s.frame,s.points(),{d}).detections[0];
+                        d.silhouette_hw=-1.f;auto none=sil.process(s.frame,s.points(),{d}).detections[0];
+                        assert(!wide.injured_upright_rejected);                 // wide silhouette: always a lying candidate
+                        assert(tall.injured_upright_rejected&&tall.ground_contact_reason=="injured_upright");
+                        assert(grey.injured_upright_rejected==base.injured_upright_rejected&&none.injured_upright_rejected==base.injured_upright_rejected);
+                        flipped_ok+=base.injured_upright_rejected&&!wide.injured_upright_rejected;
+                        flipped_rej+=!base.injured_upright_rejected&&tall.injured_upright_rejected;
+                        ++grey_same;
+                    }
+                }
+                std::cerr<<"silhouette: n "<<n<<" rescued "<<flipped_ok<<" newly rejected "<<flipped_rej<<"\n";
+                assert(n>100&&grey_same==n&&flipped_ok>0);
+            }
+            // Default config keeps the old behaviour: no rejection.
+            auto base=run(make("injured_person",s.cubeBox({0,.9f},.04f)|s.cubeBox({0,.9f},.04f,0,.04f)),s.frame);
+            assert(!base.injured_upright_rejected);
+            {   // Cross-frame vote: a missed on-end frame inside a track is still rejected, one outlier does not reject a lying block.
+                auto uprightBox=[&](float x,float y){return s.cubeBox({x,y},.04f)|s.cubeBox({x,y},.04f,0,.04f);};
+                auto inImage=[](cv::Rect b){return b.x>=6&&b.y>=6&&b.br().x<=1274&&b.br().y<=714;};
+                auto single=[&](cv::Rect b){GeometryPipeline p(s.camera,s.geometry,lc);
+                    return p.process(s.frame,s.points(),{make("injured_person",b)}).detections[0];};
+                auto step=[&](GeometryPipeline& p,int id,int k,cv::Rect b){
+                    auto f=s.frame;const uint64_t dt=uint64_t(k)*50000;f.capture_us+=dt;f.now_us+=dt;f.frame_id+=k;f.sensors.imu.timestamp_us+=dt;f.sensors.actuator.timestamp_us+=dt;
+                    auto d=make("injured_person",b);d.track_id=id;d.timestamp_us=f.capture_us;d.frame_id=f.frame_id;
+                    return p.process(f,s.points(),{d}).detections[0];};
+                std::vector<cv::Point2f> miss,hit;
+                for(float y=.4f;y<=1.6f;y+=.05f)for(float x=-.6f;x<=.6f;x+=.1f) {
+                    const auto b=uprightBox(x,y);if(!inImage(b))continue;
+                    const auto r=single(b);if(r.pose_err_lying<0)continue;
+                    (r.injured_upright_rejected?hit:miss).emplace_back(x,y);
+                }
+                bool paired=false;
+                for(const auto& m:miss)for(const auto& h:hit) {
+                    if(paired||cv::norm(m-h)>.2f)continue;
+                    paired=true;
+                    const auto bm=uprightBox(m.x,m.y),bh=uprightBox(h.x,h.y);
+                    assert(!single(bm).injured_upright_rejected&&single(bh).injured_upright_rejected);
+                    GeometryPipeline vp(s.camera,s.geometry,lc);
+                    assert(step(vp,5,0,bh).injured_upright_rejected&&step(vp,5,1,bh).injured_upright_rejected);
+                    const auto third=step(vp,5,2,bm); // single frame would let it through
+                    assert(third.pose_vote_n==3&&third.injured_upright_rejected&&third.ground_contact_reason=="injured_upright");
+                    const auto lie=s.cubeBox({h.x,h.y},.04f,.08f,0,0);
+                    assert(inImage(lie)&&!single(lie).injured_upright_rejected);
+                    GeometryPipeline lp(s.camera,s.geometry,lc);
+                    assert(!step(lp,6,0,lie).injured_upright_rejected&&!step(lp,6,1,lie).injured_upright_rejected);
+                    const auto outlier=step(lp,6,2,bh); // single frame would reject it
+                    assert(outlier.pose_vote_n==3&&!outlier.injured_upright_rejected);
+                    // A track that jumps to another place starts a new vote.
+                    const auto far=step(lp,6,3,uprightBox(h.x+.5f,h.y));
+                    assert(far.pose_vote_n<=1);
+                }
+                {   // Approach sequences (0.05 m steps, 50 ms apart): voting must never reject a lying block and must catch more on-end frames.
+                    int track=100,up_frames=0,up_single=0,up_voted=0,lie_frames=0,lie_voted=0;
+                    for(float x=-.4f;x<=.41f;x+=.2f) {
+                        GeometryPipeline vu(s.camera,s.geometry,lc);++track;int k=0;
+                        for(float y=1.5f;y>=.55f;y-=.05f,++k) {
+                            const auto b=uprightBox(x,y);if(!inImage(b))continue;
+                            const auto r=step(vu,track,k,b);if(r.pose_err_lying<0)continue;
+                            ++up_frames;up_single+=single(b).injured_upright_rejected;up_voted+=r.injured_upright_rejected;
+                        }
+                        for(float yaw=0;yaw<3.1f;yaw+=.8f) {
+                            GeometryPipeline vl(s.camera,s.geometry,lc);++track;k=0;
+                            for(float y=1.5f;y>=.55f;y-=.05f,++k) {
+                                const auto lb=s.cubeBox({x,y},.04f,.08f,0,yaw);if(!inImage(lb))continue;
+                                const float jw=1+.06f*float((k%3)-1),jh=1+.06f*float(((k+1)%3)-1);
+                                cv::Rect jb(lb.x+int(lb.width*(1-jw)/2),lb.y+int(lb.height*(1-jh)/2),int(lb.width*jw),int(lb.height*jh));
+                                const auto r=step(vl,track,k,jb);if(r.pose_err_lying<0)continue;
+                                ++lie_frames;lie_voted+=r.injured_upright_rejected;
+                            }
+                        }
+                    }
+                    std::cerr<<"approach upright frames "<<up_frames<<" single_rej "<<up_single<<" voted_rej "<<up_voted<<" | lying frames "<<lie_frames<<" voted_rej "<<lie_voted<<"\n";
+                    assert(up_frames>30&&lie_frames>100&&lie_voted==0&&up_voted>=up_single);
+                }
+                std::cerr<<"vote pairs miss="<<miss.size()<<" hit="<<hit.size()<<" paired="<<paired<<"\n";
+                assert(paired);
+            }
+        }
         // A box claiming contact on input is ignored; the producer decides.
         auto claimed=make("ordinary_supply",s.cubeBox({.1f,.6f}),.2f);claimed.ground_contact_valid=true;
         auto low=run(claimed,s.frame);assert(!low.ground_contact_valid&&low.ground_contact_reason=="low_confidence");

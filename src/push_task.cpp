@@ -39,7 +39,7 @@ const char *PushTask::name(PushState s) {
     return "UNKNOWN";
 }
 void PushTask::enter(PushState s, uint64_t now, const char *why) {
-    state_ = s; phase_us_ = now; travel_ = 0; travel_limit_ = 0;
+    state_ = s; phase_us_ = now; travel_ = 0; travel_limit_ = 0; sweep_phase_ = 0; rush_pulse_phase_ = 0; rush_pulse_count_ = 0;
     confirmations_ = 0; misses_ = 0; hold_misses_ = 0; step_ = 0; turned_ = 0; heading_seen_ = false;
     track_close_ = false; last_range_ = std::numeric_limits<float>::infinity();
     retreat_origin_valid_ = false; retreat_mode_ = 0; assume_blind_ = false;
@@ -47,15 +47,30 @@ void PushTask::enter(PushState s, uint64_t now, const char *why) {
     // 有20°中间角时，APPROACH沿用当前相机角（远处不提前下压），由接近距离分级切换；否则保持直接用TRACK角。
     if (s == PushState::APPROACH) approach_pitch_ = midPitch() ? pitch_cmd_ : t_.track_pitch_cdeg;
     approach_rebind_ = false;
+    if (s != PushState::LOST_HOLD) corridor_retreat_ = false;
     if (why && *why) reason_ = why;
+}
+bool PushTask::uprightInCorridor(const PushObservation &in, uint64_t now, float &lateral) const {
+    if (!in.upright_ts_us || now < in.upright_ts_us || now - in.upright_ts_us > t_.sweep_fresh_us) return false;
+    const float d = in.distance_m;
+    if (!std::isfinite(d) || d < .05f || !std::isfinite(in.heading_error)) return false;
+    const cv::Point2f t(-d * std::sin(in.heading_error), d * std::cos(in.heading_error)), a(t.x / d, t.y / d);
+    bool hit = false; float best = 0;
+    for (const auto &u : in.upright_body) {
+        if (!std::isfinite(u.x) || !std::isfinite(u.y) || cv::norm(u - t) < t_.sweep_min_sep_m) continue; // the target itself is not an obstacle
+        const float along = u.x * a.x + u.y * a.y, side = u.x * a.y - u.y * a.x; // side > 0: right of the approach line
+        if (along < 0 || along > d + t_.sweep_extra_m || std::abs(side) > t_.sweep_corridor_half_m) continue;
+        if (!hit || std::abs(side) < best) { best = std::abs(side); lateral = side; hit = true; }
+    }
+    return hit;
 }
 void PushTask::clearTrip() {
     vref_used_ = false;carry_progress_us_=0;
     cue_mode_=false;clear_commanded_us_=clear_planned_us_=0;
     search_cue_id_=capture_target_id_=-1;
-    drop_locked_=false;drop_centre_zone_={};assume_pushed_=false;prepush_back_=false;repush_n_=verify_in_=verify_out_=0;cargo_ref_us_=cargo_seen_us_=0;half_locked_=false;half_injured_=false;half_x_=0;
+    drop_locked_=false;drop_centre_zone_={};assume_pushed_=false;enter_unconfirmed_=false;prepush_back_=false;align_pending_=push_hold_valid_=false;align_start_us_=0;repush_n_=verify_in_=verify_out_=0;verify_far_view_=false;verify_fix_us_=0;inside_obs_=0;inside_obs_ts_=0;probe_until_us_=probe_next_us_=0;probe_sign_=1.f;sweep_phase_=sweep_attempts_=sweep_seen_=0;delivery_visual_=false;cargo_clipped_=false;cargo_ref_us_=cargo_seen_us_=0;half_locked_=false;half_injured_=false;half_x_=0;
     delivery_seen_=false; zone_search_started_us_=0;
-    approach_forward_=0;
+    approach_forward_=0; last_target_valid_=false;
     target_id_ = -1; label_.clear(); trip_ = {}; pending_ = {}; seen_ = {};
     verdict_ = RuleVerdict::OK;
 }
@@ -108,7 +123,7 @@ int16_t PushTask::desiredPitch() const {
         return t_.intermediate_pitch_cdeg!=kCameraPitchInvalid?t_.intermediate_pitch_cdeg:t_.track_pitch_cdeg;
     case PushState::NEAR_REACQUIRE: case PushState::SELECT_CARGO: return t_.track_pitch_cdeg;
     case PushState::LOST_SEARCH: return lost_round_ && midPitch() ? t_.intermediate_pitch_cdeg : t_.far_pitch_cdeg;
-    case PushState::VERIFY_DELIVERY: return assumeView() ? t_.assume_view_pitch_cdeg : t_.far_pitch_cdeg;
+    case PushState::VERIFY_DELIVERY: return assumeView() && !verify_far_view_ ? t_.assume_view_pitch_cdeg : t_.far_pitch_cdeg;
     case PushState::SCAN: case PushState::TURN_SCAN: return t_.far_pitch_cdeg;
     case PushState::APPROACH: return approach_pitch_!=kCameraPitchInvalid?approach_pitch_:t_.track_pitch_cdeg;
     // TEMP_ASSUMPTION：开框由MCU完成标志确认，不需要为此下压到40°；货物贴近时在40°画面顶边会被截断（box_at_image_edge），
@@ -168,9 +183,10 @@ void PushTask::noteCargo(const char *event, const cv::Point2f &rear, bool fix) {
 }
 // Nearest visible cargo around our half, as the ground contact (near edge) in zone coordinates.
 void PushTask::trackCargo(const PushObservation &in, uint64_t now) {
-    cv::Point2f cb, cr; bool cfix = false;
-    if (!cargoZone(in, now, cb, cr, cfix) || in.cargo_ts_us == cargo_last_ts_) return;
-    cargo_last_ts_ = in.cargo_ts_us; cargo_seen_us_ = now; cargo_rear_x_ = cr.x; cargo_rear_y_ = cr.y; cargo_fix_ = cfix;
+    cv::Point2f cb, cr; bool cfix = false; int ci = -1;
+    if (!cargoZone(in, now, cb, cr, cfix, &ci) || in.cargo_ts_us == cargo_last_ts_) return;
+    cargo_last_ts_ = in.cargo_ts_us; cargo_seen_us_ = now; cargo_body_ = cb; cargo_rear_x_ = cr.x; cargo_rear_y_ = cr.y; cargo_fix_ = cfix;
+    cargo_clipped_ = imgAt(in, ci).clipped;
     if (!cargo_ref_us_ || cv::norm(cb - cargo_ref_body_) >= t_.assume_stuck_move_m || cv::norm(cr - cargo_ref_zone_) >= t_.assume_stuck_move_m) {
         cargo_ref_body_ = cb; cargo_ref_zone_ = cr; cargo_ref_us_ = now;
     }
@@ -183,19 +199,23 @@ float PushTask::backTarget(uint64_t now) const {
     return b;
 }
 
-bool PushTask::cargoZone(const PushObservation &in, uint64_t now, cv::Point2f &body, cv::Point2f &rear, bool &fix) const {
+bool PushTask::cargoZone(const PushObservation &in, uint64_t now, cv::Point2f &body, cv::Point2f &rear, bool &fix, int *idx) const {
     fix = false;
     if (in.cargo_body.empty() || !(now >= in.cargo_ts_us && now - in.cargo_ts_us <= 300000)) return false;
     ZoneEstimate z;
     if (in.vref_valid && in.vref_zone.valid && in.vref_points >= 3 && in.vref_zone.timestamp_us == in.cargo_ts_us) { z = in.vref_zone; fix = true; }
     else if (zone_.valid(now)) z = zone_.predicted(now);
     else return false;
-    float best = 1e9f; bool found = false;
-    for (const auto &p : in.cargo_body) {
+    // Stay on the block already being tracked (two adjacent blocks must not swap the reference every frame).
+    const bool lock = cargo_seen_us_ && now - cargo_seen_us_ <= 600000;
+    float best = 1e9f, best_lock = .10f; bool found = false, locked = false;
+    for (size_t i = 0; i < in.cargo_body.size(); ++i) {
+        const cv::Point2f &p = in.cargo_body[i];
         const cv::Point2f q = z.bodyToZone(p);
         if (p.y <= 0 || std::abs(q.x - halfX()) > t_.assume_cargo_x_tol_m + .10f || q.y < -.40f || q.y > .50f) continue;
-        const float d = float(cv::norm(p));
-        if (d < best) { best = d; body = p; rear = q; found = true; }
+        const float d = float(cv::norm(p)), dl = lock ? float(cv::norm(p - cargo_body_)) : 1e9f;
+        if (dl < best_lock) { best_lock = dl; body = p; rear = q; found = locked = true; if (idx) *idx = int(i); }
+        else if (!locked && d < best) { best = d; body = p; rear = q; found = true; if (idx) *idx = int(i); }
     }
     return found;
 }
@@ -339,6 +359,7 @@ PushOutput PushTask::update(const PushObservation &in) {
     const uint64_t elapsed = now - phase_us_;
     // distance_m is radial; gripper planes are longitudinal robot-frame y.
     const float target_forward_m = in.distance_m * std::cos(in.heading_error);
+    if (tracking(in)) { last_target_xy_ = {-in.distance_m * std::sin(in.heading_error), target_forward_m}; last_target_valid_ = true; }
     const auto drive = [&](float vx, float wz) {
         const bool turn_blocked=in.directional_clearance_valid && wz!=0 &&
             !(vx==0?in.turn_safe:(vx>0 && in.arc_safe));
@@ -396,7 +417,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         std::isfinite(in.drop_centre_zone.x) && std::isfinite(in.drop_centre_zone.y) &&
         cv::norm(in.drop_centre_zone-drop_centre_zone_)<=.005f;
     // TEMP_ASSUMPTION: assume mode treats the drop point as valid without navigation revalidation.
-    if(!t_.assume_all_safe && ((state_==PushState::GATE && !step_) || state_==PushState::RAISE_RELEASE || state_==PushState::ENTER) && !drop_fresh) {
+    if(!carryLogic() && ((state_==PushState::GATE && !step_) || state_==PushState::RAISE_RELEASE || state_==PushState::ENTER) && !drop_fresh) {
         reason_="drop_revalidation_missing";
         if(now-carry_us_>t_.carry_budget_us) {fail("drop_revalidation_timeout");state_=PushState::SAFE_STOP;}
         return result();
@@ -648,6 +669,34 @@ PushOutput PushTask::update(const PushObservation &in) {
         break;
     case PushState::APPROACH:
         // Keep jaw state from MID_APPROACH; a camera change must not close on unseen cargo.
+        if (sweep_phase_) {
+            // In-place sweep of an on-end block beside the target: turn out by IMU angle, then back. Tracking may drop meanwhile.
+            // The base turns at roughly a quarter of the command, so sweep_wz bypasses max_wz and the sweep time is not charged to the approach budget.
+            const auto sweepDrive = [&](float wz) { drive(0, wz); if (motion.wz_rps != 0) motion.wz_rps = std::copysign(t_.sweep_wz, wz); };
+            const auto sweepEnd = [&](const char *why) { phase_us_ += now - sweep_t0_us_; sweep_phase_ = 0; ++sweep_attempts_; sweep_seen_ = 0; reason_ = why; };
+            if (!in.heading_valid || !std::isfinite(in.heading_rad)) { sweepEnd("sweep_upright_no_heading"); break; }
+            const float dyaw = wrapAngle(in.heading_rad - sweep_yaw0_);
+            const uint64_t se = now - sweep_start_us_;
+            if (sweep_phase_ == 1 && (std::abs(dyaw) >= t_.sweep_turn_rad || se > t_.sweep_budget_us)) { sweep_phase_ = 2; sweep_start_us_ = now; }
+            if (sweep_phase_ == 1) { reason_ = "sweep_upright_out"; sweepDrive(sweep_sign_ * t_.sweep_wz); break; }
+            if (std::abs(dyaw) <= t_.sweep_return_tol_rad || now - sweep_start_us_ > t_.sweep_budget_us) { sweepEnd("sweep_upright_done"); break; }
+            reason_ = "sweep_upright_back"; sweepDrive(dyaw > 0 ? -t_.sweep_wz : t_.sweep_wz); break;
+        }
+        if (rush_pulse_phase_) {
+            // IMU-angle pulse then a short stop; vision re-checks the bearing afterwards. Pulse time is not charged to the approach budget.
+            const auto pulseEnd = [&](const char *why) { phase_us_ += now - rush_pulse_t0_us_; rush_pulse_phase_ = 0; reason_ = why; };
+            if (!in.heading_valid || !std::isfinite(in.heading_rad)) { rush_pulse_count_ = t_.rush_pulse_max; pulseEnd("rush_pulse_no_heading"); break; }
+            const uint64_t pe = now - rush_pulse_start_us_;
+            if (rush_pulse_phase_ == 1) {
+                const float done = wrapAngle(in.heading_rad - rush_pulse_yaw0_) * (rush_pulse_delta_ > 0 ? 1.f : -1.f);
+                if (done >= t_.rush_pulse_done_frac * std::abs(rush_pulse_delta_) || pe > t_.rush_pulse_budget_us) { rush_pulse_phase_ = 2; rush_pulse_start_us_ = now; reason_ = "rush_pulse_settle"; break; }
+                reason_ = "rush_pulse_turn"; drive(0, std::copysign(t_.rush_pulse_wz, rush_pulse_delta_));
+                if (motion.wz_rps != 0) motion.wz_rps = std::copysign(t_.rush_pulse_wz, rush_pulse_delta_);
+                break;
+            }
+            if (pe < t_.rush_pulse_settle_us) { reason_ = "rush_pulse_settle"; break; }
+            pulseEnd("rush_pulse_done");
+        }
         if (!tracking(in)) {
             reason_=trackingReason();
             // 下压相机后跟踪器会给同一货物分配新ID：到位后若看到同标签的有效货物，改绑新ID继续接近。
@@ -684,9 +733,24 @@ PushOutput PushTask::update(const PushObservation &in) {
         reason_ = "approach_target";
         if (in.distance_m <= t_.rush_start_m) {
             if (std::abs(in.heading_error) <= t_.rush_heading_rad) {
+                float lat = 0;
+                if (t_.sweep_upright && sweep_attempts_ < t_.sweep_max_attempts && in.heading_valid && std::isfinite(in.heading_rad) &&
+                    uprightInCorridor(in, now, lat)) {
+                    if (++sweep_seen_ < t_.sweep_confirm) { reason_ = "sweep_upright_confirm"; break; }
+                    sweep_phase_ = 1; sweep_yaw0_ = in.heading_rad; sweep_sign_ = lat > 0 ? -1.f : 1.f; sweep_start_us_ = sweep_t0_us_ = now; sweep_seen_ = 0;
+                    reason_ = "sweep_upright_out"; drive(0, sweep_sign_ * t_.sweep_wz); if (motion.wz_rps != 0) motion.wz_rps = sweep_sign_ * t_.sweep_wz; break;
+                }
+                if (sweep_seen_ > 0) --sweep_seen_;
                 if(in.directional_clearance_valid&&!in.jaw_open_safe){fail("jaw_open_sweep_blocked");state_=PushState::SAFE_STOP;break;}
                 enter(PushState::PREPARE, now, "rush_aligned");
                 commandFrame(1, now); // PREPARE output is stationary and opens immediately.
+            }
+            else if (t_.rush_pulse_turn && rush_pulse_count_ < t_.rush_pulse_max && in.heading_valid && std::isfinite(in.heading_rad) &&
+                     std::abs(in.heading_error) <= t_.rush_pulse_max_rad) {
+                ++rush_pulse_count_; rush_pulse_phase_ = 1; rush_pulse_yaw0_ = in.heading_rad; rush_pulse_delta_ = in.heading_error;
+                rush_pulse_start_us_ = rush_pulse_t0_us_ = now; reason_ = "rush_pulse_turn";
+                drive(0, std::copysign(t_.rush_pulse_wz, in.heading_error));
+                if (motion.wz_rps != 0) motion.wz_rps = std::copysign(t_.rush_pulse_wz, in.heading_error);
             }
             else drive(0, t_.heading_gain * in.heading_error);
         } else steer(t_.approach_speed, in.heading_error);
@@ -710,7 +774,9 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (!tracking(in)) {
             reason_ = trackingReason();
             // TEMP_ASSUMPTION：方框张开后跟踪器会给同一货物发新ID；同标签有效货物直接改绑，不退回SCAN重来。
-            if (t_.assume_all_safe && in.target_valid && in.target_id != target_id_ && in.label == label_ && candidate(in, now)) {
+            const bool near_last = t_.assume_all_safe || (last_target_valid_ && std::isfinite(in.distance_m) && std::isfinite(in.heading_error) &&
+                cv::norm(cv::Point2f(-in.distance_m * std::sin(in.heading_error), in.distance_m * std::cos(in.heading_error)) - last_target_xy_) <= t_.rebind_max_shift_m);
+            if (rushLogic() && in.target_valid && in.target_id != target_id_ && in.label == label_ && candidate(in, now) && near_last) {
                 target_id_ = capture_target_id_ = in.target_id; misses_ = 0;
                 reason_ = "prepare_id_rebound_after_open"; break;
             }
@@ -738,23 +804,28 @@ PushOutput PushTask::update(const PushObservation &in) {
         verdict_ = verdict;
         if (verdict == RuleVerdict::INCOMPLETE) { confirmations_ = 0; break; }
         if (confirmations_ == 0 || in.corridor != seen_) { seen_ = in.corridor; confirmations_ = 0; }
-        if (++confirmations_ < t_.confirm_frames) break;
+        if (++confirmations_ < t_.corridor_confirm_frames) break;
         if (verdict != RuleVerdict::OK) {
-            reason_ = std::string("corridor_") + verdictName(verdict);
-            blacklist(now); clearTrip(); verdict_ = verdict; enter(PushState::SCAN, now, ""); break;
+            const std::string why = std::string("corridor_") + verdictName(verdict) + "_back_off";
+            if (++corridor_retries_ > t_.corridor_retry_max) { blacklist(now); corridor_retries_ = 0; }
+            verdict_ = verdict; enter(PushState::LOST_HOLD, now, why.c_str()); corridor_retreat_ = true; break;
         }
+        corridor_retries_ = 0;
         pending_ = in.corridor;
         enter(PushState::RUSH, now, "corridor_ok");
-        travel_limit_ = std::max(0.f, target_forward_m - t_.grasp_trigger_y_m) + t_.rush_extra_m;
+        if (rushLogic()) {
+            assume_rush_end_ = std::max(0.f, target_forward_m - t_.assume_rush_trigger_m) * t_.assume_motion_ratio;
+            travel_limit_ = assume_rush_end_ + t_.rush_extra_m * t_.assume_motion_ratio;
+        } else travel_limit_ = std::max(0.f, target_forward_m - t_.grasp_trigger_y_m) + t_.rush_extra_m;
         break;
     }
     case PushState::RUSH: {
         if (travel_ >= travel_limit_ || elapsed > t_.rush_budget_us) {
-            if (t_.assume_all_safe) { enter(PushState::LOWER_FRAME, now, "assumed_enclosure_rush_bound"); break; }
+            if (rushLogic()) { enter(PushState::LOWER_FRAME, now, "assumed_enclosure_rush_bound"); break; }
             enter(PushState::CAPTURE_FAIL, now, "rush_overrun"); break;
         }
         if (!tracking(in)) {
-            if (t_.assume_all_safe) {
+            if (rushLogic()) {
                 // TEMP_ASSUMPTION: the target leaves the 5deg view below ~0.31 m; finish the last
                 // estimated distance straight, then lower the frame.
                 if (travel_ >= assume_rush_end_) { enter(PushState::LOWER_FRAME, now, "assumed_enclosure_target_below_view"); break; }
@@ -769,7 +840,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         }
         // Recheck before every forward/close decision: a blue object may enter
         // the corridor after PREPARE. Never continue on incomplete evidence.
-        if (t_.assume_all_safe) {
+        if (rushLogic()) {
             // 实测指令行程约为实际位移的4~6倍：用视觉剩余距离乘以比例得到所需指令行程。
             assume_rush_end_ = travel_ + std::max(0.f, target_forward_m - t_.assume_rush_trigger_m) * t_.assume_motion_ratio;
             travel_limit_ = assume_rush_end_ + t_.rush_extra_m * t_.assume_motion_ratio;
@@ -780,7 +851,7 @@ PushOutput PushTask::update(const PushObservation &in) {
             reason_ = std::string("rush_corridor_") + verdictName(verdict_);
             blacklist(now); enter(PushState::CAPTURE_FAIL, now, ""); break;
         }
-        if (target_forward_m <= (t_.assume_all_safe ? t_.assume_rush_trigger_m : t_.grasp_trigger_y_m)) { enter(PushState::LOWER_FRAME, now, "frame_enclosure_position"); break; }
+        if (target_forward_m <= (rushLogic() ? t_.assume_rush_trigger_m : t_.grasp_trigger_y_m)) { enter(PushState::LOWER_FRAME, now, "frame_enclosure_position"); break; }
         drive(t_.rush_speed, t_.heading_gain * in.heading_error);
         break;
     }
@@ -795,8 +866,10 @@ PushOutput PushTask::update(const PushObservation &in) {
         if(t_.require_multi_view) {
             const bool verified=in.multi_view_finished && in.multi_view_verdict==1 &&
                 checkTrip(in.multi_view_inventory,first_)==RuleVerdict::OK && in.multi_view_inventory==pending_;
-            if(t_.assume_all_safe && !verified) {
-                // TEMP_ASSUMPTION: an unconfirmed enclosure counts as the batch the frame closed on.
+            const bool mv_conflict=in.multi_view_finished && in.multi_view_verdict==1 &&
+                (checkTrip(in.multi_view_inventory,first_)!=RuleVerdict::OK || in.multi_view_inventory!=pending_);
+            if(rushLogic() && !verified && (t_.assume_all_safe || !mv_conflict)) {
+                // TEMP_ASSUMPTION: an unconfirmed enclosure counts as the batch the frame closed on (main path keeps a measured rule/inventory conflict fatal).
                 if(elapsed<=8000000 && !in.multi_view_finished)break;
                 Inventory assumed=pending_;if(!assumed.total())assumed.add(label_);
                 trip_=assumed;carry_us_=now;carry_progress_us_=0;zone_search_started_us_=0;
@@ -836,7 +909,7 @@ PushOutput PushTask::update(const PushObservation &in) {
     }
     case PushState::CARRY: {
         if (now - carry_us_ > t_.carry_budget_us) { enter(PushState::ABORT_DROP, now, "carry_timeout"); break; }
-        if (t_.assume_all_safe) {
+        if (carryLogic()) {
             // TEMP_ASSUMPTION: the hold is assumed (no NEAR checks). With a fresh zone plan drive the
             // normal gate approach; otherwise search briefly, then a bounded straight leg to an assumed drop point.
             step_ = 0;
@@ -864,7 +937,12 @@ PushOutput PushTask::update(const PushObservation &in) {
                 lockDropHalf("assumed_trip");
                 if(!carry_progress_us_ || hold.y > carry_best_y_ + t_.assume_stall_progress_m) { carry_best_y_ = hold.y; carry_progress_us_ = now; }
             // Blocked by the zone rim: no forward progress near the front edge counts as arrived.
-            if (hold.y >= -t_.assume_stall_near_m && now - carry_progress_us_ >= t_.assume_stall_us) { noteDropZone("release_stall", hold); enter(PushState::RAISE_RELEASE, now, "assumed_drop_point_stalled"); break; }
+            // The IMU decides "pressed against the rim" (dead reckoning keeps advancing while the wheels slip); a vision-only no-progress check needs a fresh fix.
+            const bool imu_blocked = in.imu_blocked_us >= t_.assume_imu_block_us && hold.y >= -t_.assume_imu_block_near_m;
+            if (imu_blocked || (fresh && hold.y >= -t_.assume_stall_near_m && now - carry_progress_us_ >= t_.assume_stall_us)) {
+                noteDropZone(imu_blocked ? "release_stall_imu" : "release_stall", hold);
+                enter(PushState::RAISE_RELEASE, now, imu_blocked ? "assumed_drop_point_imu_blocked" : "assumed_drop_point_stalled"); break;
+            }
             if (hold.y >= -t_.assume_release_gap_m) { noteDropZone("release", hold); enter(PushState::RAISE_RELEASE, now, fresh ? "assumed_drop_point_visual" : "assumed_drop_point_visual_dr"); break; }
                 const cv::Point2f carrot = z.zoneToBody({halfX(), std::min(hold.y + t_.assume_lookahead_m, -t_.assume_release_gap_m)});
                 reason_ = fresh ? "assumed_visual_carry" : "assumed_visual_dead_reckoning";
@@ -929,14 +1007,14 @@ PushOutput PushTask::update(const PushObservation &in) {
     }
     case PushState::GATE: {
         if (now - carry_us_ > t_.carry_budget_us) { enter(PushState::ABORT_DROP, now, "carry_timeout"); break; }
-        if (t_.assume_all_safe && step_) { enter(PushState::ENTER, now, "assumed_gate_hold"); break; }
+        if (carryLogic() && step_) { enter(PushState::ENTER, now, "assumed_gate_hold"); break; }
         if (step_) { // aligned and counted; stopped at NEAR: enter only on a confirmed enclosure
             const int h = holdCheck();
             if (h < 0) enter(PushState::LOST_HOLD, now, "hold_lost");
             else if (h > 0) enter(PushState::ENTER, now, "gate_aligned_frame_down");
             break;
         }
-        if (!t_.assume_all_safe && holdSeen(in) == 0 && ++hold_misses_ > t_.hold_grace_frames) { enter(PushState::LOST_HOLD, now, "hold_lost"); break; }
+        if (!carryLogic() && holdSeen(in) == 0 && ++hold_misses_ > t_.hold_grace_frames) { enter(PushState::LOST_HOLD, now, "hold_lost"); break; }
         if (!zoneOk(in)) { if (lostTarget()) enter(PushState::CARRY, now, "zone_lost"); break; }
         misses_ = 0;
         const auto &z = in.zone_estimate;
@@ -951,7 +1029,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (!in.zone_counts_valid || !in.zone_inventory_complete ||
             in.zone_supply_count < 0 || in.zone_injured_count < 0) {
             // TEMP_ASSUMPTION: without zone counts the delivery is credited by assumption later.
-            if (t_.assume_all_safe) { baseline_ = baseline_other_ = -1; step_ = 1; break; }
+            if (carryLogic()) { baseline_ = baseline_other_ = -1; step_ = 1; break; }
             confirmations_ = 0; break;
         }
         if (++confirmations_ < t_.confirm_frames) break;
@@ -975,9 +1053,9 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (g < 0) fail("gripper_open_timeout");
         else if (g > 0 && p > 0) {
             // TEMP_ASSUMPTION：快到区域先松开，再用下压(+20)姿态把块向区内推一段，之后再次抬框退出。
-            if (t_.assume_all_safe && !assume_pushed_ && t_.assume_push_m > 0) {
+            if (carryLogic() && !assume_pushed_ && t_.assume_push_m > 0) {
                 // 先退一小段让框离开块，再放下框从块后方推入；否则框会重新罩住块一起往里带。
-                prepush_back_ = true;
+                prepush_back_ = true; inside_obs_ = 0;
                 prepush_hold_y_ = zone_.valid(now) ? zone_.predicted(now).bodyToZone({0, holdCenter()}).y : 0.f;
                 enter(PushState::BACK_OUT, now, "assumed_release_back_off");
             }
@@ -993,12 +1071,15 @@ PushOutput PushTask::update(const PushObservation &in) {
             if (lowered < 0) fail("frame_lower_timeout");
             break;
         }
-        if (t_.assume_all_safe && !assume_pushed_) {
+        if (carryLogic() && !assume_pushed_) {
             bool done = elapsed > t_.enter_budget_us;
             trackCargo(in, now);
             const bool cvis = cargoVisible(now);
-            const bool cinside = cvis && cargo_rear_y_ >= t_.assume_cargo_done_y_m;
-            const bool stuck = cvis && !cinside && cargo_ref_us_ && now - cargo_ref_us_ >= t_.assume_stuck_us;
+            const float hy0 = zone_.valid(now) ? zone_.predicted(now).bodyToZone({0, holdCenter()}).y : 1e9f;
+            // A box clipped by the image bottom puts the contact too deep, and an off-half block is not the delivery: neither counts as inside.
+            const bool cinside = cvis && cargo_fix_ && !cargo_clipped_ && cargo_rear_y_ >= t_.assume_cargo_done_y_m
+                && std::abs(cargo_rear_x_ - halfX()) <= t_.assume_cargo_x_tol_m && hy0 >= t_.assume_inside_min_hold_y_m;
+            const bool stuck = !cinside && (in.imu_blocked_us >= t_.assume_imu_block_us || (cvis && cargo_ref_us_ && now - cargo_ref_us_ >= t_.assume_stuck_us));
             const float hy = zone_.valid(now) ? zone_.predicted(now).bodyToZone({0, holdCenter()}).y : 0.f;
             if (cinside) { noteCargo("push_inside", {cargo_rear_x_, cargo_rear_y_}, true); done = true; }
             else if (stuck) {
@@ -1009,11 +1090,39 @@ PushOutput PushTask::update(const PushObservation &in) {
                 }
                 noteCargo("stuck_giveup", {cargo_rear_x_, cargo_rear_y_}, true); done = true;
             }
+            if (align_pending_ && !done) {
+                // 后退后、前推前的视觉对准：货物可见则原地转到其方位在容差内；看不到则不拦（沿用推算）。
+                if (!align_start_us_) align_start_us_ = now;
+                const bool seen = cargoVisible(now) && now - cargo_seen_us_ <= 400000;
+                const float brg = seen ? -std::atan2(cargo_body_.x, std::max(.08f, cargo_body_.y - holdCenter())) : 0.f;
+                if (seen && std::abs(brg) > t_.assume_align_tol_rad && now - align_start_us_ < t_.assume_align_budget_us) {
+                    reason_ = "assumed_push_align_turn";
+                    drive(0, std::copysign(std::max(t_.min_turn_wz, std::min(t_.assume_align_wz, t_.heading_gain * std::abs(brg))), brg));
+                    break;
+                }
+                char b[200];
+                std::snprintf(b, sizeof b, "[CARGO_ZONE] event=%s half=%s bearing_deg=%.1f body_x=%.3f body_y=%.3f seen=%d waited_ms=%llu\n",
+                    !seen ? "push_align_unseen" : std::abs(brg) <= t_.assume_align_tol_rad ? "push_aligned" : "push_align_giveup",
+                    half_injured_ ? "injured" : "supply", brg * 57.2958f, cargo_body_.x, cargo_body_.y, seen ? 1 : 0,
+                    (unsigned long long)((now - align_start_us_) / 1000));
+                dropzone_evt_ += b;
+                align_pending_ = false;
+            }
             if (zone_.valid(now)) {
                 const ZoneEstimate z = zone_.predicted(now);
                 const cv::Point2f hold = z.bodyToZone({0, holdCenter()});
                 // Fresh block sighting overrides dead-reckoned depth: keep pushing until it is really inside.
                 done = done || hold.y >= t_.assume_push_depth_m + (cvis ? t_.assume_overshoot_m : 0.f);
+                // Do not raise the frame on a timeout / dead-reckoned depth unless the load is confirmed inside.
+                if (done && !cinside && !(stuck && !(repush_n_ < t_.assume_repush_max)) && t_.assume_enter_confirm) {
+                    const bool real = cvis ? (!cargo_clipped_ && cargo_rear_y_ >= t_.assume_enter_true_y_m && std::abs(cargo_rear_x_ - halfX()) <= t_.assume_cargo_x_tol_m)
+                                           : hold.y >= t_.assume_enter_hold_y_m;
+                    if (!real && elapsed < t_.enter_budget_us + t_.assume_enter_extra_us && hold.y < t_.assume_enter_max_hold_y_m) {
+                        done = false;
+                        if (!enter_unconfirmed_) { enter_unconfirmed_ = true; noteCargo(cvis ? "push_unconfirmed_visible" : "push_unconfirmed_hidden", {cargo_rear_x_, cargo_rear_y_}, cvis); noteDropZone("push_unconfirmed", hold); }
+                    } else if (!real) { noteCargo("push_unconfirmed_giveup", {cargo_rear_x_, cargo_rear_y_}, cvis); }
+                    else if (enter_unconfirmed_) { noteCargo("push_confirmed_late", {cargo_rear_x_, cargo_rear_y_}, cvis); }
+                }
                 if (!done) {
                     reason_ = now - vref_seen_us_ <= 400000 ? "assumed_push_in_visual" : "assumed_push_in_dead_reckoning";
                     float aim = halfX(), phid = 0.f;
@@ -1026,8 +1135,33 @@ PushOutput PushTask::update(const PushObservation &in) {
                         aim = std::clamp(cargo_rear_x_ + std::tan(phid) * (cargo_rear_y_ - hold.y), halfX() - .25f, halfX() + .25f);
                     }
                     const float speed = std::min(t_.max_speed, t_.enter_speed * (1.f + t_.assume_repush_speed_gain * repush_n_));
-                    const float err = t_.heading_gain * wrapAngle(z.yaw_body_rad + phid) + t_.lateral_gain * (hold.x - aim);
-                    drive(speed, std::abs(err) <= t_.heading_deadband_rad ? 0.f : err);
+                    float err = t_.heading_gain * wrapAngle(z.yaw_body_rad + phid) + t_.lateral_gain * (hold.x - aim);
+                    if (t_.assume_align_push) {
+                        // 对准后按货物方位纯追踪（斜推角收小，防止框从货物旁滑过）；货物丢失后保持最后航向，不再向区中线拉回。
+                        if (cvis && now - cargo_seen_us_ <= 400000) {
+                            const float brg = -std::atan2(cargo_body_.x, std::max(.08f, cargo_body_.y - holdCenter()));
+                            const float slant = std::clamp(phid, -t_.assume_slant_max_rad, t_.assume_slant_max_rad);
+                            push_hold_phi_ = wrapAngle(-z.yaw_body_rad + brg + slant); push_hold_valid_ = true;
+                            err = t_.heading_gain * (brg + slant);
+                            reason_ = "assumed_push_in_pursuit";
+                        } else if (push_hold_valid_) {
+                            err = t_.heading_gain * wrapAngle(push_hold_phi_ + z.yaw_body_rad);
+                            reason_ = "assumed_push_in_hold_heading";
+                        }
+                    }
+                    float wz = std::abs(err) <= t_.heading_deadband_rad ? 0.f : err;
+                    if (wz != 0.f) probe_until_us_ = 0;
+                    else if (t_.assume_probe && !align_pending_ && elapsed >= t_.assume_probe_first_us) {
+                        // Straight push commands no turn, and a stalled chassis cannot be told from a moving one by the IMU.
+                        // A short alternating yaw pulse gives the gyro something to answer (MotionWatch blocked ratio).
+                        if (now < probe_until_us_) wz = probe_sign_ * t_.min_turn_wz;
+                        else if (now >= probe_next_us_) {
+                            probe_sign_ = -probe_sign_; probe_until_us_ = now + t_.assume_probe_len_us;
+                            probe_next_us_ = probe_until_us_ + t_.assume_probe_gap_us; wz = probe_sign_ * t_.min_turn_wz;
+                        }
+                        if (wz != 0.f) reason_ = "assumed_push_imu_probe";
+                    }
+                    drive(speed, wz);
                     break;
                 }
             } else {
@@ -1042,7 +1176,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         }
         if (!zoneOk(in)) {
             if (lostTarget()) {
-                if (t_.assume_all_safe) enter(PushState::RAISE_RELEASE, now, "assumed_drop_point_zone_lost");
+                if (carryLogic()) enter(PushState::RAISE_RELEASE, now, "assumed_drop_point_zone_lost");
                 else enter(PushState::ABORT_DROP, now, "zone_lost");
             }
             break;
@@ -1068,8 +1202,11 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (g <= 0) { if (g < 0) fail("gripper_open_timeout"); break; } // never drag the load out closed
         if (prepush_back_) {
             trackCargo(in, now);
-            if (repush_n_ == 0 && cargoVisible(now) && cargo_fix_ && cargo_rear_y_ >= t_.assume_cargo_done_y_m
-                && std::abs(cargo_rear_x_ - halfX()) <= t_.assume_cargo_x_tol_m) {
+            const bool ins = repush_n_ == 0 && cargoVisible(now) && cargo_fix_ && !cargo_clipped_ && cargo_rear_y_ >= t_.assume_cargo_done_y_m
+                && std::abs(cargo_rear_x_ - halfX()) <= t_.assume_cargo_x_tol_m;
+            if (!ins) inside_obs_ = 0;
+            else if (cargo_last_ts_ != inside_obs_ts_) { ++inside_obs_; inside_obs_ts_ = cargo_last_ts_; }
+            if (ins && inside_obs_ >= t_.assume_inside_after_release_obs) { // several independent fixes, not one biased frame
                 // Released deep enough: the block is already inside, no push needed.
                 noteCargo("inside_after_release", {cargo_rear_x_, cargo_rear_y_}, true);
                 prepush_back_ = false; assume_pushed_ = true; verify_in_ = verify_out_ = 0;
@@ -1079,11 +1216,11 @@ PushOutput PushTask::update(const PushObservation &in) {
             const float tgt = backTarget(now);
             const float back_done = vis ? prepush_hold_y_ - zone_.predicted(now).bodyToZone({0, holdCenter()}).y : 0.f;
             const bool done = vis ? back_done >= tgt : travel_ >= tgt * drRatio(now);
-            if (done || elapsed > t_.retreat_budget_us) { prepush_back_ = false; cargo_ref_us_ = 0; enter(PushState::ENTER, now, "assumed_release_then_push"); break; }
+            if (done || elapsed > t_.retreat_budget_us) { prepush_back_ = false; cargo_ref_us_ = 0; align_pending_ = t_.assume_align_push; align_start_us_ = 0; push_hold_valid_ = false; enter(PushState::ENTER, now, "assumed_release_then_push"); break; }
             reason_ = vis ? "assumed_release_back_off" : "assumed_release_back_off_blind";
             drive(-t_.back_speed, 0); break;
         }
-        if (t_.assume_all_safe && (assume_blind_ || !observed_zone)) {
+        if (carryLogic() && (assume_blind_ || !observed_zone)) {
             // TEMP_ASSUMPTION: bounded straight reverse leaves the released load behind.
             assume_blind_ = true;
             if (travel_ >= t_.assume_back_m) { enter(PushState::VERIFY_DELIVERY, now, "assumed_backed_out"); break; }
@@ -1127,22 +1264,39 @@ PushOutput PushTask::update(const PushObservation &in) {
         }
         const bool stable = evidence && confirmations_ >= t_.delivery_frames &&
             delivery_stable_since_ && now - delivery_stable_since_ >= 300000;
-        const bool expired = elapsed > t_.delivery_budget_us;
+        const bool vfix = in.vref_valid && in.vref_zone.valid && in.vref_points >= 3;
+        if (carryLogic() && vfix && !verify_fix_us_) verify_fix_us_ = now;
+        if (carryLogic() && !verify_fix_us_ && elapsed > t_.assume_verify_far_after_us) verify_far_view_ = true;
+        // Dead reckoning alone cannot confirm delivery: without a visual zone fix keep looking (longer budget, then far view).
+        const bool expired = carryLogic()
+            ? (verify_fix_us_ ? now - verify_fix_us_ > t_.delivery_budget_us : elapsed > std::max(t_.assume_verify_fix_wait_us, t_.delivery_budget_us))
+            : elapsed > t_.delivery_budget_us;
         // TEMP_ASSUMPTION: visual judgement of the released block against the zone (needs the zone references in view).
         bool visual_ok = false;
-        if (t_.assume_all_safe && !stable) {
-            cv::Point2f cb, cr; bool cfix = false;
-            if (cargoZone(in, now, cb, cr, cfix) && in.cargo_ts_us != verify_ts_) {
+        if (carryLogic() && !stable) {
+            cv::Point2f cb, cr; bool cfix = false; int ci = -1;
+            if (cargoZone(in, now, cb, cr, cfix, &ci) && in.cargo_ts_us != verify_ts_) {
                 verify_ts_ = in.cargo_ts_us;
-                if (cr.y >= t_.assume_cargo_in_y_m && std::abs(cr.x - halfX()) <= t_.assume_cargo_x_tol_m) { ++verify_in_; verify_out_ = 0; }
-                else if (cfix) { ++verify_out_; verify_in_ = 0; }
+                const auto img = imgAt(in, ci);
+                if (cfix) {
+                    if (!img.clipped && cr.y >= t_.assume_cargo_in_y_m && std::abs(cr.x - halfX()) <= t_.assume_cargo_x_tol_m) { ++verify_in_; verify_out_ = 0; }
+                    else { ++verify_out_; verify_in_ = 0; }
+                } else if (img.front_valid && img.height_px > 1.f) {
+                    // No zone fix: compare the box bottom with the zone's inner front edge in the image (conservative, uncalibrated).
+                    const float frac = (img.front_px - img.bottom_px) / img.height_px;
+                    if (!img.clipped && frac >= t_.assume_img_inside_frac) { ++verify_in_; verify_out_ = 0; }
+                    else if (img.clipped || frac < t_.assume_img_outside_frac) { ++verify_out_; verify_in_ = 0; }
+                    char vb[160];
+                    std::snprintf(vb, sizeof vb, "[CARGO_ZONE] event=verify_img frac=%.2f clipped=%d in=%d out=%d\n", frac, int(img.clipped), verify_in_, verify_out_);
+                    dropzone_evt_ += vb;
+                }
                 noteCargo("verify", cr, cfix);
             }
-            visual_ok = verify_in_ >= 3;
+            visual_ok = verify_in_ >= (cargo_fix_ ? 3 : t_.assume_img_verify_obs);
             if (!visual_ok && verify_out_ >= 3 && repush_n_ < t_.assume_repush_max) {
-                ++repush_n_; verify_in_ = verify_out_ = 0; cargo_ref_us_ = 0;
+                ++repush_n_; verify_in_ = verify_out_ = 0; cargo_ref_us_ = 0; verify_far_view_ = false; verify_fix_us_ = 0;
                 noteCargo("verify_outside_repush", cr, cfix);
-                assume_pushed_ = false; enter(PushState::ENTER, now, "assumed_verify_repush"); break;
+                assume_pushed_ = false; align_pending_ = t_.assume_align_push; align_start_us_ = 0; push_hold_valid_ = false; enter(PushState::ENTER, now, "assumed_verify_repush"); break;
             }
         }
         if (!stable && !expired && !visual_ok) break;
@@ -1153,7 +1307,9 @@ PushOutput PushTask::update(const PushObservation &in) {
         if(credited>0){attempt_started_=now;bounded_approach_=bounded_retreat_=0;}
         if(credited==expected && credited>0){near_failures_=0;}
         if (credited > 0 && credited == expected && trip_.ordinary == trip_.total()) first_ = true;
-        reason_ = assumed ? (visual_ok ? "delivered_visual" : "delivered_assumed") : credited == expected ? "delivered" : credited ? "partial_delivery" : "delivery_unverified";
+        verify_far_view_ = false; verify_fix_us_ = 0;
+        delivery_visual_ = stable || visual_ok;
+        reason_ = assumed ? (visual_ok ? "delivered_visual" : "delivered_unverified") : credited == expected ? "delivered" : credited ? "partial_delivery" : "delivery_unverified";
         if(t_.demo_carry_once && t_.assume_all_safe) enter(PushState::TURN_SCAN, now, ""); // show the next-trip turn
         else if(t_.demo_carry_once){
             fail(credited==expected && credited>0?"demo_delivery_complete":"demo_delivery_unconfirmed");
@@ -1169,7 +1325,7 @@ PushOutput PushTask::update(const PushObservation &in) {
             last_heading_ = in.heading_rad; heading_seen_ = true;
         } else heading_seen_ = false;
         if (turned_ >= t_.turn_min_rad) {
-            if (t_.demo_carry_once) { fail("demo_next_trip_ready"); state_ = PushState::SAFE_STOP; break; }
+            if (t_.demo_carry_once) { fail(delivery_visual_ ? "demo_next_trip_ready" : "demo_next_trip_unverified"); state_ = PushState::SAFE_STOP; break; }
             clearTrip(); enter(PushState::SCAN, now, ""); break;
         }
         if (elapsed > t_.turn_budget_us) { fail("turn_heading_unverified"); break; }
@@ -1178,6 +1334,7 @@ PushOutput PushTask::update(const PushObservation &in) {
     }
     case PushState::CAPTURE_FAIL: case PushState::LOST_HOLD: case PushState::ABORT_DROP: {
         // Release where the opponent zone is not involved, then reverse off the objects.
+        if (step_ == 0 && corridor_retreat_) { commandFrame(1, now); step_ = 1; phase_us_ = now; } // nothing held: frame stays up
         if (step_ == 0) {
             if (!in.opponent_zone_clear) { if (elapsed > t_.gripper_timeout_us) fail("drop_blocked_opponent_zone"); break; }
             commandFrame(1, now);
@@ -1196,7 +1353,11 @@ PushOutput PushTask::update(const PushObservation &in) {
             retreat_mode_ = 2; retreat_heading_ = in.heading_rad;
         }
         if (retreat_mode_ == 2) {
-            const float limit = std::min(t_.abort_back_m, approach_forward_);
+            const float limit = corridor_retreat_ ? std::min(t_.corridor_back_m * motionRatio(), .85f * t_.back_speed * float(t_.retreat_budget_us) / 1e6f)
+                                                  : std::min(t_.abort_back_m, approach_forward_);
+            if (corridor_retreat_ && !in.retreat_safe && travel_ < limit) {
+                clearTrip(); enter(PushState::SCAN, now, "corridor_back_off_unsafe"); break;
+            }
             if (travel_ >= limit) {
                 if (state_ != PushState::LOST_HOLD) blacklist(now);
                 clearTrip(); enter(PushState::SCAN, now, "blind_retreat_complete"); break;
@@ -1219,7 +1380,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         const bool measured=retreat_origin_valid_ && observed_zone &&
             in.zone_estimate.geometry_id==retreat_geometry_id_;
         const float back=measured ? -(in.zone_estimate.bodyToZone({0,0})-retreat_origin_zone_).dot(retreat_forward_zone_) : 0;
-        if (measured && back >= t_.abort_back_m) {
+        if (measured && back >= (corridor_retreat_ ? t_.corridor_back_m : t_.abort_back_m)) {
             if (state_ != PushState::LOST_HOLD) blacklist(now);
             clearTrip(); enter(PushState::SCAN, now, ""); break;
         }

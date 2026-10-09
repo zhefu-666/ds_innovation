@@ -26,7 +26,9 @@ public:
         uint64_t capture_stamp=0;
         bool masks=false, boxes=false;
         std::map<int,std::pair<double,std::string>> values;
+        std::set<int> geo_ok;
         for(const auto& d:ds){
+            if(d.injured_upright_rejected)continue; // an on-end injured block never competes for the lock
             if(d.track_id<0||!targetSelectable(d.label,first)||!std::isfinite(d.confidence)||d.confidence<confidence||
                 !d.timestamp_us||now<d.timestamp_us||now-d.timestamp_us>200000||d.box.width<=0||d.box.height<=0||
                 std::find(rejected.begin(),rejected.end(),d.track_id)!=rejected.end())continue;
@@ -38,10 +40,17 @@ public:
                 pixels=cv::countNonZero(d.mask);masks=true;
             }else boxes=true;
             capture_stamp=std::max(capture_stamp,d.timestamp_us);
-            if(pixels>0)values[d.track_id]={pixels/(double(size.width)*size.height),d.label};
+            if(pixels>0){
+                values[d.track_id]={pixels/(double(size.width)*size.height),d.label};
+                if(d.ground_position_valid&&d.ground_contact_valid&&std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y)&&d.body_xy_m.y>0)geo_ok.insert(d.track_id);
+            }
         }
         if(!prefer_label.empty()&&std::any_of(values.begin(),values.end(),[&](const auto& kv){return kv.second.second==prefer_label;}))
             for(auto it=values.begin();it!=values.end();)if(it->second.second!=prefer_label)it=values.erase(it);else ++it;
+        // A larger box without usable ground contact (e.g. clipped at the image edge after a pitch change)
+        // must not out-rank a measurable one: the task could never approach it.
+        if(std::any_of(values.begin(),values.end(),[&](const auto& kv){return geo_ok.count(kv.first)>0;}))
+            for(auto it=values.begin();it!=values.end();)if(!geo_ok.count(it->first))it=values.erase(it);else ++it;
         const std::string mode=masks?(boxes?"mixed_invalid":"mask_pixels"):"box_area";
         if(size!=size_||pitch!=pitch_||mode!=mode_){reset();out.reason="comparison_context_changed";}
         size_=size;pitch_=pitch;mode_=mode;out.mode=mode;

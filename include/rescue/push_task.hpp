@@ -81,6 +81,12 @@ struct PushObservation {
     ZoneEstimate vref_zone;
     // TEMP_ASSUMPTION：本帧可见货物近端接地点（机体系）；用于判断货物是否进区/卡住，不作安全判据。
     std::vector<cv::Point2f> cargo_body; uint64_t cargo_ts_us = 0;
+    // Pixel-space view of each cargo_body entry (same order): the box bottom against the zone's front landmark line.
+    // clipped = the box touches the image bottom, so the ground contact (and any depth derived from it) is biased deep.
+    struct CargoImg { float bottom_px = 0, height_px = 0, front_px = 0; bool clipped = false, front_valid = false; };
+    std::vector<CargoImg> cargo_img;
+    // On-end injured blocks (never transport targets), body-frame ground points of the current frame.
+    std::vector<cv::Point2f> upright_body; uint64_t upright_ts_us = 0;
     std::string zone_class; // primary target's expected half, diagnostic only
     // Objects fully inside each half of our zone, off the fence and at rest.
     bool zone_counts_valid = false;
@@ -96,6 +102,7 @@ struct PushObservation {
     cv::Point2f carry_waypoint_body, drop_centre_zone;
     bool heading_valid = false;
     float heading_rad = 0;
+    uint64_t imu_blocked_us = 0; // IMU: continuous time the chassis ignored a commanded turn while driving (0 = moving or unknown)
 };
 struct PushOutput {
     PushState state = PushState::WAIT_START;
@@ -123,6 +130,9 @@ struct TaskTuning {
     bool demo_search_only=false, demo_carry_once=false;
     // TEMP_ASSUMPTION（2026-10-08用户要求）：缺失的抓取/区域/投放证据视为成立，用有界盲动作跑通决策链。
     bool assume_all_safe=false;
+    bool field_carry=false; // main-path: use the demo transport/release/push/verify logic without the assume-only capture/rush assumptions
+    bool field_rush=false; // main-path: scaled rush limit, blind finish after the target drops below view, ID rebound after the frame opens
+    float rebind_max_shift_m=.15f; // field_rush only: a re-ID'd target must sit this close to the last tracked one
     bool assume_injured_trip=false; // 演示伤员趟：first_ 初始为真，不改变比赛规则默认值
     float assume_push_m=.55f; // 假设模式：松开后下压框向区内再推的指令行程
     float assume_motion_ratio=4.f, assume_rush_trigger_m=.15f; // 假设模式：指令/实际位移比；放框时块前向距离
@@ -134,6 +144,22 @@ struct TaskTuning {
     uint64_t assume_stuck_us=2000000; int assume_repush_max=2; uint64_t approach_rebind_window_us=4000000;
     float assume_repush_back_m=.10f, assume_repush_speed_gain=.25f, assume_lateral_back_gain=3.f, assume_lateral_back_max_m=.25f, assume_goal_depth_m=.12f, assume_push_angle_max_rad=.45f, assume_push_dx_deadband_m=.03f; // 卡住重推：加长助跑/提速/按块位置斜推
     float assume_release_gap_m=-.04f, assume_push_depth_m=.16f, assume_ratio_max=14.f, assume_lookahead_m=.35f, assume_stall_near_m=.06f, assume_stall_progress_m=.01f; uint64_t assume_stall_us=1500000; // 视觉闭环：松开时块距区前沿；推入目标深度
+    // 假设模式：翻框(松开)前须确认货物真进了安全区；未确认则继续下压，直到硬上限。默认关闭。
+    bool assume_enter_confirm=false; float assume_enter_true_y_m=.07f, assume_enter_hold_y_m=.03f, assume_enter_max_hold_y_m=.30f; uint64_t assume_enter_extra_us=8000000;
+    // 核验只认视觉定位(>=3点)：无定位时先等；等不到先切到远俯仰找角点，仍无则不记视觉通过。推入阶段块要“进区”须框自身也已越过前沿一定深度。
+    uint64_t assume_imu_block_us=600000; float assume_imu_block_near_m=.25f; int assume_inside_after_release_obs=3;
+    float assume_img_inside_frac=.25f, assume_img_outside_frac=.10f; int assume_img_verify_obs=3; // 无定位核验：块下沿高于前沿landmark线的比例（占框高）
+    // 目标前方扫掠通道里有竖放伤员时，先低框原地小角度转向把它扫开（IMU量角，转出后转回）。
+    bool sweep_upright=true; float sweep_corridor_half_m=.25f, sweep_extra_m=.20f, sweep_min_sep_m=.05f;
+    float sweep_turn_rad=.60f, sweep_return_tol_rad=.06f; int sweep_confirm=2, sweep_max_attempts=2; float sweep_wz=.55f;
+    uint64_t sweep_budget_us=8000000, sweep_fresh_us=500000;
+    // 张框距离内航向略超 rush_heading_rad 时，小 wz 底盘不转(实测 0.25rad/s 陀螺≈0)：改用 IMU 量角的 rush_pulse_wz 短脉冲转到位，停稳后再由视觉复核。
+    bool rush_pulse_turn=false; float rush_pulse_wz=.55f, rush_pulse_max_rad=.20f, rush_pulse_done_frac=.85f;
+    uint64_t rush_pulse_budget_us=2500000, rush_pulse_settle_us=500000; int rush_pulse_max=4;
+    bool assume_probe=true; uint64_t assume_probe_first_us=1200000, assume_probe_len_us=900000, assume_probe_gap_us=1500000; // 直推时周期性小偏航探测，让IMU能看出堵转
+    uint64_t assume_verify_fix_wait_us=7000000, assume_verify_far_after_us=1500000; float assume_inside_min_hold_y_m=.06f;
+    // 假设模式：后退后、前推前先用视觉把方框对准货物（原地转向），推进时按货物方位纯追踪，斜推角收小；货物丢失后保持丢失前航向。默认关闭。
+    bool assume_align_push=false; float assume_align_tol_rad=.06f, assume_align_wz=.30f, assume_slant_max_rad=.45f; uint64_t assume_align_budget_us=3000000;
     uint64_t attempt_budget_us=0; // enabled by schema 2, never reset by target reselection
     float approach_limit_m=0, retreat_limit_m=0;
     bool enable_search_cues = false;
@@ -166,6 +192,12 @@ struct TaskTuning {
     // lock; stop if the IMU heading drifts beyond blind_retreat_yaw_rad or goes missing.
     uint64_t blind_retreat_wait_us = 500000;
     float blind_retreat_yaw_rad = .15f;
+    // Strict PREPARE corridor check: identical inventory on this many consecutive frames. A corridor holding
+    // other objects keeps the frame up, reverses corridor_back_m (real distance; commanded = x motion ratio,
+    // skipped when retreat_safe is false) and searches again; after corridor_retry_max such back-offs in a
+    // row the target is blacklisted.
+    int corridor_confirm_frames = 3, corridor_retry_max = 2; // live main raises the frame count (main.cpp)
+    float corridor_back_m = .20f;
     // Turn away from the zone before accepting a new target, so nothing is re-picked from it.
     float turn_min_rad = 1.6f;
     int confirm_frames = 3, capture_frames = 4, delivery_frames = 6, hold_grace_frames = 6;
@@ -239,18 +271,28 @@ private:
     std::string dropzone_evt_;
     void lockDropHalf(const char *source);
     void noteDropZone(const char *event, const cv::Point2f &hold);
-    bool cargoZone(const PushObservation &in, uint64_t now, cv::Point2f &body, cv::Point2f &rear, bool &fix) const;
+    bool cargoZone(const PushObservation &in, uint64_t now, cv::Point2f &body, cv::Point2f &rear, bool &fix, int *idx = nullptr) const;
+    static PushObservation::CargoImg imgAt(const PushObservation &in, int idx) { return idx >= 0 && size_t(idx) < in.cargo_img.size() ? in.cargo_img[idx] : PushObservation::CargoImg{}; }
     void noteCargo(const char *event, const cv::Point2f &rear, bool fix);
     void trackCargo(const PushObservation &in, uint64_t now);
+    int sweep_phase_ = 0, sweep_attempts_ = 0, sweep_seen_ = 0; float sweep_yaw0_ = 0, sweep_sign_ = 1; uint64_t sweep_start_us_ = 0, sweep_t0_us_ = 0;
+    int rush_pulse_phase_ = 0, rush_pulse_count_ = 0; float rush_pulse_yaw0_ = 0, rush_pulse_delta_ = 0; uint64_t rush_pulse_start_us_ = 0, rush_pulse_t0_us_ = 0;
+    bool uprightInCorridor(const PushObservation &in, uint64_t now, float &lateral) const;
     bool cargoVisible(uint64_t now) const { return cargo_seen_us_ && now - cargo_seen_us_ <= 1500000; }
     float backTarget(uint64_t now) const;
-    bool assumeView() const { return t_.assume_all_safe && t_.assume_view_pitch_cdeg != kCameraPitchInvalid; }
-    int repush_n_ = 0, verify_in_ = 0, verify_out_ = 0;
+    bool rushLogic() const { return t_.assume_all_safe || t_.field_rush; }
+    bool carryLogic() const { return t_.assume_all_safe || t_.field_carry; }
+    bool assumeView() const { return carryLogic() && t_.assume_view_pitch_cdeg != kCameraPitchInvalid; }
+    int repush_n_ = 0, verify_in_ = 0, verify_out_ = 0; bool verify_far_view_ = false; uint64_t verify_fix_us_ = 0; int inside_obs_ = 0; uint64_t inside_obs_ts_ = 0;
     uint64_t cargo_last_ts_ = 0, cargo_ref_us_ = 0, cargo_seen_us_ = 0, verify_ts_ = 0;
-    cv::Point2f cargo_ref_body_, cargo_ref_zone_; bool cargo_fix_=false; float cargo_rear_x_ = 0, cargo_rear_y_ = 0;
+    cv::Point2f cargo_ref_body_, cargo_ref_zone_; bool cargo_fix_=false, cargo_clipped_=false; float cargo_rear_x_ = 0, cargo_rear_y_ = 0;
+    cv::Point2f cargo_body_; bool align_pending_ = false, push_hold_valid_ = false; uint64_t align_start_us_ = 0; float push_hold_phi_ = 0;
+    uint64_t probe_until_us_ = 0, probe_next_us_ = 0; float probe_sign_ = 1.f; bool delivery_visual_ = false;
+    bool enter_unconfirmed_ = false; // 本趟推入已因“未确认进区”延长过
     bool assume_pushed_ = false; // 假设模式：已完成“松开后再用下压姿态向区内推”
     bool assume_blind_ = false; // TEMP_ASSUMPTION blind leg active in this phase
     float assume_rush_end_ = 0;
+    cv::Point2f last_target_xy_; bool last_target_valid_ = false; // body-frame position of the locked target on its last tracked frame
     // 假设模式：YOLO-pose粗略区域位姿锚定在里程系，视野丢失后用IMU航向+缩放后的指令位移继续推算。
     AnchoredZone zone_;
     float odo_ = 0, ratio_est_ = 0, ratio_odo_ = 0, last_imu_yaw_ = 0;
@@ -263,6 +305,7 @@ private:
     bool heading_seen_ = false;
     int lost_round_ = 0; // LOST_SEARCH: 0 FAR sweep, 1 intermediate (20deg) sweep for close cargo
     bool retreat_origin_valid_ = false;
+    bool corridor_retreat_ = false; int corridor_retries_ = 0; // LOST_HOLD reused as a no-blacklist back-off from a blocked corridor
     int retreat_mode_ = 0; // 0 undecided, 1 zone-measured, 2 blind (dead reckoning + IMU heading)
     uint64_t retreat_zone_us_ = 0;
     float retreat_heading_ = 0, approach_forward_ = 0; // forward commanded since the trip started

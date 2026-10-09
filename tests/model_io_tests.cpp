@@ -34,6 +34,14 @@ void detectorTests() {
     assert(makePushObservation(out,1050000,true,.25f,3).target_id==3);
     assert(!makePushObservation(out,1050000,true,.25f,99).target_valid);
     assert(makePushObservation(out,1050000,true,.25f,-1,{1}).target_id==3);
+    { // An on-end injured block is never a target, even when it is the larger or locked one.
+        SegDetection up,lie;up.track_id=8;lie.track_id=9;up.label=lie.label="injured_person";up.confidence=lie.confidence=.9f;
+        up.box={10,10,50,50};lie.box={70,10,20,10};up.timestamp_us=lie.timestamp_us=1050000;
+        up.ground_position_valid=lie.ground_position_valid=up.ground_contact_valid=lie.ground_contact_valid=true;
+        up.body_xy_m={0,.3f};lie.body_xy_m={.1f,.5f};up.injured_upright_rejected=true;
+        assert(makePushObservation({up,lie},1050000,true,.25f,-1).target_id==9);
+        assert(!makePushObservation({up,lie},1050000,true,.25f,8).target_valid);
+    }
     assert(!makePushObservation(out,1050000,false,.25f,-1,{1}).target_valid);
     // The danger object is never a push target, even after the first ordinary delivery.
     std::vector<SegDetection> danger{out[1]};assert(!makePushObservation(danger,1050000,true,.25f).target_valid);

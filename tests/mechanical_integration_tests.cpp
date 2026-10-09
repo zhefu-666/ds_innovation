@@ -30,6 +30,35 @@ int main(){
         for(int i=0;i<3;++i){big.timestamp_us=600000+i*10000;p=fallback.update({big},{100,100},500,true,600000+i*10000,true,.25,{},"injured_person");}
         assert(p.locked&&p.id==5);
     }
+    { // Two injured blocks in view: the larger one is on end and rejected, so the lock goes to the lying one.
+        PixelSelector two;auto up=object(8,{10,10,50,50},"injured_person"),lie=object(9,{70,10,20,10},"injured_person");
+        up.injured_upright_rejected=true;
+        PixelSelection p;
+        for(int i=0;i<3;++i){up.timestamp_us=lie.timestamp_us=700000+i*10000;p=two.update({up,lie},{100,100},500,true,700000+i*10000,true,.25,{},"injured_person");}
+        assert(p.locked&&p.id==9);
+        // Verdict arrives late: a lock on the (still undecided) on-end block is released and moves to the lying one.
+        PixelSelector late;up.injured_upright_rejected=false;
+        for(int i=0;i<3;++i){up.timestamp_us=lie.timestamp_us=800000+i*10000;p=late.update({up,lie},{100,100},500,true,800000+i*10000,true,.25,{},"injured_person");}
+        assert(p.locked&&p.id==8);
+        up.injured_upright_rejected=true;
+        for(int i=3;i<6;++i){up.timestamp_us=lie.timestamp_us=800000+i*10000;p=late.update({up,lie},{100,100},500,true,800000+i*10000,true,.25,{},"injured_person");}
+        assert(p.locked&&p.id==9);
+    }
+    { // A larger box without ground contact (image-edge clip) never takes the lock from a measurable one.
+        PixelSelector geo;auto edge=object(12,{10,10,60,60},"injured_person"),ok=object(15,{10,80,30,15},"injured_person");
+        edge.ground_contact_valid=false;
+        PixelSelection p;
+        for(int i=0;i<3;++i){edge.timestamp_us=ok.timestamp_us=900000+i*10000;p=geo.update({edge,ok},{100,100},2000,true,900000+i*10000,true,.25,{},"injured_person");}
+        assert(p.locked&&p.id==15);
+        // No measurable candidate at all: old behaviour (largest box) is kept.
+        PixelSelector none;ok.ground_contact_valid=false;
+        for(int i=0;i<3;++i){edge.timestamp_us=ok.timestamp_us=950000+i*10000;p=none.update({edge,ok},{100,100},2000,true,950000+i*10000,true,.25,{},"injured_person");}
+        assert(p.locked&&p.id==12);
+        // The geometry filter never overrides the preferred class.
+        PixelSelector cls;auto ord=object(20,{10,10,30,30});edge.timestamp_us=ord.timestamp_us=980000;
+        for(int i=0;i<3;++i){edge.timestamp_us=ord.timestamp_us=980000+i*10000;p=cls.update({edge,ord},{100,100},2000,true,980000+i*10000,true,.25,{},"injured_person");}
+        assert(p.locked&&p.id==12);
+    }
     // A challenger must exceed the hysteresis threshold for three consecutive new frames.
     PixelSelector hysteresis;small.mask.release();large.mask.release();
     small.box={10,10,20,20};large.box={40,10,10,10};

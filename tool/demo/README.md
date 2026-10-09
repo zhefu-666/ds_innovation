@@ -15,9 +15,9 @@ tool/demo/view.sh --seconds 3600
 cd /home/liu/ds_innovation
 tool/demo/connect.sh
 ```
-浏览器：http://127.0.0.1:18080/
-数据：http://127.0.0.1:18080/status
-图像流：http://127.0.0.1:18080/stream.mjpg
+浏览器：http://127.0.0.1:8080/
+数据：http://127.0.0.1:8080/status
+图像流：http://127.0.0.1:8080/stream.mjpg
 Foxglove WebSocket：ws://127.0.0.1:18765
 
 查看包含相机检测、目标决策、A6与IMU只读输入。每60秒预览进程自动重新启动，切换时可能短暂显示离线；总时限最多3600秒。数据过期保留离线标记，不假报在线。网页与旧8080服务隔离。
@@ -151,3 +151,16 @@ if (hold.y >= -t_.assume_stall_near_m && now - carry_progress_us_ >= t_.assume_s
 ### 同步到主程序（20261008）
 
 将上述演示版逻辑覆盖到板卡主程序 `/home/cat/ds_innovation`（`src include tests tools config CMakeLists.txt`，不删除文件），同步前备份：`backups_sync/main-before-demo-sync-20261008.tgz`。`--assume-all-safe`、`--assume-injured-trip`、`--demo-mode` 保持显式参数，默认关闭（`config.hpp` 默认 false/none），不带参数时主程序行为沿用比赛默认流程。在独立目录 `build-sync-20261008` 构建，二进制与第33趟部署版逐字节一致（md5 前缀 1aa47c08），ctest 21/21 通过（含新增“边框阻挡停滞释放”用例）。既有 `build/` 与 `tool/demo/runtime/bin` 未改动。上述三项参数调整未同步。
+
+### 20261009 增补（仅 `--assume-all-safe` 演示生效，非验收）
+
+- 网页HTTP端口改为 8080（`demo_20261007.json`/`demo_20261008.assume.json` 的 `http_port`，`connect.sh` 隧道、`view.py` 同步）。WebSocket 仍为 18765。旧项目也用 8080，两者不能同时运行；`logs/grab_stream.py` 本来就取 8080，抓帧恢复。
+- IMU 运动监测（只写日志，不参与控制）：每 500 ms 一行 `[MOTION] state= cmd_vx= cmd_wz= acc_std= gyro= roll= pitch= cmd_run_ms= still_run_ms= suspect= suspect_total_ms= longest_ms= per_state=`。判据：有速度指令且加速度模长 400 ms 窗口标准差 <0.15 m/s²、陀螺 <0.04 rad/s 的“振动静止”连续 ≥1.5 s 记为 `suspect`，开始/结束另打 `[MOTION_EVENT]`。`per_state=` 给出各状态“有指令时长/静止时长/疑似卡住时长”（毫秒），可直接看 CARRY/ENTER 是否长时间不动。限制：单个 IMU 分不清匀速行驶和卡住，只能用振动做代理，阈值未经实测标定，先看原始 `acc_std` 再定。
+- 翻框前确认真进区（`assume_enter_confirm`，演示模式开启）：推入结束若非“货物近端已过 0.09 m”，须满足：能看到货物则 `rear_y ≥ 0.07` 且横向偏差 ≤ 0.10；看不到货物则框保持点 `hold_y ≥ 0.03`。否则继续下压，最多再推 8 s 或 `hold_y` 到 0.30 m 为止，到限后仍翻框并记 `push_unconfirmed_giveup`。日志事件：`push_unconfirmed_visible/hidden`、`push_confirmed_late`、`push_unconfirmed_giveup`。
+- 伤员只横抓（`injured_lying_only`，演示模式开启）：对 `injured_person` 比较检测框的尺寸与“躺放(8×4×4cm)”“竖放(4×4×8cm)”两种投影的拟合误差，竖放拟合比躺放好 0.05（对数尺寸误差平方和）以上则判为竖放，`ground_contact_reason=injured_upright`，不作为搬运目标。合成数据：竖放 60/70 被拒，躺放 0/4905 误拒（含 ±6% 框抖动）。`[TARGET]` 日志带 `pose_err_lie`/`pose_err_up`/`upright_rej`。限制：只用单帧框，竖放漏拒约 14%；真实标定与检测框误差下未验证。
+- 后退后前推前的视觉对准（`assume_align_push`，演示模式开启，`assume_slant_max_rad=0`）：第35趟日志显示后退本身方向正确（IMU 航向变化约1°，货物始终在正前方），但随后的前推按“推向区中线”斜推角（被限幅在0.45 rad）立刻左转约13°，框从货物旁滑过。现改为：后退结束进入 ENTER 时，货物可见则先原地转向，使货物方位角在 ±0.06 rad 内（最长3 s，转速≤0.30 rad/s），再前推；看不到货物则不拦。推进中按货物方位纯追踪，货物丢失后保持最后航向（不再按推算的区坐标向区中线拉回）。日志：`[CARGO_ZONE] event=push_aligned|push_align_unseen|push_align_giveup bearing_deg= body_x= body_y= waited_ms=`；`reason` 为 `assumed_push_align_turn`、`assumed_push_in_pursuit`、`assumed_push_in_hold_heading`。限制：不再主动把货物往半区中线斜推，横向偏差靠放框位置保证；第35趟放框时货物已偏右约0.15 m（搬运段推算横向漂移，未处理），对准只能保证“推到货物”，推不回中线时仍会走 `verify_outside_repush`。二进制 md5 4ea8b2a1，旧版备份 `rescue_upper_host.prev-35`，ctest 21/21。
+- 搬运段卡停释放窗口放宽（`assume_stall_near_m` 0.06→0.12，仅演示模式，`main.cpp` 设置，头文件默认值不变）：第37趟车在区边框前 `hold_y≈-0.08` 处顶住不动（第36趟为 -0.041），旧窗口 `hold_y≥-0.06` 不触发、正常释放要 `hold_y≥+0.04` 也到不了，CARRY 空转到 60 s 超时（`wall_budget_exhausted`）。现 `hold_y≥-0.12` 且 1.5 s 无进展即按 `assumed_drop_point_stalled` 释放，随后由后退+对准前推补回。限制：释放点更靠外，货物会比正常释放少进约 0.1 m，且卡停判据可能在区外较远处误触发。第37趟未走到对准/前推段，该段稳定性未得到新数据。二进制 md5 15b6aab5，旧版备份 `rescue_upper_host.prev-37`，ctest 21/21。
+- 伤员竖放判断改为跨帧投票（`injured_lying_only` 开启时生效）：按 `track_id` 保留最近 ≤7 帧（1.5 s 内）的“横放拟合误差 − 竖放拟合误差”，帧数 ≥3 时取下中位数，大于 `upright_margin`(0.05) 才判竖放；不足 3 帧仍用单帧结果。同一目标位置突变超过 0.30 m 视为新目标，重新计票；偶数帧平票时取下中位数，不倾向拒绝（宁可放过不误拒横放）。`[TARGET]` 日志新增 `pose_diff_med=`、`votes=`。合成逼近序列（0.05 m 一步）：竖放帧单帧拒绝 87/98，投票后 98/98；横放（含 ±6% 框抖动）0/394 误拒。限制：仍是合成数据；前两帧只有单帧结果；目标丢失超过 1.5 s 后重新计票；真实竖放样本未测。二进制 md5 f22586a6，旧版备份 `rescue_upper_host.prev-38`，ctest 21/21。
+- 一竖一横两块伤员同屏时选横放的（演示模式）：此前 `PixelSelector`（按像素面积锁定最大的候选）不看竖放标记，若竖放块更大/更近会先锁住它，随后 `makePushObservation` 因其被判竖放而无目标，横放块永远轮不到。现 `PixelSelector` 直接跳过 `injured_upright_rejected` 的检测，锁定只在横放块里选；若竖放结论晚到（前几帧票数不足），已锁在它上面的会因它被拒而释放，3 帧后改锁横放块。竖放投票加滞回：已判竖放的目标，中位数降到 `upright_margin*0.4` 以下才解除，避免远处噪声让同一目标在拒绝/通过之间来回跳。二进制 md5 750f947d，旧版备份 `rescue_upper_host.prev-39`，ctest 21/21。未实机验证：两块同屏、竖放块更近或更大、后退/对准阶段竖放块进入视野时 `cargo_body` 追踪是否被干扰。
+- 第41趟教训：块压在方框外沿，航位推算却判“进区”(fix=0 的 delivered_visual)。核验现在只认视觉定位(>=3点)：无定位先等(最多7s)，1.5s 无定位切远俯仰找角点；仍无则记 delivered_assumed(不再记 delivered_visual)；有定位且块在区外则重推。推入阶段“块已进区”还要求框自身 hold_y>=0.06，防止近距定位偏差提前收手。
+- 第42趟教训与改动（第43趟起生效）：第42趟推入阶段卡在边框外约25 s、直到60 s墙钟结束；原因是 `[MOTION]` 的 feed 在 `hardware_output_enabled` 赋值之前调用（恒为 false，IMU 卡住检测从未工作），且原判据（振动小）对“轮子空转顶边框”无效（空转振动反而更大）。现改为：IMU 判“被顶住”= 前进（|vx|≥0.1）且有指令转向时，1.2 s 窗口内 Σ|gyro|dt/Σ|cmd_wz|dt <0.16（释放 ≥0.22，迟滞），连续 ≥0.6 s 经 `imu_blocked_us` 交给状态机。CARRY：IMU 卡住且 DR hold_y≥-0.25 → `release_stall_imu` / `assumed_drop_point_imu_blocked`；原视觉停滞判据只在定位新鲜时有效（不再用纯 DR）。ENTER：IMU 卡住或货物 2 s 不动 → 重推（≤2 次）后放弃。货物参考点锁定同一块（相邻两块不再互相切换）。`inside_after_release` 需连续3帧独立定位。是否进区仍只认视觉。限制：纯直行（wz=0）时 IMU 无响应信号；阈值只有第42趟一趟数据，需实机标定。日志：`[MOTION] ... blk_ratio= blocked_ms=`、`[MOTION_EVENT] blocked_begin|blocked_end`。

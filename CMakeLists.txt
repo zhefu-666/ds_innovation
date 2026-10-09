@@ -23,6 +23,7 @@ add_executable(rescue_upper_host
     src/keypoint_filter.cpp
     src/ground_pose_fitter.cpp
     src/geometry_pipeline.cpp
+    src/silhouette.cpp
     src/geometry_replay.cpp
     src/hipnuc_imu.cpp
     src/imu_adapter.cpp
@@ -156,7 +157,7 @@ endif()
 if(BUILD_TESTING)
     add_executable(rescue_stage01_tests tests/stage01_tests.cpp
         src/zone_estimate.cpp src/zone_geometry.cpp src/keypoint_filter.cpp
-        src/ground_pose_fitter.cpp src/geometry_pipeline.cpp src/camera_calibration.cpp
+        src/ground_pose_fitter.cpp src/geometry_pipeline.cpp src/silhouette.cpp src/camera_calibration.cpp
         src/safe_zone_pose.cpp src/zone_layout.cpp src/push_task.cpp src/transport_rules.cpp
         src/uart_controller.cpp src/utils.cpp)
     target_include_directories(rescue_stage01_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
@@ -164,6 +165,11 @@ if(BUILD_TESTING)
     target_compile_options(rescue_stage01_tests PRIVATE -UNDEBUG -Wall -Wextra)
     target_compile_definitions(rescue_stage01_tests PRIVATE ZONE_GEOMETRY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/zone_geometry.json"
         LEGACY_ZONE_GEOMETRY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/zone_geometry_inner_v1.json")
+    add_executable(rescue_silhouette_tests tests/silhouette_tests.cpp src/silhouette.cpp)
+    target_include_directories(rescue_silhouette_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_silhouette_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_silhouette_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_silhouette_tests COMMAND rescue_silhouette_tests)
     add_test(NAME rescue_stage01_tests COMMAND rescue_stage01_tests)
     set_tests_properties(rescue_stage01_tests PROPERTIES TIMEOUT 20)
     # Recorded fixture describes the red zone; independent of the live default team.

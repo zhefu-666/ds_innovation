@@ -5,12 +5,14 @@
 #include <limits>
 #include "rescue/controlled_field.hpp"
 #include "rescue/geometry_pipeline.hpp"
+#include "rescue/silhouette.hpp"
 #include "rescue/uart_controller.hpp"
 #include "rescue/motion_link.hpp"
 #include "rescue/motion_readiness.hpp"
 #include "rescue/match_control.hpp"
 #include "rescue/match_server.hpp"
 #include "rescue/hipnuc_imu.hpp"
+#include "rescue/motion_watch.hpp"
 #include "rescue/imu_adapter.hpp"
 #include "rescue/sensor_fusion.hpp"
 #include "rescue/detector.hpp"
@@ -266,21 +268,24 @@ int main(int argc, char **argv) {
             load_half_width=measured.load_half_width_m;load_half_depth=measured.load_half_depth_m;
         }
         configureDemo(config,tuning);
+        if(config.push_replay.empty()){ // 回放夹具是严格路径录制的，保持原参数
+        // 现场同步：主程序与demo共用的运动/搬运/限程参数（turn_min_rad保持主程序值，仅demo再收紧）。
+        // 实测：指令0.1m/s*1s视觉距离仅降约2.2cm（指令/实际≈5:1），按指令积分的限程需放宽；实际速度仅为指令的1/5~1/10。
+        tuning.max_speed=.40f;tuning.approach_speed=.40f;tuning.carry_speed=.34f;tuning.rush_speed=.32f;tuning.rush_budget_us=12000000;
+        tuning.rush_pulse_turn=true;
+        tuning.enter_speed=.30f;tuning.back_speed=.32f;tuning.turn_wz=.55f;tuning.max_wz=.55f;tuning.min_turn_wz=std::min(tuning.min_turn_wz,.40f);
+        tuning.field_carry=true;tuning.field_rush=true;tuning.corridor_confirm_frames=6;tuning.assume_enter_confirm=true;tuning.assume_align_push=true;tuning.assume_stall_near_m=.12f;tuning.assume_slant_max_rad=0.f;tuning.approach_limit_m=std::max(tuning.approach_limit_m,8.0f);
+        tuning.retreat_limit_m=std::max(tuning.retreat_limit_m,4.0f);
+        tuning.assume_carry_m=std::max(tuning.assume_carry_m,.60f);tuning.assume_push_m=.55f;tuning.enter_budget_us=std::max<uint64_t>(tuning.enter_budget_us,20000000);tuning.assume_back_m=std::max(tuning.assume_back_m,std::min(.50f,.85f*tuning.back_speed*float(tuning.retreat_budget_us)/1e6f)); // 须在后退时限内完成
+        std::cout<<"[FIELD_CARRY] demo transport logic in main path: blind carry_m="<<tuning.assume_carry_m<<" back_m="<<tuning.assume_back_m
+            <<" approach_limit_m="<<tuning.approach_limit_m<<" retreat_limit_m="<<tuning.retreat_limit_m<<" max_speed="<<tuning.max_speed<<" turn_min_rad="<<tuning.turn_min_rad<<"\n";
+        }
         if(config.assume_all_safe) {
             // TEMP_ASSUMPTION（2026-10-08用户要求“默认全都安全”）：只为跑通决策链，不是验收结果。
-            // 实测：指令0.1m/s*1s视觉距离仅降约2.2cm（指令/实际≈5:1），按指令积分的限程需放宽。
             // 实测下一趟转向：指令0.25rad/s，IMU实际约0.022rad/s，15s仅转约0.33rad，达不到1.6rad。
-    tuning.turn_min_rad=std::min(tuning.turn_min_rad,.25f);
-            // 用户要求加快：实测实际速度仅为指令的1/5~1/10，指令速度整体提高约3倍（仅假设模式）。
-            tuning.max_speed=.40f;tuning.approach_speed=.40f;tuning.carry_speed=.34f;tuning.rush_speed=.32f;tuning.rush_budget_us=12000000;
-            tuning.enter_speed=.30f;tuning.back_speed=.32f;tuning.turn_wz=.55f;tuning.max_wz=.55f;tuning.min_turn_wz=std::min(tuning.min_turn_wz,.40f);
-    tuning.assume_all_safe=true;tuning.assume_injured_trip=config.assume_injured_trip;tuning.approach_limit_m=std::max(tuning.approach_limit_m,8.0f);
-            tuning.retreat_limit_m=std::max(tuning.retreat_limit_m,4.0f);
-            tuning.assume_carry_m=std::max(tuning.assume_carry_m,.60f);tuning.assume_push_m=.55f;tuning.enter_budget_us=std::max<uint64_t>(tuning.enter_budget_us,20000000);tuning.assume_back_m=std::max(tuning.assume_back_m,std::min(.50f,.85f*tuning.back_speed*float(tuning.retreat_budget_us)/1e6f)); // 须在后退时限内完成
-            std::cout<<"[TEMP_ASSUMPTION] assume_all_safe=1 injured_trip="<<config.assume_injured_trip<<" clearance/zone/capture/delivery evidence assumed true;"
-                " blind carry_m="<<tuning.assume_carry_m<<" back_m="<<tuning.assume_back_m
-                <<" approach_limit_m="<<tuning.approach_limit_m<<" retreat_limit_m="<<tuning.retreat_limit_m
-                <<" max_speed="<<tuning.max_speed<<" NOT_ACCEPTANCE\n";
+            tuning.turn_min_rad=std::min(tuning.turn_min_rad,.25f);
+            tuning.assume_all_safe=true;tuning.assume_injured_trip=config.assume_injured_trip;
+            std::cout<<"[TEMP_ASSUMPTION] assume_all_safe=1 injured_trip="<<config.assume_injured_trip<<" clearance/zone/capture/delivery evidence assumed true; NOT_ACCEPTANCE\n";
         }
         const bool a6_known=a6_done_flag ? config.known_frame_angle>=0 && config.known_frame_id>0 : feedback_open>=0;
         if(a6_done_flag)std::cout<<"[A6] TEMP_ASSUMPTION a6_semantics=done_flag: byte1==1 with matching id means action finished (open or close);"
@@ -381,7 +386,7 @@ int main(int argc, char **argv) {
             CameraCalibration calibration;
             if (!calibration.load(config.calibration_file,config.allow_mechanical_pitch_model)) throw std::runtime_error("Invalid ground calibration file");
             zone_geometry=ZoneGeometry::load(config.zone_geometry_file,config.team+"_safe_zone");
-            GroundContactConfig contact;contact.min_confidence=config.confidence;contact.accept_size_mismatch=config.assume_all_safe;
+            GroundContactConfig contact;contact.min_confidence=config.confidence;contact.accept_size_mismatch=true;contact.injured_lying_only=true;contact.lying_confirm_diff=-.06f;contact.use_silhouette=true;
             geometry=std::make_unique<GeometryPipeline>(calibration,zone_geometry,contact);
             vref_calibration=calibration;vref_ready=true;
         }
@@ -426,7 +431,6 @@ int main(int argc, char **argv) {
         CaptureMonitor capture(capture_config);
         PixelSelector pixel_selector;MultiViewCapture multi_view(frame_views,{config.frame_width,config.frame_height},view_image_polygon);
         bool observing=false;uint64_t observation_round=0;
-        ZoneEstimate observation_pose;
         // Use the USB camera's MJPEG V4L2 path; automatic GStreamer negotiation
         // fails when applying the requested 720p/60 FPS settings on this board.
         cv::VideoCapture camera(config.camera_index, cv::CAP_V4L2);
@@ -461,6 +465,7 @@ int main(int argc, char **argv) {
         PushOutput previous;previous.first_ordinary_delivered=tuning.assume_injured_trip;
         const std::string prefer_label=config.assume_injured_trip?"injured_person":"";
         auto last_report = Clock::now();
+        MotionWatch motion_watch;
         const auto demo_started=Clock::now();int demo_exit=0;
         while (!g_should_exit.load()) {
             if(config.demo_mode!="none" && Clock::now()-demo_started>=std::chrono::seconds(config.demo_seconds)){
@@ -496,14 +501,15 @@ int main(int argc, char **argv) {
                vision_result.halves[0].valid && vision_result.halves[1].valid) {
                 zone_color.color=config.team;zone_color.verified=true;zone_color.assumed=false;
                 zone_color.reason="controlled_field_operator_identity";
-            } else if(config.assume_all_safe) {
-                // TEMP_ASSUMPTION: colour fixed to the team at start, independent of any detection.
+            } else {
+                // 现场同步：区域颜色固定为队伍色，不依赖检测。
                 zone_color.color=config.team;zone_color.verified=true;zone_color.assumed=true;
-                zone_color.reason="assume_all_safe_default_team_colour";
+                zone_color.reason="fixed_team_colour";
             }
             GeometryResult geometry_result;ExpectedStop expected_stop;ZoneEstimate vref_estimate;bool vref_ok=false;
             // Servo readback at capture time; without the feedback port it stays invalid.
             const FrameSensors frame_sensors=feedback?feedback->feedbackAt(timestamp):FrameSensors{};
+            for(auto& d:detections)if(d.label=="injured_person")d.silhouette_hw=orangeSilhouetteAspect(frame,d.box);
             if(geometry) {
                 GeometryFrame geometry_frame;geometry_frame.frame_id=frame_sequence;
                 geometry_frame.capture_us=timestamp;geometry_frame.now_us=observed_at;geometry_frame.image_size=frame.size();
@@ -525,7 +531,7 @@ int main(int argc, char **argv) {
                     } catch(const std::exception&) {points={};expected_stop={};}
                 }
                 geometry_result=geometry->process(geometry_frame,points,detections);
-                if(config.assume_all_safe&&vref_ready&&vision_result.pose_ran&&zone_color.color==config.team){
+                if(vref_ready&&vision_result.pose_ran&&zone_color.color==config.team){
                     vref_estimate=ZoneEstimate{};
                     vref_ok=estimateVisualZone(vref_calibration,zone_geometry,zone_points,frame_sensors.actuator.camera_pitch_cdeg,
                         &geometry_frame.sensors.imu,config.pose_keypoint_confidence,vref_estimate);
@@ -543,7 +549,7 @@ int main(int argc, char **argv) {
             auto input = makePushObservation(detections, observed_at,previous.first_ordinary_delivered,config.confidence,
                 selection.id,task.rejectedTargets(observed_at),false,false,false,prefer_label);
             if(!selection.locked) input.target_valid=false;
-            if(selection.mode=="box_area" && !box_area_accepted && !config.assume_all_safe && !(config.demo_mode=="search" && config.dry_run))input.target_valid=false;
+            (void)box_area_accepted; // 现场同步：像素比不再要求box_area_accepted标定（沿用demo）
             std::cout << "[PIXEL_SELECTION] timestamp="<<observed_at<<" pitch="<<frame_sensors.actuator.camera_pitch_cdeg
                 <<" stable="<<frame_sensors.pitch_stable<<" id="<<selection.id<<" mode="<<selection.mode
                 <<" raw="<<selection.raw<<" smooth="<<selection.smoothed<<" locked="<<selection.locked<<" reason="<<selection.reason<<"\n";
@@ -551,13 +557,45 @@ int main(int argc, char **argv) {
             input.pixel_mode=selection.mode;input.pixel_reason=selection.reason;input.pixel_locked=selection.locked;
             input.run = false; // MatchControl supplies the final authorization below.
             if(geometry)geometry->apply(input,geometry_result,expected_stop,config.team,imuNowUs());
-            if(config.assume_all_safe){
+            for(const auto&d:detections)
+                if(d.label=="injured_person"&&d.track_id!=selection.id&&(d.injured_upright_rejected||!d.ground_contact_valid)&&
+                   d.ground_position_valid&&d.confidence>=config.confidence&&
+                   std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y))input.upright_body.push_back(d.body_xy_m);
+            if(!input.upright_body.empty())input.upright_ts_us=observed_at;
+            {
                 for(const auto&d:detections)
                     if(d.ground_position_valid&&d.confidence>=config.confidence&&std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y)&&
-                       (d.label=="ordinary_supply"||d.label=="core_supply"||d.label=="injured_person"))input.cargo_body.push_back(d.body_xy_m);
+                       (d.label=="ordinary_supply"||d.label=="core_supply"||d.label=="injured_person")){
+                        input.cargo_body.push_back(d.body_xy_m);
+                        PushObservation::CargoImg ci;
+                        ci.bottom_px=float(d.box.y+d.box.height);ci.height_px=float(d.box.height);
+                        ci.clipped=ci.bottom_px>=float(frame.rows)-4.f;
+                        // Front rim edge (keypoints 0/1/2) at the block's column; needs two visible and the block between them.
+                        std::vector<cv::Point2f> fr;
+                        for(const auto&k:zone_points)if(k.visible&&k.id>=0&&k.id<=2)fr.push_back(k.pixel);
+                        if(fr.size()>=2){
+                            float xl=fr[0].x,xr=fr[0].x,ys=0;
+                            for(const auto&q:fr){xl=std::min(xl,q.x);xr=std::max(xr,q.x);ys+=q.y;}
+                            const float cx=d.box.x+d.box.width*.5f,m=.25f*(xr-xl);
+                            if(xr-xl>20.f&&cx>=xl-m&&cx<=xr+m){ci.front_px=ys/float(fr.size());ci.front_valid=true;}
+                        }
+                        input.cargo_img.push_back(ci);
+                    }
                 input.cargo_ts_us=observed_at;
             }
-            if(vref_ok){input.vref_valid=true;input.vref_zone=vref_estimate;input.vref_points=int(vref_estimate.inlier_ids.size());}
+            // 严格位姿优先：geometry_pipeline的区域估计可信（非预测、残差/不确定度/时效通过、>=3内点）时作为区域定位喂给PushTask；
+            // 否则降级为VREF单帧估计，再不行由PushTask内部航位推算/盲走兜底。
+            const bool strict_fix=input.zone_estimate.valid&&input.zone_estimate.source!=ZoneEstimate::Source::PREDICTED&&
+                input.zone_estimate.inlier_ids.size()>=3&&input.zone_estimate.trusted(observed_at);
+            if(strict_fix){
+                input.vref_valid=true;input.vref_zone=input.zone_estimate;
+                input.vref_zone.timestamp_us=observed_at;input.vref_zone.observed_us=observed_at;
+                input.vref_points=int(input.zone_estimate.inlier_ids.size());
+                std::cout<<"[ZONE_FIX] source=strict n="<<input.vref_points<<"\n";
+            }else if(vref_ok){
+                input.vref_valid=true;input.vref_zone=vref_estimate;input.vref_points=int(vref_estimate.inlier_ids.size());
+                std::cout<<"[ZONE_FIX] source=vref n="<<input.vref_points<<"\n";
+            }
             if(frame_sensors.actuator.valid){
                 // Done-flag A6 cannot show position: closed only after this host's close target completed.
                 input.gripper_closed_observed=link ? feedback->confirmedFrameOpen(frame_sensors.actuator)==0 :
@@ -576,15 +614,10 @@ int main(int argc, char **argv) {
             capture.update(input, detections, observed_at);
             if(previous.state==PushState::VERIFY_CAPTURE){
                 const auto fb=feedback?feedback->latestActuatorFeedback():ActuatorFeedback{};
-                if(!observing){multi_view.begin(observed_at,fb.gripper_action_id,++observation_round);observing=true;observation_pose=input.zone_estimate;}
-                const bool stationary_pose=observation_pose.trusted(observation_pose.timestamp_us) && input.zone_estimate.trusted(observed_at) &&
-                    observation_pose.source!=ZoneEstimate::Source::PREDICTED && input.zone_estimate.source!=ZoneEstimate::Source::PREDICTED &&
-                    observation_pose.geometry_id==input.zone_estimate.geometry_id &&
-                    cv::norm(observation_pose.origin_body_m-input.zone_estimate.origin_body_m)<.01 &&
-                    std::abs(wrapAngle(observation_pose.yaw_body_rad-input.zone_estimate.yaw_body_rad))<.02;
+                if(!observing){multi_view.begin(observed_at,fb.gripper_action_id,++observation_round);observing=true;}
                 multi_view.update(observed_at,timestamp,fb.gripper_action_id,
                     fb.valid && input.gripper_done && input.gripper_feedback_open==0,
-                    (stationary_pose||config.assume_all_safe) && previous.motion.vx_mps==0 && previous.motion.wz_rps==0,
+                    previous.motion.vx_mps==0 && previous.motion.wz_rps==0,
                     input.camera_pitch_cdeg,input.camera_pitch_stable,detections);
                 const auto& evidence=multi_view.result();input.multi_view_finished=evidence.finished;
                 input.multi_view_verdict=int(evidence.verdict);input.multi_view_inventory=evidence.inventory;
@@ -614,6 +647,7 @@ int main(int argc, char **argv) {
                 input.heading_valid = imu_data.fresh && imu_data.sample.measurements_valid &&
                     std::isfinite(imu_data.sample.body_rpy_rad[2]);
                 input.heading_rad = imu_data.sample.body_rpy_rad[2];
+                input.imu_blocked_us = motion_watch.blockedUs();
             }
             // A dead link (write failures or stale feedback) vetoes motion permission.
             std::string preflight_reason;
@@ -635,11 +669,7 @@ int main(int argc, char **argv) {
                      (std::abs(int(input.camera_pitch_cdeg) - int(tuning.far_pitch_cdeg)) > tuning.pitch_tolerance_cdeg &&
                       std::abs(int(input.camera_pitch_cdeg) - int(kStartupRestPitchCdeg)) > tuning.pitch_tolerance_cdeg)))
                 preflight_reason="startup_pitch_not_rest_or_5deg";
-            else if(!config.assume_all_safe && !geometry_result.mapping_valid &&
-                    !stationaryPitchWork(previous, geometry_result.reason))
-                preflight_reason=geometry_result.reason.empty()?"ground_mapping_unavailable":geometry_result.reason;
-            else if(!config.assume_all_safe && !match.status(imuNowUs()).started_us && (!input.path_safe || !input.opponent_zone_clear))
-                preflight_reason="startup_clearance_required";
+            // 现场同步（用户要求）：起步预检不再要求ground mapping有效和起步通道/对方区域净空。
             input.now_us=imuNowUs();
             match.health(input.now_us,preflight_reason.empty(),preflight_reason);
             // Only independently identified, observed (not predicted) fixed-zone poses
@@ -659,13 +689,18 @@ int main(int argc, char **argv) {
             input.safety_ok=match_status.permit && preflight_reason.empty();
             navigator.update(input,previous);
             auto out = task.update(input);
-            if(config.assume_all_safe)std::cout<<"[ANCHOR] state="<<int(out.state)<<" reason="<<out.reason<<" "<<task.anchorDebug()<<"\n";
-            if(config.assume_all_safe){const std::string dz=task.takeDropZoneEvent();if(!dz.empty())std::cout<<dz<<std::flush;}
+            std::cout<<"[ANCHOR] state="<<int(out.state)<<" reason="<<out.reason<<" "<<task.anchorDebug()<<"\n";
+            {const std::string dz=task.takeDropZoneEvent();if(!dz.empty())std::cout<<dz<<std::flush;}
             guardDemoMotion(config.demo_mode,out.motion,demo_hold_angle,demo_hold_pitch);
+            if(imu){
+                motion_watch.feed(input.now_us,PushTask::name(out.state),out.motion.vx_mps,out.motion.wz_rps,bool(link)&&match_status.permit,
+                    imu_data.fresh&&imu_data.sample.measurements_valid,imu_data.sample.body_acceleration_mps2,
+                    imu_data.sample.body_angular_velocity_rps,imu_data.sample.body_rpy_rad);
+                const std::string mev=motion_watch.takeEvents();if(!mev.empty())std::cout<<mev<<std::flush;
+            }
             if(config.demo_mode=="search" && config.dry_run)
                 std::cout<<"[DEMO_SEARCH_PREVIEW] target="<<selection.id<<" locked="<<selection.locked<<" pixel_mode="<<selection.mode<<" ratio="<<selection.smoothed<<" geometry="<<input.geometry_valid<<" NO_TX\n";
-            // Independent final gate: stationary image checks never authorize wheels.
-            if(!config.assume_all_safe) inhibitUnmappedMotion(out.motion, geometry_result.mapping_valid);
+            // 现场同步（用户要求）：去除最终出口门inhibitUnmappedMotion。
             out.match_state=MatchControl::name(match_status.state);out.match_reason=match_status.reason;
             out.match_remaining_us=match_status.remaining_us;
             out.hardware_output_enabled=bool(link)&&match_status.permit;
@@ -724,7 +759,7 @@ int main(int argc, char **argv) {
                 for(const auto& d:detections) log<<"[TARGET] id="<<d.track_id<<" label="<<d.label
                     <<" position="<<d.ground_position_valid<<" contact="<<d.ground_contact_valid
                     <<" reason="<<d.ground_contact_reason<<" xy="<<d.body_xy_m.x<<","<<d.body_xy_m.y
-                    <<" conf="<<d.confidence<<" box="<<d.box.x<<","<<d.box.y<<","<<d.box.width<<","<<d.box.height<<"\n";
+                    <<" conf="<<d.confidence<<" box="<<d.box.x<<","<<d.box.y<<","<<d.box.width<<","<<d.box.height<<(d.pose_err_lying>=0?" pose_err_lie="+std::to_string(d.pose_err_lying)+" pose_err_up="+std::to_string(d.pose_err_upright)+" pose_diff_med="+std::to_string(d.pose_diff_med)+" votes="+std::to_string(d.pose_vote_n)+" upright_rej="+std::to_string(d.injured_upright_rejected)+" sil_hw="+std::to_string(d.silhouette_hw):std::string())<<"\n";
                 {
                     const auto ids=[&](const char* key,const std::vector<int>& v){
                         log<<" "<<key<<"=";
@@ -773,6 +808,7 @@ int main(int argc, char **argv) {
                     }
                     log<<"\n";
                 }
+                if (imu) log << motion_watch.line();
                 if (imu) {
                     const auto& p = imu_data.sample;
                     log << "[IMU] fresh=" << imu_data.fresh << " age_ms=" << imu_data.age_ms

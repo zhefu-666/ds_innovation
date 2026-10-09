@@ -29,7 +29,27 @@ GeometryPipeline::GeometryPipeline(CameraCalibration c,ZoneGeometry g,GroundCont
        contact_.edge_margin_px<0||!std::isfinite(contact_.size_tolerance)||contact_.size_tolerance<0||contact_.size_tolerance>=1)
         throw std::runtime_error("Invalid ground contact configuration");
 }
-std::string GeometryPipeline::groundContact(SegDetection& d,const GeometryFrame& f) const {
+bool GeometryPipeline::voteUpright(const SegDetection& d,float diff,int& n,float& median) {
+    n=1;median=diff;
+    if(d.track_id<0||!d.timestamp_us||contact_.upright_vote_frames<2)return diff>contact_.upright_margin||diff>=contact_.lying_confirm_diff;
+    if(pose_votes_.size()>32)for(auto it=pose_votes_.begin();it!=pose_votes_.end();)
+        it=(it->second.q.empty()||d.timestamp_us>it->second.q.back().t+contact_.upright_vote_window_us)?pose_votes_.erase(it):std::next(it);
+    auto& tv=pose_votes_[d.track_id];auto& q=tv.q;
+    if(!q.empty()&&q.back().t==d.timestamp_us)q.pop_back(); // same frame evaluated twice
+    if(!q.empty()&&(d.timestamp_us<q.back().t||d.timestamp_us-q.back().t>contact_.upright_vote_window_us||
+                    cv::norm(d.body_xy_m-q.back().xy)>contact_.upright_vote_jump_m)){q.clear();tv.upright=tv.unconfirmed=false;}
+    q.push_back({d.timestamp_us,diff,d.body_xy_m});
+    while(int(q.size())>contact_.upright_vote_frames||d.timestamp_us-q.front().t>contact_.upright_vote_window_us)q.pop_front();
+    n=int(q.size());
+    if(n<contact_.upright_vote_min)return diff>contact_.upright_margin||diff>=contact_.lying_confirm_diff;
+    std::vector<float> v;for(const auto& e:q)v.push_back(e.diff);
+    std::sort(v.begin(),v.end());
+    median=v[(v.size()-1)/2]; // lower median: an even split never rejects a possibly lying block
+    tv.upright=median>(tv.upright?contact_.upright_margin*contact_.upright_release_ratio:contact_.upright_margin);
+    tv.unconfirmed=median>=(tv.unconfirmed?contact_.lying_confirm_diff-contact_.lying_confirm_hysteresis:contact_.lying_confirm_diff);
+    return tv.upright||tv.unconfirmed;
+}
+std::string GeometryPipeline::groundContact(SegDetection& d,const GeometryFrame& f) {
     if(d.timestamp_us!=f.capture_us||d.frame_id!=f.frame_id)return "frame_mismatch";
     if(d.box.width<=0||d.box.height<=0||d.box.x<0||d.box.y<0||double(d.box.x)+d.box.width>f.image_size.width||
        double(d.box.y)+d.box.height>=f.image_size.height)return "box_outside_image";
@@ -57,7 +77,9 @@ std::string GeometryPipeline::groundContact(SegDetection& d,const GeometryFrame&
     const cv::Point2f centre=d.body_xy_m+d.body_xy_m*(.02f/float(cv::norm(d.body_xy_m)));
     cv::Mat k64;calibration_.cameraMatrix().convertTo(k64,CV_64F);const cv::Matx33d K(k64);
     float wmin=1e9f,wmax=0,hmin=1e9f,hmax=0;
-    for(const auto& pose:poses)for(int deg=0;deg<180;deg+=10) {
+    float pose_err[2]={1e9f,1e9f};
+    for(size_t pi=0;pi<poses.size();++pi)for(int deg=0;deg<180;deg+=10) {
+        const auto& pose=poses[pi];
         const float c=std::cos(deg*float(CV_PI)/180),s=std::sin(deg*float(CV_PI)/180);
         float u0=1e9f,u1=-1e9f,v0=1e9f,v1=-1e9f;
         for(const auto& v:pose) {
@@ -67,8 +89,24 @@ std::string GeometryPipeline::groundContact(SegDetection& d,const GeometryFrame&
             v0=std::min(v0,float(q[1]/q[2]));v1=std::max(v1,float(q[1]/q[2]));
         }
         wmin=std::min(wmin,u1-u0);wmax=std::max(wmax,u1-u0);hmin=std::min(hmin,v1-v0);hmax=std::max(hmax,v1-v0);
+        if(pi<2&&u1-u0>1e-3f&&v1-v0>1e-3f&&x1-x0>1e-3f&&y1-y0>1e-3f) {
+            const float ew=std::log((x1-x0)/(u1-u0)),eh=std::log((y1-y0)/(v1-v0));
+            pose_err[pi]=std::min(pose_err[pi],ew*ew+eh*eh);
+        }
     }
     const float tol=contact_.size_tolerance,w=x1-x0,h=y1-y0;
+    if(d.label=="injured_person"&&poses.size()==2&&pose_err[0]<1e8f&&pose_err[1]<1e8f) {
+        d.pose_err_lying=pose_err[0];d.pose_err_upright=pose_err[1];
+        float diff=pose_err[0]-pose_err[1];
+        if(contact_.injured_lying_only&&contact_.use_silhouette)diff=silhouetteAdjustedDiff(diff,d.silhouette_hw,contact_.silhouette);
+        int votes=1;bool upright=diff>contact_.upright_margin;
+        if(contact_.injured_lying_only)upright=voteUpright(d,diff,votes,diff);
+        d.pose_vote_n=votes;d.pose_diff_med=diff;
+        if(contact_.injured_lying_only&&upright) {
+            d.injured_upright_rejected=true;d.ground_contact_reason=diff>contact_.upright_margin?"injured_upright":"injured_not_lying";
+            return d.ground_contact_reason;
+        }
+    }
     if(!(w>=wmin*(1-tol)&&w<=wmax*(1+tol)&&h>=hmin*(1-tol)&&h<=hmax*(1+tol)))return "size_mismatch";
     d.ground_contact_valid=true;
     return {};

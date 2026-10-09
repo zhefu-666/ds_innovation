@@ -19,6 +19,6 @@
   "imu_port": "/dev/ttyUSB0",
   "imu_baud": 115200,
   "python": "python3",
-  "http_port": 18080,
+  "http_port": 8080,
   "ws_port": 18765
 }

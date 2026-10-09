@@ -15,6 +15,7 @@
 #include "rescue/capture_monitor.hpp"
 #include "rescue/config.hpp"
 #include "rescue/motion_readiness.hpp"
+#include "rescue/motion_watch.hpp"
 #include <cassert>
 #include <algorithm>
 #include <cmath>
@@ -41,7 +42,7 @@ struct Sim {
     float px = -.15f, py = -.75f, phi = 0; // phi: robot heading vs zone +y, CCW positive
     bool zone_visible = true, zone_predicted = false, gripper_responds = true, servo_responds = true;
     bool multi_evidence=true;
-    float py_max=1e9f; bool vref_visible=false, cargo_on=false; cv::Point2f cargo_zone{-.15f,.12f};
+    float py_max=1e9f; bool vref_visible=false, cargo_on=false, cargo_clip=false; float img_frac=std::nanf(""); cv::Point2f cargo_zone{-.15f,.12f};
     bool navigation_ready = true, drop_available = true, live_camera_guard = false;
     int pitch = 0, pitch_still = 0, pitch_rate = 400; // power-on: level
     Inventory load; // what is physically enclosed
@@ -84,8 +85,8 @@ struct Sim {
             v.origin_body_m = {c * -px - s * -py, s * -px + c * -py};
             in.vref_valid = true; in.vref_points = 4;
         }
-        in.cargo_body.clear(); in.cargo_ts_us=in.now_us;
-        if(cargo_on){const float c=std::cos(-phi),sn=std::sin(-phi),dx=cargo_zone.x-px,dy=cargo_zone.y-py;const cv::Point2f cb{c*dx-sn*dy,sn*dx+c*dy};if(cb.y>0)in.cargo_body.push_back(cb);}
+        in.cargo_body.clear(); in.cargo_img.clear(); in.cargo_ts_us=in.now_us;
+        if(cargo_on){const float c=std::cos(-phi),sn=std::sin(-phi),dx=cargo_zone.x-px,dy=cargo_zone.y-py;const cv::Point2f cb{c*dx-sn*dy,sn*dx+c*dy};if(cb.y>0){in.cargo_body.push_back(cb);PushObservation::CargoImg ci;ci.bottom_px=400;ci.height_px=100;ci.clipped=cargo_clip;if(std::isfinite(img_frac)){ci.front_px=400+img_frac*100;ci.front_valid=true;}in.cargo_img.push_back(ci);}}
         // Simulator supplies explicit validated direct-route/empty-zone evidence.
         in.carry_plan_valid=navigation_ready;in.drop_plan_valid=drop_available;in.navigation_timestamp_us=in.now_us;
         in.drop_centre_zone={task_injured?tune.injured_half_x_m:tune.supply_half_x_m,tune.deposit_y_m};
@@ -446,7 +447,7 @@ int main(int argc, char **argv) {
         assert(std::abs((yb-s.py)-s.tune.assume_prepush_back_m)<.04f);
         assert(s.until(PushState::RAISE_RELEASE,600) && s.out.reason=="assumed_push_in_done");
         assert(std::abs(s.py+s.tune.hold_center_y_m-s.tune.assume_push_depth_m)<.06f);
-        assert(s.until(PushState::SAFE_STOP,2000) && s.out.reason=="demo_next_trip_ready");
+        assert(s.until(PushState::SAFE_STOP,2000) && s.out.reason=="demo_next_trip_unverified");
       }
     }
     { // Blocked by the zone rim near the front edge: release by stall instead of ramming until timeout.
@@ -458,6 +459,15 @@ int main(int argc, char **argv) {
         assert(s.until(PushState::CARRY,300) && s.out.reason=="assumed_capture");
         assert(s.until(PushState::RAISE_RELEASE,600) && s.out.reason=="assumed_drop_point_stalled");
     }
+    { // 卡在边框前较远处（第37趟 hold_y≈-0.08）：放宽的卡停窗口内同样按停滞释放，而不是空转到超时。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;t.assume_stall_near_m=.12f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.py_max=-.09f-s.tune.hold_center_y_m;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::CARRY,300) && s.out.reason=="assumed_capture");
+        assert(s.until(PushState::RAISE_RELEASE,900) && s.out.reason=="assumed_drop_point_stalled");
+    }
     { // 视觉判块：块已在区内（近端距前沿≥done_y）则推入提前结束，核验阶段按视觉判进区。
         TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
         Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
@@ -467,9 +477,34 @@ int main(int argc, char **argv) {
         s.cargo_on=true;s.cargo_zone={s.tune.supply_half_x_m,.12f};
         assert(s.until(PushState::RAISE_RELEASE,600) && s.out.reason=="assumed_push_in_done");
         assert(s.py+s.tune.hold_center_y_m<s.tune.assume_push_depth_m-.05f);
+        assert(s.py+s.tune.hold_center_y_m>=s.tune.assume_inside_min_hold_y_m-.02f); // 框自身须已越过前沿一定深度才信“块已进区”
         assert(s.until(PushState::TURN_SCAN,1500) && s.out.reason=="delivered_visual");
         const std::string ev=s.task.takeDropZoneEvent();
         assert(ev.find("[CARGO_ZONE] event=push_inside")!=std::string::npos && ev.find("event=verify")!=std::string::npos);
+    }
+    for(int hard=0;hard<2;++hard){ // 翻框前须确认真进区：推入深度不够时继续下压；超过硬上限才放弃确认
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;t.assume_enter_confirm=true;
+        t.assume_enter_hold_y_m=hard?.90f:.22f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::ENTER,2000) && s.out.reason=="assumed_release_then_push");
+        assert(s.until(PushState::RAISE_RELEASE,1500) && s.out.reason=="assumed_push_in_done");
+        const float depth=s.py+s.tune.hold_center_y_m;
+        const std::string ev=s.task.takeDropZoneEvent();
+        assert(ev.find("event=push_unconfirmed")!=std::string::npos);
+        if(!hard){assert(depth>=.21f&&ev.find("event=push_unconfirmed_giveup")==std::string::npos);}
+        else{assert(depth>=s.tune.assume_enter_max_hold_y_m-.02f&&ev.find("event=push_unconfirmed_giveup")!=std::string::npos);}
+    }
+    { // 默认关闭：行为与原先一致（深度到 assume_push_depth_m 即翻框）
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;t.assume_enter_hold_y_m=.90f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::ENTER,2000) && s.out.reason=="assumed_release_then_push");
+        assert(s.until(PushState::RAISE_RELEASE,1500) && s.out.reason=="assumed_push_in_done");
+        assert(s.py+s.tune.hold_center_y_m<s.tune.assume_push_depth_m+.06f);
+        assert(s.task.takeDropZoneEvent().find("push_unconfirmed")==std::string::npos);
     }
     { // 深松手：松开时块已过前沿，后退中视觉看到块在区内则跳过推入直接核验。
         TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
@@ -481,6 +516,62 @@ int main(int argc, char **argv) {
         assert(s.until(PushState::TURN_SCAN,1500) && s.out.reason=="delivered_visual");
         const std::string ev=s.task.takeDropZoneEvent();
         assert(ev.find("event=inside_after_release")!=std::string::npos && ev.find("event=push_done")==std::string::npos);
+    }
+    { // 核验只认视觉定位：推算认为块在区内但无定位 → 不判视觉通过，先等、再切远俯仰找角点；等不到按“推算”记并标明。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        s.cargo_on=true;s.cargo_zone={s.tune.supply_half_x_m,.12f};
+        assert(s.until(PushState::VERIFY_DELIVERY,2500) && s.out.reason=="assumed_inside_after_release");
+        s.vref_visible=false;
+        bool far=false;int n=0;
+        for(;n<400 && s.out.state==PushState::VERIFY_DELIVERY;++n){s.tick();if(s.out.motion.camera_pitch_cdeg==s.tune.far_pitch_cdeg)far=true;}
+        assert(s.out.state==PushState::TURN_SCAN && s.out.reason=="delivered_unverified");
+        assert(far && n*50000ull>=s.tune.assume_verify_fix_wait_us-100000);
+        assert(s.task.takeDropZoneEvent().find("fix=0 repush=0 in=1")==std::string::npos);
+    }
+    { // 定位晚到：先无定位等待，随后拿到定位且块在区内 → 才判 delivered_visual。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        s.cargo_on=true;s.cargo_zone={s.tune.supply_half_x_m,.12f};
+        assert(s.until(PushState::VERIFY_DELIVERY,2500));
+        s.vref_visible=false;
+        for(int i=0;i<80;++i){s.tick();assert(s.out.state==PushState::VERIFY_DELIVERY);}
+        s.vref_visible=true;
+        assert(s.until(PushState::TURN_SCAN,200) && s.out.reason=="delivered_visual");
+    }
+    { // 定位到了但块在区外（压在边框外）→ 重推，而不是记成功。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        s.cargo_on=true;s.cargo_zone={s.tune.supply_half_x_m,.12f};
+        assert(s.until(PushState::VERIFY_DELIVERY,2500));
+        s.cargo_zone={s.tune.supply_half_x_m,-.02f};
+        assert(s.until(PushState::ENTER,200) && s.out.reason=="assumed_verify_repush");
+        assert(s.task.takeDropZoneEvent().find("event=verify_outside_repush")!=std::string::npos);
+    }
+    { // 后退后前推前的视觉对准：货物偏在侧前方时先原地转向对准，再按方位追踪，框到达时货物须在框正前方。
+      for(int align=0;align<2;++align){
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;t.assume_align_push=align;t.assume_slant_max_rad=0.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::ENTER,2000) && s.out.reason=="assumed_release_then_push");
+        s.cargo_on=true;s.cargo_zone={s.px+.12f,.03f};
+        bool turned=false;float lastx=9.f;
+        for(int i=0;i<900 && s.out.state==PushState::ENTER;++i){
+            s.tick();
+            if(s.out.reason=="assumed_push_align_turn")turned=true;
+            if(!s.in.cargo_body.empty()&&s.in.cargo_body[0].y-s.tune.hold_center_y_m<.15f)lastx=s.in.cargo_body[0].x;
+        }
+        const std::string ev=s.task.takeDropZoneEvent();
+        if(align){assert(turned&&ev.find("event=push_aligned")!=std::string::npos&&std::abs(lastx)<.05f);}
+        else assert(!turned);
+      }
     }
     { // 卡住重推：块停在前沿、框前进不了；每次重推加长助跑，最多2次后放弃并抬框退出。
         TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
@@ -500,6 +591,92 @@ int main(int argc, char **argv) {
         assert(s.until(PushState::RAISE_RELEASE,1500) && s.out.reason=="assumed_push_in_done");
         const std::string ev=s.task.takeDropZoneEvent();
         assert(ev.find("event=stuck_giveup")!=std::string::npos && ev.find("event=stuck_repush")!=std::string::npos);
+    }
+    { // IMU判被边框顶住：近区内按IMU释放（早于视觉/推算的+0.04释放点）；远离区域时IMU误报不释放。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::CARRY,300) && s.out.reason=="assumed_capture");
+        s.in.imu_blocked_us=1000000;
+        assert(s.until(PushState::RAISE_RELEASE,900) && s.out.reason=="assumed_drop_point_imu_blocked");
+        const float e=s.py+s.tune.hold_center_y_m;
+        assert(e<-.12f&&e>-.40f);
+        assert(s.task.takeDropZoneEvent().find("event=release_stall_imu")!=std::string::npos);
+    }
+    { // ENTER中IMU判卡住（货物不可见也成立）：重推2次后放弃并抬框，由核验阶段再用视觉判进区。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::ENTER,2000) && s.out.reason=="assumed_release_then_push");
+        s.in.imu_blocked_us=1000000;
+        for(int n=0;n<2;++n){
+            assert(s.until(PushState::BACK_OUT,200) && s.out.reason=="assumed_stuck_repush");
+            s.in.imu_blocked_us=0;
+            assert(s.until(PushState::ENTER,600) && s.out.reason=="assumed_release_then_push");
+            s.in.imu_blocked_us=1000000;
+        }
+        assert(s.until(PushState::RAISE_RELEASE,200));
+        const std::string ev=s.task.takeDropZoneEvent();
+        assert(ev.find("event=stuck_giveup")!=std::string::npos&&ev.find("event=stuck_repush")!=std::string::npos);
+        assert(ev.find("event=push_inside")==std::string::npos);
+    }
+    { // B：框被图像底边截断、或块偏离目标半区，都不能当作“已在区内”（跳过推入）。
+      for(int k=0;k<2;++k){
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        s.cargo_on=true;s.cargo_zone={s.tune.supply_half_x_m+(k?.20f:0.f),.12f};s.cargo_clip=k==0;
+        for(int i=0;i<2500 && s.out.state!=PushState::VERIFY_DELIVERY && s.out.state!=PushState::SAFE_STOP;++i){s.tick();assert(s.out.reason!="assumed_inside_after_release");}
+        assert(s.task.takeDropZoneEvent().find("event=inside_after_release")==std::string::npos);
+      }
+    }
+    { // A：核验无区定位时用图像回退：框底高过区前沿一定比例才算进区；贴边/被截断不算，并触发重推。
+      for(int k=0;k<3;++k){
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        s.cargo_on=true;s.cargo_zone={s.tune.supply_half_x_m,.12f};
+        assert(s.until(PushState::VERIFY_DELIVERY,2500) && s.out.reason=="assumed_inside_after_release");
+        s.vref_visible=false;s.img_frac=k==0?.5f:k==1?.02f:.5f;s.cargo_clip=k==2;
+        if(k==0){
+            assert(s.until(PushState::TURN_SCAN,100) && s.out.reason=="delivered_visual");
+            assert(s.until(PushState::SAFE_STOP,400) && s.out.reason=="demo_next_trip_ready");
+        } else {
+            assert(s.until(PushState::ENTER,100) && s.out.reason=="assumed_verify_repush");
+        }
+      }
+    }
+    { // C：直线推进也要有主动偏航探测：进 ENTER 满 1.2 s 后才出现，且左右交替；平时(之前)不发偏航。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;t.assume_probe_gap_us=300000;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::ENTER,2000) && s.out.reason=="assumed_release_then_push");
+        s.py_max=s.py+.01f;
+        const uint64_t t0=s.in.now_us;float first=0,second=0;bool prev=false;
+        for(int i=0;i<200 && s.out.state==PushState::ENTER;++i){
+            s.tick();
+            const bool probe=s.out.reason=="assumed_push_imu_probe"&&s.out.motion.wz_rps!=0;
+            if(probe&&!prev){
+                assert(s.in.now_us-t0>=s.tune.assume_probe_first_us);
+                if(first==0)first=s.out.motion.wz_rps;else if(second==0)second=s.out.motion.wz_rps;
+            }
+            prev=probe;
+        }
+        assert(first!=0&&second!=0&&first*second<0);
+    }
+    { // 未达持续时间的IMU卡住不触发（短暂顿挫不算）。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::ENTER,2000) && s.out.reason=="assumed_release_then_push");
+        s.in.imu_blocked_us=s.tune.assume_imu_block_us-100000;
+        for(int i=0;i<20;++i){s.tick();assert(s.out.reason!="assumed_stuck_repush");}
     }
     { // 目标半区由货物类别决定并在整趟锁定：物资→左(-0.15)，伤员→右(+0.15)，日志可见。
       for(int inj=0;inj<2;++inj){
@@ -542,8 +719,8 @@ int main(int argc, char **argv) {
       assert(s.until(PushState::VERIFY_DELIVERY,400) && s.out.reason=="assumed_backed_out");
       const float back=std::hypot(s.px-x1,s.py-y1);
       assert(back>=s.tune.assume_back_m-.01f && back<=s.tune.assume_back_m+.03f);
-      assert(s.until(PushState::TURN_SCAN,100) && s.out.delivered_total==1);
-      assert(s.until(PushState::SAFE_STOP,400) && s.out.reason=="demo_next_trip_ready");
+      assert(s.until(PushState::TURN_SCAN,200) && s.out.delivered_total==1 && s.out.reason=="delivered_unverified");
+      assert(s.until(PushState::SAFE_STOP,400) && s.out.reason=="demo_next_trip_unverified");
       for(auto st:{PushState::CAPTURE_FAIL,PushState::LOST_HOLD,PushState::ABORT_DROP})assert(!s.visited.count(st));
     }
     { // Without the assumption the same evidence gap still stops at VERIFY_CAPTURE.
@@ -765,6 +942,57 @@ int main(int argc, char **argv) {
         for(int i=0;i<40&&s.out.state==PushState::PREPARE;++i)s.tick();
         assert(s.out.state!=PushState::SCAN&&s.out.capture_target_id==s.in.target_id);
     }
+    { // 扫掠通道内有竖放伤员：低框原地转向扫开（IMU量角），转回后再进入PREPARE；不在通道内/过期/就是目标本身则不动。
+        TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
+        struct R{int outs=0,backs=0,turn_signs=0;bool prepared=false,left_approach_early=false;float first_wz=0,max_phi=0;};
+        const auto run=[&](float ux,float uy,bool fresh,bool persist,int ticks){
+            Sim s(t);s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+            s.in.distance_m=.19f;R r;bool blocker=true;
+            for(int i=0;i<ticks&&!r.prepared;++i){
+                if(blocker){s.in.upright_body={{ux,uy}};if(fresh)s.in.upright_ts_us=s.in.now_us;}
+                s.tick();
+                r.max_phi=std::max(r.max_phi,std::abs(s.phi));
+                if(s.out.state==PushState::PREPARE){r.prepared=true;break;}
+                if(s.out.state!=PushState::APPROACH){r.left_approach_early=true;break;}
+                if(s.out.reason=="sweep_upright_out"&&s.out.motion.wz_rps!=0){++r.outs;if(!r.first_wz)r.first_wz=s.out.motion.wz_rps;assert(s.out.motion.vx_mps==0&&s.out.motion.gripper_offset==20);}
+                if(s.out.reason=="sweep_upright_back"&&s.out.motion.wz_rps!=0)++r.backs;
+                if(!persist&&r.backs>0)blocker=false;
+            }
+            r.turn_signs=int(std::abs(s.phi)*1000);
+            return r;
+        };
+        auto right=run(.10f,.19f,true,false,200);
+        assert(right.outs>0&&right.backs>0&&right.first_wz<0&&right.max_phi>=.55f&&right.max_phi<=.8f&&right.prepared&&!right.left_approach_early);
+        assert(right.turn_signs<120); // returned to the original heading before PREPARE
+        auto left=run(-.10f,.19f,true,false,200);
+        assert(left.outs>0&&left.first_wz>0&&left.prepared);
+        auto wide=run(.22f,.19f,true,false,200); // outer part of the widened corridor
+        assert(wide.outs>0&&wide.first_wz<0&&wide.prepared);
+        auto far=run(.40f,.19f,true,false,200);
+        assert(far.outs==0&&far.prepared);
+        auto behind=run(.10f,.45f,true,false,200); // beyond target + extra reach
+        assert(behind.outs==0&&behind.prepared);
+        auto self=run(.02f,.19f,true,false,200); // same physical object as the target
+        assert(self.outs==0&&self.prepared);
+        auto stale=run(.10f,.19f,false,false,200);
+        assert(stale.outs==0&&stale.prepared);
+        { // sweep time is not charged to the approach budget: no approach_timeout back to SCAN, and the sweep turns at sweep_wz
+            TaskTuning b=t;b.approach_budget_us=1500000;
+            Sim s(b);s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+            s.in.distance_m=.19f;bool swept=false,prepared=false;float minwz=9;
+            for(int i=0;i<200&&!prepared;++i){
+                if(!swept)s.in.upright_body={{.10f,.19f}},s.in.upright_ts_us=s.in.now_us;
+                s.tick();
+                if(s.out.reason=="sweep_upright_out"||s.out.reason=="sweep_upright_back"){swept=true;minwz=std::min(minwz,std::abs(s.out.motion.wz_rps));}
+                if(s.out.reason=="sweep_upright_done")s.in.upright_body.clear();
+                assert(s.out.state==PushState::APPROACH||s.out.state==PushState::PREPARE);
+                prepared=s.out.state==PushState::PREPARE;
+            }
+            assert(swept&&prepared&&minwz>=b.sweep_wz-1e-4f);
+        }
+        auto stuck=run(.10f,.19f,true,true,600); // block never leaves: two attempts, then carry on
+        assert(stuck.outs>0&&stuck.prepared&&stuck.left_approach_early==false);
+    }
     { // 假设模式：20°阶段进入PREPARE/RUSH后保持20°，不为开框切40°。
         TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.near_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
         Sim s(t);s.in.distance_m=.5f;
@@ -874,6 +1102,39 @@ int main(int argc, char **argv) {
         assert(s.out.state==PushState::MID_REACQUIRE&&stopped(s.out.motion));
         const auto rejected=s.task.rejectedTargets(s.in.now_us);
         assert(std::find(rejected.begin(),rejected.end(),101)!=rejected.end());
+    }
+    { // 张框距离内航向略超限：底盘小wz(<0.5)转不动(实测)，改用0.55rad/s按IMU量角的短脉冲，转到位再张框；原地小wz会一直卡住。
+        struct R{bool prepared=false,blocked_moved=false;int pulse_ticks=0;float first_wz=0,max_dev=0;bool bad_wz=false;};
+        const auto run=[&](float e0,bool pulse,int ticks,bool turn_blocked){
+            TaskTuning t;t.rush_pulse_turn=pulse;
+            Sim s(t);s.in.distance_m=.3f;s.in.heading_error=e0;assert(s.until(PushState::APPROACH,30));
+            if(turn_blocked){s.in.directional_clearance_valid=true;s.in.turn_safe=false;s.in.arc_safe=false;}
+            const float p0=s.phi;R r;
+            for(int i=0;i<ticks&&!r.prepared;++i){
+                s.in.heading_error=e0-(s.phi-p0);
+                s.tick();
+                if(s.out.state==PushState::PREPARE){r.prepared=true;break;}
+                assert(s.out.state==PushState::APPROACH);
+                if(s.out.reason=="rush_pulse_turn"&&s.out.motion.wz_rps!=0){
+                    ++r.pulse_ticks;if(!r.first_wz)r.first_wz=s.out.motion.wz_rps;
+                    if(std::abs(s.out.motion.wz_rps)!=t.rush_pulse_wz||s.out.motion.vx_mps!=0)r.bad_wz=true;
+                }
+                if(turn_blocked&&s.out.motion.wz_rps!=0)r.blocked_moved=true;
+                r.max_dev=std::max(r.max_dev,std::abs(s.phi-p0));
+                if(std::abs(s.out.motion.wz_rps)<.5f)s.out.motion.wz_rps=0; // base dead band
+            }
+            return r;
+        };
+        auto stuck=run(.10f,false,200,false);
+        assert(!stuck.prepared&&stuck.pulse_ticks==0&&stuck.max_dev<1e-4f); // old behaviour: commands 0.4, base never turns
+        auto left=run(.10f,true,400,false);
+        assert(left.prepared&&left.pulse_ticks>0&&left.first_wz>0&&!left.bad_wz&&left.max_dev>.07f&&left.max_dev<.14f);
+        auto right=run(-.15f,true,400,false);
+        assert(right.prepared&&right.first_wz<0&&!right.bad_wz&&right.max_dev>.11f&&right.max_dev<.20f);
+        auto big=run(.30f,true,100,false); // beyond rush_pulse_max_rad: legacy rotate-in-place command, no pulse
+        assert(big.pulse_ticks==0);
+        auto blocked=run(.10f,true,100,true); // unsafe turn stays blocked even for a pulse
+        assert(!blocked.prepared&&!blocked.blocked_moved);
     }
     { // Forward permission alone cannot authorize an unsafe turn or curved approach.
         Sim s;s.in.distance_m=.8f;assert(s.until(PushState::APPROACH,30));
@@ -1123,8 +1384,8 @@ int main(int argc, char **argv) {
     }
     { // Blue in PREPARE must never start a capture rush.
         Sim s; s.in.corridor = inv(1,0,0,1);
-        for (int i=0;i<80 && s.out.reason!="corridor_dangerous";++i) s.tick();
-        assert(s.out.reason=="corridor_dangerous" && !s.visited.count(PushState::RUSH));
+        for (int i=0;i<80 && s.out.reason!="corridor_dangerous_back_off";++i) s.tick();
+        assert(s.out.reason=="corridor_dangerous_back_off" && !s.visited.count(PushState::RUSH));
     }
     for (bool at_close : {false,true}) {
         Sim s; s.toRush(); s.in.distance_m=at_close?.19f:.30f;
@@ -1140,8 +1401,8 @@ int main(int argc, char **argv) {
     }
     { // Too many supplies in the corridor: the rush is not started.
         Sim s; s.in.corridor = inv(4);
-        for (int i = 0; i < 40 && s.out.reason != "corridor_too_many_supplies"; ++i) s.tick();
-        assert(s.out.reason == "corridor_too_many_supplies" && !s.visited.count(PushState::RUSH));
+        for (int i = 0; i < 40 && s.out.reason != "corridor_too_many_supplies_back_off"; ++i) s.tick();
+        assert(s.out.reason == "corridor_too_many_supplies_back_off" && !s.visited.count(PushState::RUSH));
     }
     { // ... nor when four end up held after closing.
         Sim s; s.in.corridor = inv(2); s.toRush(); s.hold(inv(3));
@@ -1149,9 +1410,9 @@ int main(int argc, char **argv) {
     }
     { // Before the first delivery an occluded corridor might hide a core supply.
         Sim s; s.in.corridor_occlusion_free = false;
-        for (int i = 0; i < 40 && s.out.reason != "corridor_occluded"; ++i) s.tick();
-        assert(s.out.reason == "corridor_occluded" && !s.visited.count(PushState::RUSH));
-        assert(s.out.state == PushState::SCAN);
+        for (int i = 0; i < 40 && s.out.reason != "corridor_occluded_back_off"; ++i) s.tick();
+        assert(s.out.reason == "corridor_occluded_back_off" && !s.visited.count(PushState::RUSH));
+        assert(s.out.state == PushState::LOST_HOLD);
     }
     { // Incomplete corridor evidence holds the robot stopped until the prepare budget expires.
         Sim s; s.in.corridor_complete = false;
@@ -1384,5 +1645,160 @@ int main(int argc, char **argv) {
     assert(makeTargetAreas("red") == std::vector<std::string>{"red_safe_zone"});
     assert(makeTargetAreas("blue") == std::vector<std::string>{"blue_safe_zone"});
     assert(makeTargetBalls("red").size() == 3);
+    { // MotionWatch: commanded but vibration-free for >=1.5 s is flagged; real vibration or no command is not.
+        MotionWatch w;std::array<float,3> still{0,0,9.8f},zero{0,0,0};
+        uint64_t t=1000000;
+        for(int i=0;i<200;++i,t+=10000)w.feed(t,"CARRY",.3f,0,true,true,still,zero,zero);
+        assert(w.suspect()&&w.suspectTotalUs()>=400000&&w.stateSuspectUs("CARRY")>0);
+        assert(w.takeEvents().find("[MOTION_EVENT] begin state=CARRY")!=std::string::npos);
+        MotionWatch v;
+        for(int i=0;i<200;++i,t+=10000){std::array<float,3> a{0,0,9.8f+((i&1)?.8f:-.8f)};v.feed(t,"CARRY",.3f,0,true,true,a,zero,zero);}
+        assert(!v.suspect()&&v.suspectTotalUs()==0&&v.stateCmdUs("CARRY")>0);
+        MotionWatch n;
+        for(int i=0;i<200;++i,t+=10000)n.feed(t,"SCAN",0,0,true,true,still,zero,zero);
+        assert(!n.suspect()&&n.stateCmdUs("SCAN")==0);
+        MotionWatch o;
+        for(int i=0;i<200;++i,t+=10000)o.feed(t,"CARRY",.3f,0,false,true,still,zero,zero);
+        assert(!o.suspect());
+        assert(w.line().find("[MOTION] state=CARRY")!=std::string::npos);
+    }
+    { // MotionWatch blocked: 前进+指令转向，陀螺响应占比<0.16持续一个窗口才算被顶住；正常转向、直行、无指令、换状态都不算。
+        std::array<float,3> acc{0,0,9.8f},turn_slow{0,0,.05f},turn_ok{0,0,.18f},rpy{0,0,0};
+        uint64_t t=1000000;
+        MotionWatch b;
+        for(int i=0;i<300;++i,t+=10000)b.feed(t,"ENTER",.3f,i&64?.55f:-.55f,true,true,acc,turn_slow,rpy);
+        assert(b.blockedUs()>=600000&&b.blockRatio()>=0&&b.blockRatio()<.16f);
+        assert(b.takeEvents().find("[MOTION_EVENT] blocked_begin state=ENTER")!=std::string::npos);
+        assert(b.line().find("blocked_ms=")!=std::string::npos);
+        b.feed(t,"BACK_OUT",-.2f,0,true,true,acc,turn_slow,rpy);
+        assert(b.blockedUs()==0);
+        MotionWatch f;
+        for(int i=0;i<300;++i,t+=10000)f.feed(t,"ENTER",.3f,.55f,true,true,acc,turn_ok,rpy);
+        assert(f.blockedUs()==0);
+        MotionWatch g;
+        for(int i=0;i<300;++i,t+=10000)g.feed(t,"ENTER",.3f,0,true,true,acc,turn_slow,rpy);
+        assert(g.blockedUs()==0);
+        MotionWatch h;
+        for(int i=0;i<300;++i,t+=10000)h.feed(t,"ENTER",.3f,.55f,false,true,acc,turn_slow,rpy);
+        assert(h.blockedUs()==0);
+        MotionWatch k;
+        for(int i=0;i<120;++i,t+=10000)k.feed(t,"ENTER",.3f,.55f,true,true,acc,turn_slow,rpy);
+        for(int i=0;i<120;++i,t+=10000)k.feed(t,"ENTER",.3f,.55f,true,true,acc,turn_ok,rpy);
+        assert(k.blockedUs()==0);
+    }
+    { // field_carry (main path): transport/release/push logic follows the demo, capture stays strict.
+        TaskTuning t;t.field_carry=true;
+        { // The load vanishing from the NEAR view during the carry is not a LOST_HOLD, and a missing drop revalidation does not freeze the release.
+            Sim s(t);s.toCarry();s.tick();s.hold({});s.drop_available=false;
+            bool lost=false;
+            for(int i=0;i<600&&s.out.state!=PushState::RAISE_RELEASE;++i){s.tick();lost=lost||s.out.state==PushState::LOST_HOLD;}
+            assert(!lost && s.out.state==PushState::RAISE_RELEASE);
+        }
+        { // Strict capture is untouched: without multi-view evidence the capture is not credited.
+            Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);s.multi_evidence=false;
+            s.toRush();s.hold(inv(1));
+            for(int i=0;i<200;++i){s.tick();assert(s.out.state!=PushState::CARRY);assert(s.out.reason!="assumed_capture");}
+        }
+        { // Without field_carry the same loss still ends the trip in LOST_HOLD (strict path unchanged).
+            Sim s;s.toCarry();s.tick();s.hold({});
+            assert(s.until(PushState::LOST_HOLD,200));
+        }
+    }
+    { // Other objects in the PREPARE corridor: more frames to confirm, then keep the frame up, reverse and search again.
+        auto prepareTicks = [](int frames) {
+            TaskTuning t; t.corridor_confirm_frames = frames;
+            Sim s(t); s.in.corridor = inv(1,0,0,1);
+            int n = 0;
+            while (s.out.state != PushState::LOST_HOLD && n < 400) { s.tick(); ++n; }
+            assert(s.out.state == PushState::LOST_HOLD && !s.visited.count(PushState::RUSH));
+            return n;
+        };
+        assert(prepareTicks(6) - prepareTicks(3) == 3);
+        TaskTuning ft; ft.corridor_confirm_frames = 6;
+        Sim s(ft); s.in.corridor = inv(1,0,0,1);
+        bool reversed = false, lowered = false;
+        bool held = false;
+        for (int i = 0; i < 600 && !(held && s.out.state == PushState::SCAN); ++i) {
+            s.tick();
+            if (s.out.state == PushState::LOST_HOLD) { held = true; if (s.out.motion.vx_mps < 0) reversed = true; }
+            if (s.out.state == PushState::LOWER_FRAME || s.out.state == PushState::RUSH) lowered = true;
+        }
+        assert(reversed && !lowered && s.out.state == PushState::SCAN);
+        assert(s.task.rejectedTargets(s.in.now_us).empty()); // first block: search again, no blacklist
+    }
+    { // Blocked again and again: the target is blacklisted after corridor_retry_max back-offs.
+        Sim s; s.in.corridor = inv(1,0,0,1);
+        int backoffs = 0; PushState prev = s.out.state;
+        for (int i = 0; i < 4000 && s.task.rejectedTargets(s.in.now_us).empty(); ++i) {
+            s.tick();
+            if (s.out.state == PushState::LOST_HOLD && prev != PushState::LOST_HOLD) ++backoffs;
+            prev = s.out.state;
+        }
+        assert(!s.task.rejectedTargets(s.in.now_us).empty() && backoffs == s.tune.corridor_retry_max + 1);
+    }
+    { // Without zone geometry the back-off is blind: corridor_back_m x motion ratio of commanded reverse; unsafe rear skips it.
+        for (bool rear_safe : {true, false}) {
+            TaskTuning bt; bt.back_speed = .32f; // field speed: the 0.8 commanded fits the retreat budget
+            Sim s(bt); s.in.corridor = inv(1,0,0,1); s.in.retreat_safe = rear_safe;
+            assert(s.until(PushState::PREPARE, 80));
+            s.zone_visible = false;
+            float back = 0; bool held = false;
+            for (int i = 0; i < 800 && !(held && s.out.state == PushState::SCAN); ++i) {
+                s.tick();
+                if (s.out.state == PushState::LOST_HOLD) { held = true; back += -std::min(0.f, s.out.motion.vx_mps) * .05f; }
+            }
+            const float want = s.tune.corridor_back_m * s.tune.assume_motion_ratio;
+            assert(held && s.out.state == PushState::SCAN);
+            if (rear_safe) assert(back >= want - .05f && back <= want + .05f);
+            else assert(back < .05f && s.out.reason == "corridor_back_off_unsafe");
+        }
+    }
+    { // field_rush: ID rebound after the frame opens, scaled rush limit, blind finish below view (strict path unchanged).
+        for (int mode = 0; mode < 3; ++mode) { // 0 strict, 1 field_rush near, 2 field_rush far (not the same object)
+            TaskTuning ft; ft.field_rush = mode > 0; ft.corridor_confirm_frames = 3;
+            Sim s(ft); bool switched = false, relost = false;
+            for (int i = 0; i < 200 && !relost && !s.visited.count(PushState::RUSH); ++i) {
+                s.tick();
+                if (!switched && s.out.state == PushState::PREPARE && s.out.reason == "open_confirmed_return_to_tracking_pitch") {
+                    switched = true; s.in.target_id = 9; if (mode == 2) s.in.distance_m += .30f;
+                }
+                if (switched && s.out.state == PushState::SCAN) relost = true;
+            }
+            assert(switched);
+            if (mode == 1) assert(s.visited.count(PushState::RUSH) && !relost);
+            else assert(relost && !s.visited.count(PushState::RUSH));
+        }
+        for (bool fr : {false, true}) {
+            TaskTuning ft; ft.field_rush = fr;
+            Sim s(ft); s.in.distance_m = .30f;
+            s.toRush();
+            bool failed = false;
+            for (int i = 0; i < 400 && s.out.state != PushState::LOWER_FRAME && !failed; ++i) { s.tick(); failed = s.out.state == PushState::CAPTURE_FAIL; }
+            if (fr) assert(s.out.state == PushState::LOWER_FRAME && !failed);
+            else assert(failed && s.out.reason == "rush_overrun");
+        }
+        for (bool fr : {false, true}) {
+            TaskTuning ft; ft.field_rush = fr;
+            Sim s(ft); s.in.distance_m = .30f;
+            s.toRush();
+            for (int i = 0; i < 3; ++i) s.tick();
+            s.in.target_valid = false;
+            bool drove = false, failed = false;
+            for (int i = 0; i < 400 && s.out.state == PushState::RUSH; ++i) { s.tick(); drove = drove || s.out.motion.vx_mps > 0; failed = s.out.state == PushState::CAPTURE_FAIL; }
+            if (fr) assert(s.out.state == PushState::LOWER_FRAME && drove && s.out.reason == "assumed_enclosure_target_below_view");
+            else assert(failed && s.out.reason == "rush_target_lost");
+        }
+    }
+    { // field_rush: unconfirmed multi-view credits the capture; a measured inventory conflict stays fatal.
+        TaskTuning ft; ft.field_rush = true;
+        { Sim s(ft); s.tune.require_multi_view = true; s.task = PushTask(s.tune); s.multi_evidence = false;
+          s.toRush(); s.hold(inv(1));
+          assert(s.until(PushState::CARRY, 300) && s.out.reason == "assumed_capture"); }
+        { Sim s(ft); s.tune.require_multi_view = true; s.task = PushTask(s.tune);
+          s.toRush(); s.hold(inv(2));
+          bool credited = false;
+          for (int i = 0; i < 300 && s.out.state != PushState::SAFE_STOP; ++i) { s.tick(); credited = credited || s.out.reason == "assumed_capture"; }
+          assert(!credited && s.out.state == PushState::SAFE_STOP && s.out.reason == "multi_view_inventory_conflict"); }
+    }
     std::cout << "Capture, transport rules, carry, delivery, drop and stop checks passed\n";
 }

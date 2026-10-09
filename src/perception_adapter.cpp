@@ -23,6 +23,7 @@ PushObservation makePushObservation(const std::vector<SegDetection>& detections,
     for(const auto& d:detections) {
         if((locked_id>=0 && d.track_id!=locked_id && !(allow_green_preemption && d.label=="ordinary_supply")) ||
            std::find(rejected.begin(),rejected.end(),d.track_id)!=rejected.end())continue;
+        if(d.injured_upright_rejected)continue; // on-end injured block cannot be gripped sideways
         if((search||require_geometry) && (!d.ground_position_valid || !d.ground_contact_valid ||
            !std::isfinite(d.body_xy_m.x)||!std::isfinite(d.body_xy_m.y)||d.body_xy_m.y<=0))continue;
         if(search ? targetKind(d.label)==TargetKind::UNKNOWN : !targetSelectable(d.label,first))continue;
