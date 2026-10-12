@@ -2,6 +2,7 @@
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 namespace rescue {
 void ControlledField::invalidate(const std::string& why) {
     reason_=why;stable_frames_=0;stable_since_=last_frame_=0;last_objects_.clear();
@@ -10,6 +11,12 @@ void ControlledField::invalidate(const std::string& why) {
 void ControlledField::update(PushObservation& in,const std::vector<SegDetection>& detections,
         const ZoneHalves& halves,cv::Size size,const PushOutput& previous,bool mapping,bool ignore_clearance) {
     in.clearance_checks_disabled=ignore_clearance;
+    blockers_.clear();
+    const auto note=[&](const char* flag,const SegDetection& d,const char* why) {
+        std::ostringstream o;
+        o<<flag<<"<-id"<<d.track_id<<"("<<d.label<<","<<why<<",xy="<<d.body_xy_m.x<<","<<d.body_xy_m.y<<") ";
+        blockers_+=o.str();
+    };
     // Provenance: the user's explicit controlled test-area attestation. These are
     // not inferred from empty detection output and do not apply outside this mode.
     in.opponent_zone_clear=true;
@@ -23,13 +30,18 @@ void ControlledField::update(PushObservation& in,const std::vector<SegDetection>
         const float dy=std::max({-rear-q.y,0.f,q.y-front});
         return std::hypot(dx,dy)<=radius;
     };
-    for(const auto& d:detections) if(d.label=="dangerous_object" || targetKind(d.label)==TargetKind::UNKNOWN) {
+    // dangerous_object never restricts motion: driving past or pushing it is allowed; only carrying it
+    // is forbidden, which the corridor/held inventory checks (checkCorridor/checkTrip) enforce.
+    for(const auto& d:detections) if(targetKind(d.label)==TargetKind::UNKNOWN) {
         if(!d.ground_position_valid || !std::isfinite(d.body_xy_m.x)||!std::isfinite(d.body_xy_m.y)||
            targetKind(d.label)==TargetKind::UNKNOWN) {
-            in.path_safe=in.retreat_safe=in.turn_safe=in.arc_safe=in.jaw_open_safe=false;continue;
+            in.path_safe=in.retreat_safe=in.arc_safe=in.jaw_open_safe=false;
+            note("path/retreat/arc/jaw",d,"unlocated");
+            in.turn_safe=false;note("turn",d,"unknown_label");
+            continue;
         }
         if(!in.directional_clearance_valid) {
-            if(cv::norm(d.body_xy_m)<=body_radius_)in.path_safe=in.retreat_safe=false;
+            if(cv::norm(d.body_xy_m)<=body_radius_){in.path_safe=in.retreat_safe=false;note("path/retreat",d,"in_body");}
             continue;
         }
         // Blue is a 4cm cube. The bottom projection is a footprint edge, not its centre;
@@ -37,13 +49,14 @@ void ControlledField::update(PushObservation& in,const std::vector<SegDetection>
         const float radius=std::sqrt(2.f)*.04f;
         const float front=std::max(envelope_[0],envelope_[5]);
         const float left=std::max(envelope_[2],envelope_[4]/2),right=std::max(envelope_[3],envelope_[4]/2);
-        if(intersects(d.body_xy_m,radius,front+forward,envelope_[1],left,right))in.path_safe=false;
-        if(intersects(d.body_xy_m,radius,front,envelope_[1]+.2f,left,right))in.retreat_safe=false;
-        if(intersects(d.body_xy_m,radius,front,envelope_[1],left,right))in.jaw_open_safe=false;
-        if(cv::norm(d.body_xy_m)<=body_radius_+radius)in.turn_safe=false;
-        // A curved centre path may leave the straight corridor. Bound all headings
-        // conservatively by the full planned travel length about the current centre.
-        if(cv::norm(d.body_xy_m)<=body_radius_+radius+forward)in.arc_safe=false;
+        if(intersects(d.body_xy_m,radius,front+forward,envelope_[1],left,right)){in.path_safe=false;note("path",d,"corridor");}
+        if(intersects(d.body_xy_m,radius,front,envelope_[1]+.2f,left,right)){in.retreat_safe=false;note("retreat",d,"corridor");}
+        if(intersects(d.body_xy_m,radius,front,envelope_[1],left,right)){in.jaw_open_safe=false;note("jaw",d,"corridor");}
+        if(cv::norm(d.body_xy_m)<=body_radius_+radius){in.turn_safe=false;note("turn",d,"within_swept_radius");}
+        // Unknown objects keep the conservative bound over the full planned travel length about the current centre.
+        if(cv::norm(d.body_xy_m)<=body_radius_+radius+forward){
+            in.arc_safe=false;note("arc",d,"within_travel_radius");
+        }
     }
     // Explicit operator contact-test permission; never claim this is sensed clearance.
     if(ignore_clearance)

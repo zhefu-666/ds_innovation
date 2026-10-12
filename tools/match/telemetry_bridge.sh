@@ -37,7 +37,7 @@ PY
 if bridge_ready; then
   echo 'Foxglove bridge already running on 8765; reusing it.'
 else
-  python3 -u tools/remote_camera_telemetry/project_bridge.py &
+  python3 -u tools/remote_camera_telemetry/project_bridge.py 9>&- &
   bridge_pid=$!
   ready=0
   for ((i=0; i<30; ++i)); do
@@ -52,6 +52,6 @@ else
 fi
 
 
-echo "Browser: http://192.168.34.7:8080/"
-echo "Data: http://192.168.34.7:8080/status"
-echo "Foxglove: ws://192.168.34.7:8765"
+echo "Browser: http://192.168.175.7:8080/"
+echo "Data: http://192.168.175.7:8080/status"
+echo "Foxglove: ws://192.168.175.7:8765"

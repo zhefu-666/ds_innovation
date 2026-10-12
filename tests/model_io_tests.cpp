@@ -85,6 +85,16 @@ void detectorTests() {
     int old[]={1,11,4};failed=false;try{decodeModelOutput(cv::Mat(3,old,CV_32F,cv::Scalar(0)),image,bgr.size(),c,1);}catch(...){failed=true;}
     assert(failed); // old 7-class tensor no longer accepted
     c.require_instance_masks=true;failed=false;try{decodeModelOutput(raw,image,bgr.size(),c,1);}catch(...){failed=true;}assert(failed);
+    { // Close-range injured scores below the global threshold survive; other classes do not.
+        Config d;d.confidence=.5f;d.injured_confidence=.25f;
+        int dm[]={1,8,2};cv::Mat r2(3,dm,CV_32F,cv::Scalar(0));float *q=r2.ptr<float>();
+        for(int i=0;i<2;++i){q[i]=320;q[2+i]=320;q[4+i]=100;q[6+i]=100;}
+        q[5*2+0]=.3f; // orange (injured) index 1
+        q[6*2+1]=.3f; // green index 2
+        auto o=decodeModelOutput(r2,image,bgr.size(),d,1);
+        assert(o.size()==1&&o[0].label=="injured_person");
+        d.injured_confidence=.6f;assert(decodeModelOutput(r2,image,bgr.size(),d,1).empty());
+    }
 }
 // Fill one anchor of a [1,18,N] pose tensor; kpts in model pixels.
 void setAnchor(cv::Mat &t,int i,int cls,float score,const std::array<cv::Point2f,4> &k,const std::array<float,4> &v) {

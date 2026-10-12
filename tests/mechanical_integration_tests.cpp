@@ -21,6 +21,40 @@ int main(){
     for(int i=0;i<3;++i){small.timestamp_us=large.timestamp_us=150000+i*10000;s=selector.update({small,large},{100,100},500,true,150000+i*10000,false,.25);}
     assert(s.id==1&&s.mode=="mask_pixels");
     s=selector.update({small,illegal},{0,0},500,true,190000,false,.25);assert(!s.locked);
+    { // The same physical block re-IDed on every frame still confirms after three frames.
+        PixelSelector rid;PixelSelection p;
+        for(int i=0;i<3;++i){auto b=object(20+i,{40,40,30,30});b.timestamp_us=900000+i*10000;p=rid.update({b},{1000,1000},500,true,900000+i*10000,false,.25);}
+        assert(p.locked&&p.id==22);
+    }
+    { // The lock vanishes (frame occlusion) and a new id shows up seconds later: with a long relock window the candidate nearest the vanished lock wins over a slightly larger one far away.
+        const auto run=[&](uint64_t window){
+            PixelSelector sel;sel.setRelock(window,.10);PixelSelection p;uint64_t t=2000000;
+            for(int i=0;i<4;++i){auto a=object(40,{100,300,40,40});a.timestamp_us=t;p=sel.update({a},{1000,1000},500,true,t,false,.25);t+=100000;}
+            assert(p.locked&&p.id==40);
+            for(int i=0;i<30;++i){p=sel.update({},{1000,1000},500,true,t,false,.25);t+=100000;}
+            for(int i=0;i<4;++i){
+                auto near_=object(41,{110,310,40,40});auto far_=object(42,{700,300,50,50});near_.timestamp_us=far_.timestamp_us=t;
+                p=sel.update({near_,far_},{1000,1000},500,true,t,false,.25);t+=100000;
+            }
+            return p.id;
+        };
+        assert(run(4000000)==41&&run(1500000)==42);
+    }
+    { // Pile edge: an injured piece on the robot->target line in front of the larger block ranks it behind a clean one; relax levels lift that.
+        const auto run=[&](int relax){
+            PixelSelector lane;lane.setRelax(relax);PixelSelection p;
+            for(int i=0;i<3;++i){
+                const uint64_t t=700000+i*10000;
+                auto a=object(30,{10,10,60,60});a.body_xy_m={0,.60f};
+                auto in_front=object(31,{80,10,5,5},"injured_person");in_front.body_xy_m={.02f,.40f};
+                auto clean=object(32,{10,80,40,40});clean.body_xy_m={.40f,.50f};
+                a.timestamp_us=in_front.timestamp_us=clean.timestamp_us=t;
+                p=lane.update({a,in_front,clean},{200,200},500,true,t,true,.25);
+            }
+            return p.id;
+        };
+        assert(run(0)==32&&run(1)==30&&run(2)==30);
+    }
     { // prefer_label restricts the lock to the preferred class when it is visible, else falls back.
         PixelSelector pref;auto big=object(5,{10,10,60,60}),inj=object(6,{80,10,10,10},"injured_person");
         PixelSelection p;
@@ -59,6 +93,27 @@ int main(){
         for(int i=0;i<3;++i){edge.timestamp_us=ord.timestamp_us=980000+i*10000;p=cls.update({edge,ord},{100,100},2000,true,980000+i*10000,true,.25,{},"injured_person");}
         assert(p.locked&&p.id==12);
     }
+    { // A fresh acquisition prefers the uncrowded block over a larger one with an injured piece inside its footprint.
+        PixelSelector iso;auto pile=object(30,{10,10,50,50}),inj=object(31,{70,10,10,10},"injured_person"),lone=object(32,{10,70,30,30});
+        pile.body_xy_m={0,.8f};inj.body_xy_m={.05f,.82f};lone.body_xy_m={.5f,.8f};
+        PixelSelection p;
+        for(int i=0;i<3;++i){pile.timestamp_us=inj.timestamp_us=lone.timestamp_us=1000000+i*10000;p=iso.update({pile,inj,lone},{100,100},500,true,1000000+i*10000,false,.25);}
+        assert(p.locked&&p.id==32);
+        // A tiny but clean block (below 30% of the best value) is not preferred.
+        PixelSelector tiny;lone.box={10,70,10,10};
+        for(int i=0;i<3;++i){pile.timestamp_us=inj.timestamp_us=lone.timestamp_us=1100000+i*10000;p=tiny.update({pile,inj,lone},{100,100},500,true,1100000+i*10000,false,.25);}
+        assert(p.locked&&p.id==30);
+    }
+    { // A fresh acquisition prefers a legal pair (one ordinary neighbour) over a lone block, but not a trio.
+        auto a1=object(40,{10,10,30,30}),a2=object(41,{50,10,30,30}),lone=object(42,{10,60,30,30}),a3=object(43,{50,60,30,30});
+        a1.body_xy_m={0,.8f};a2.body_xy_m={.05f,.8f};lone.body_xy_m={.5f,.8f};a3.body_xy_m={.025f,.8f};
+        PixelSelection p;PixelSelector pr;
+        for(int i=0;i<3;++i){a1.timestamp_us=a2.timestamp_us=lone.timestamp_us=1200000+i*10000;p=pr.update({lone,a1,a2},{100,100},500,true,1200000+i*10000,true,.25);}
+        assert(p.locked&&(p.id==40||p.id==41));
+        PixelSelector trio;
+        for(int i=0;i<3;++i){a1.timestamp_us=a2.timestamp_us=a3.timestamp_us=lone.timestamp_us=1300000+i*10000;p=trio.update({a1,a2,a3,lone},{100,100},500,true,1300000+i*10000,true,.25);}
+        assert(p.locked&&p.id==42);
+    }
     // A challenger must exceed the hysteresis threshold for three consecutive new frames.
     PixelSelector hysteresis;small.mask.release();large.mask.release();
     small.box={10,10,20,20};large.box={40,10,10,10};
@@ -67,6 +122,16 @@ int main(){
     large.box={40,10,30,30};assert(rank(360000).id==1);assert(rank(380000).id==1);assert(rank(400000).id==2);
     assert(!hysteresis.update({small,large},{100,100},500,true,410000,false,.25).locked); // repeated captured frame
     assert(!rank(800000).locked); // gap breaks continuity
+    { // A short tracker dropout keeps the lock; only a re-IDed object at the old place takes over, not a neighbour.
+        PixelSelector g;auto big=object(1,{10,10,24,24}),nb=object(2,{60,10,20,20});
+        auto step=[&](uint64_t t,std::vector<SegDetection> v){for(auto& x:v)x.timestamp_us=t;return g.update(v,{100,100},500,true,t,false,.25);};
+        step(1000000,{big,nb});step(1020000,{big,nb});assert(step(1040000,{big,nb}).id==1);
+        auto r=step(1060000,{nb});assert(!r.locked&&r.id==-1&&r.reason=="lock_grace_waiting");
+        r=step(1080000,{nb});r=step(1100000,{nb});assert(!r.locked&&r.reason=="lock_grace_waiting"); // neighbour never inherits the lock
+        assert(step(1120000,{big,nb}).id==1); // original returns within grace: still locked, no re-confirmation
+        auto re=big;re.track_id=9;
+        step(1140000,{re,nb});step(1160000,{re,nb});assert(step(1180000,{re,nb}).id==9); // re-IDed cube relocked by position
+    }
     FrameView a{500,{{5,5},{95,5},{95,95},{5,95}},true,true},b=a;b.pitch_cdeg=2000;
     MultiViewCapture multi({a,b},{100,100});uint64_t now=1000000;
     auto d=object(1,{25,25,10,10});
@@ -101,6 +166,49 @@ int main(){
         MultiViewCapture body({a,b},{100,100});body.begin(t,9,6);
         for(int i=0;i<10;++i){t+=20000;g.timestamp_us=t;body.update(t,t,9,true,true,body.desiredPitch(),true,{g});}
         assert(body.result().verdict!=CaptureVerdict::Enclosed);
+    }
+    { // Row mode: pick the middle clean block of a left-right row by ground points.
+        const auto at=[](int id,float x,float y,const char* label){auto d=object(id,{10+id*8,10,6,6},label);d.body_xy_m={x,y};return d;};
+        std::vector<SegDetection> row={at(1,-.4f,.5f,"ordinary_supply"),at(2,-.2f,.5f,"dangerous_object"),at(3,0.f,.5f,"ordinary_supply"),at(4,.2f,.5f,"core_supply"),at(5,.4f,.5f,"ordinary_supply")};
+        auto p=RowSelector::pick(row,100000,false,.25f);
+        assert(p.id==3&&p.index==2&&p.seq=="GBGKG");
+        auto q=RowSelector::pick(row,100000,false,.25f,5);assert(q.id==5&&q.reason=="row_keep_lock");
+        // Fatal neighbours: blocks touching a dangerous piece are not skipped; they stay candidates and are listed in split_ids for PILE.
+        std::vector<SegDetection> bad={at(1,-.06f,.5f,"ordinary_supply"),at(2,0.f,.5f,"dangerous_object"),at(3,.06f,.5f,"ordinary_supply"),at(4,.5f,.5f,"ordinary_supply")};
+        auto b=RowSelector::pick(bad,100000,false,.25f);assert(b.id==3);
+        assert(std::count(b.split_ids.begin(),b.split_ids.end(),1)==1&&std::count(b.split_ids.begin(),b.split_ids.end(),3)==1&&std::count(b.split_ids.begin(),b.split_ids.end(),4)==0);
+        assert(RowSelector::pick(bad,100000,false,.25f,1).id==1); // the lock stays on a flagged block
+        {   // PixelSelector reports row_split for the locked flagged block only.
+            PixelSelector sel;sel.setRow(true);PixelSelection r;
+            for(int i=0;i<4;++i){
+                auto rw=bad;for(auto& d:rw){d.timestamp_us=100000+i*10000;d.box=cv::Rect(10+d.track_id*16,10,6,6);}
+                r=sel.update(rw,{200,100},500,true,100000+i*10000,false,.25);
+            }
+            assert(r.locked&&r.id==3&&r.row_split);
+        }
+        // A radial line is not a lateral row.
+        std::vector<SegDetection> radial={at(1,0.f,.3f,"ordinary_supply"),at(2,0.f,.5f,"ordinary_supply"),at(3,0.f,.7f,"ordinary_supply")};
+        assert(RowSelector::pick(radial,100000,false,.25f).reason=="no_row");
+        // An off-line outlier is ignored.
+        auto out=row;out.push_back(at(9,.1f,.9f,"ordinary_supply"));assert(RowSelector::pick(out,100000,false,.25f).id==3);
+        // All one colour: evenly spaced -> the middle one; a solid run (neighbours inside the footprint) -> an end block, never the middle.
+        std::vector<SegDetection> green;for(int i=0;i<5;++i)green.push_back(at(i+1,-.4f+.2f*i,.5f,"ordinary_supply"));
+        assert(RowSelector::pick(green,100000,false,.25f).id==3);
+        std::vector<SegDetection> solid;for(int i=0;i<5;++i)solid.push_back(at(i+1,-.12f+.06f*i,.5f,"ordinary_supply"));
+        auto sp=RowSelector::pick(solid,100000,false,.25f);assert((sp.id==1||sp.id==5)&&sp.reason=="row_middle");
+        // Even when every block is over-crowded, the least crowded end is still chosen instead of dropping the row logic.
+        std::vector<SegDetection> packed;for(int i=0;i<6;++i)packed.push_back(at(i+1,-.1f+.04f*i,.5f,"ordinary_supply"));
+        auto pp=RowSelector::pick(packed,100000,false,.25f);assert((pp.id==1||pp.id==6)&&pp.reason=="row_least_crowded");
+        assert(RowSelector::pick(packed,100000,false,.25f,pp.id).id==pp.id);
+        // PixelSelector: the end block has the biggest box, row mode still locks the middle.
+        for(bool on:{false,true}){
+            PixelSelector sel;sel.setRow(on);PixelSelection r;
+            for(int i=0;i<4;++i){
+                auto rw=row;for(auto& d:rw){d.timestamp_us=100000+i*10000;d.box=cv::Rect(10+d.track_id*16,10,d.track_id==1?14:6,d.track_id==1?14:6);}
+                r=sel.update(rw,{200,100},500,true,100000+i*10000,false,.25);
+            }
+            assert(r.locked&&r.id==(on?3:1));
+        }
     }
     std::cout<<"mechanical integration checks passed\n";
 }

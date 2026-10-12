@@ -48,12 +48,14 @@ struct Config {
     int detect_interval = 1;
     int input_size = 640;
     float confidence = 0.5f;
+    float injured_confidence = 0.25f; // injured_person only: close-range scores drop below `confidence`; kept as obstacle evidence (needs an orange blob, never a target)
     float nms = 0.45f;
     bool use_cuda = false;
     bool show = true;
     bool save_output = false;
     bool dry_run = false;
     bool controlled_ignore_clearance = false; // explicit contact-test override, never default
+    bool clear_neighbours = false; // sweep (never carry) any neighbour that makes the rush corridor illegal
     bool search_cues = false; // explicitly enabled controlled-field pile exploration
     bool controlled_empty_field = false; // explicit operator attestation, never a competition default
     // TEMP_ASSUMPTION（2026-10-08用户要求“默认全都安全”）：所有安全/净空/区域/确认证据视为成立，仅用于跑通决策链。
@@ -79,6 +81,7 @@ struct Config {
     uint32_t startup_advance_ms = 15000; // CLI startup duration: 1.0 m/s for 15 s by default
     float startup_speed_mps = 1.0f, scan_wz_rps = .25f, turn_wz_rps = .3f;
     std::string task_calibration_file, zone_color_file;
+    std::string vision_log_dir = "telemetry_logs/vision"; // saved images + [VISION_JUDGE] log lines; "none" disables
     std::string match_socket = "/tmp/rescue-match.sock";
     bool require_instance_masks = false;
 

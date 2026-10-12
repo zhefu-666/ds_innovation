@@ -2,6 +2,9 @@
 #include "rescue/demo_policy.hpp"
 #include "rescue/async_log.hpp"
 #include <sstream>
+#include <set>
+#include <iomanip>
+#include <cctype>
 #include <limits>
 #include "rescue/controlled_field.hpp"
 #include "rescue/geometry_pipeline.hpp"
@@ -37,6 +40,9 @@
 #include <cmath>
 #include <memory>
 #include <future>
+#include <filesystem>
+#include <ctime>
+#include <map>
 #ifdef RESCUE_ENABLE_TELEMETRY
 #include "rescue/telemetry_publisher.hpp"
 #endif
@@ -69,7 +75,8 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
     flag("multi_view_finished",in.multi_view_finished);
     if(!n["multi_view_verdict"].empty()) n["multi_view_verdict"]>>in.multi_view_verdict;
     flag("gripper_done", in.gripper_done);
-    flag("zone_valid", in.zone_valid); flag("zone_own", in.zone_own);
+    flag("zone_valid", in.zone_valid); flag("zone_own", in.zone_own); flag("enemy_zone_seen", in.enemy_zone_seen);
+    flag("zone_sight_valid",in.zone_sight_valid);flag("zone_far_pts",in.zone_far_pts);flag("zone_near_pts",in.zone_near_pts);flag("zone_sight_enemy",in.zone_sight_enemy);if(!n["zone_sight_bearing"].empty())n["zone_sight_bearing"]>>in.zone_sight_bearing;
     flag("carry_plan_valid",in.carry_plan_valid);flag("drop_plan_valid",in.drop_plan_valid);
     if(!n["navigation_timestamp_us"].empty())in.navigation_timestamp_us=rescue::readExactTime(n["navigation_timestamp_us"]);
     const auto point=[&](const char* key,cv::Point2f& p){const auto v=n[key];if(!v.empty()) {
@@ -124,6 +131,59 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
         for(const auto& id:zone["inlier_ids"])z.inlier_ids.push_back(int(id));
     }
     return in;
+}
+// Saves a raw + annotated JPEG pair and one [VISION_JUDGE] line so a run can be judged from images afterwards.
+void saveVisionJudge(const std::string& dir,const char* tag,uint64_t seq,const cv::Mat& frame,
+                     const std::vector<rescue::Detection>& dets,const std::string& caption="",int highlight_id=-1,
+                     int input_id=-1,int near_id=-1,bool output_missing=false){
+    try{
+        std::error_code ec;
+        std::filesystem::create_directories(dir,ec);
+        char stamp[32];const std::time_t t=std::time(nullptr);
+        std::strftime(stamp,sizeof(stamp),"%Y%m%d-%H%M%S",std::localtime(&t));
+        const std::string base=dir+"/"+stamp+"-"+tag+"-f"+std::to_string(seq);
+        cv::Mat annotated=frame.clone();
+        std::map<std::string,int> counts;
+        std::ostringstream items;
+        for(const auto& d:dets){
+            ++counts[d.label];
+            const bool danger=d.label.find("danger")!=std::string::npos;
+            const cv::Scalar color=danger?cv::Scalar(0,0,255):cv::Scalar(0,200,0);
+            cv::rectangle(annotated,d.box,color,2);
+            const auto mark=[&](int pad,const cv::Scalar& c,const std::string& text,int row){
+                cv::rectangle(annotated,cv::Rect(d.box.x-pad,d.box.y-pad,d.box.width+2*pad,d.box.height+2*pad),c,3);
+                cv::putText(annotated,text,cv::Point(d.box.x,d.box.y+d.box.height+16+16*row),
+                            cv::FONT_HERSHEY_SIMPLEX,.55,c,2);
+            };
+            if(highlight_id>=0&&d.track_id==highlight_id)mark(4,cv::Scalar(0,255,255),"OUT#"+std::to_string(d.track_id),0);
+            if(input_id>=0&&d.track_id==input_id)mark(9,cv::Scalar(255,255,0),"IN#"+std::to_string(d.track_id),1);
+            if(near_id>=0&&d.track_id==near_id)mark(14,cv::Scalar(255,0,255),"NEAREST#"+std::to_string(d.track_id),2);
+            char conf[16];std::snprintf(conf,sizeof(conf),"%.2f",d.confidence);
+            cv::putText(annotated,d.label+" #"+std::to_string(d.track_id)+" "+conf,
+                        cv::Point(d.box.x,std::max(d.box.y-6,12)),cv::FONT_HERSHEY_SIMPLEX,.5,color,1);
+            items<<" "<<d.label<<"#"<<d.track_id<<"@"<<conf;
+            if(d.ground_position_valid)items<<",xy="<<d.body_xy_m.x<<","<<d.body_xy_m.y;
+        }
+        if(!caption.empty()){
+            cv::rectangle(annotated,cv::Rect(0,0,annotated.cols,30),cv::Scalar(0,0,0),cv::FILLED);
+            cv::putText(annotated,caption,cv::Point(8,21),cv::FONT_HERSHEY_SIMPLEX,.6,cv::Scalar(255,255,255),1);
+        }
+        if(output_missing){
+            cv::rectangle(annotated,cv::Rect(0,30,annotated.cols,30),cv::Scalar(0,0,160),cv::FILLED);
+            cv::putText(annotated,"OUTPUT ID NOT IN VIEW (yellow=out cyan=in magenta=nearest same-class)",cv::Point(8,51),
+                        cv::FONT_HERSHEY_SIMPLEX,.6,cv::Scalar(255,255,255),1);
+        }
+        const bool ok=cv::imwrite(base+"-raw.jpg",frame)&&cv::imwrite(base+"-annotated.jpg",annotated);
+        std::ostringstream c;
+        for(const auto& kv:counts)c<<(c.tellp()>0?",":"")<<kv.first<<":"<<kv.second;
+        std::cout<<"[VISION_JUDGE] tag="<<tag<<" seq="<<seq<<" saved="<<ok<<" dets="<<dets.size()
+                 <<" counts="<<(c.tellp()>0?c.str():"none")<<" raw="<<base<<"-raw.jpg annotated="<<base<<"-annotated.jpg"
+                 <<(caption.empty()?"":" caption="+caption)
+                 <<(output_missing?" note=输出ID不在画面":"")<<" in_id="<<input_id<<" out_id="<<highlight_id<<" nearest_id="<<near_id
+                 <<" items="<<(items.tellp()>0?items.str():" none")<<"\n";
+    }catch(const std::exception& e){
+        std::cout<<"[VISION_JUDGE] tag="<<tag<<" saved=0 error="<<e.what()<<"\n";
+    }
 }
 void report(const rescue::PushOutput &out, std::ostream& stream = std::cout) {
     stream << "state=" << rescue::PushTask::name(out.state) << " batch=" << out.batch_size
@@ -242,6 +302,7 @@ int main(int argc, char **argv) {
                       << tuning.open_jaw_handoff_m << "\n";
         }
         tuning.enable_search_cues=config.search_cues;
+        tuning.clear_neighbours=config.clear_neighbours;
         tuning.enable_lost_search=true;
         tuning.enable_short_push=config.controlled_empty_field && config.search_cues;
         tuning.startup_advance_speed=config.startup_speed_mps;
@@ -264,7 +325,10 @@ int main(int argc, char **argv) {
             frame_views=measured.frame_views;feedback_open=measured.feedback_open;feedback_close=measured.feedback_close;box_area_accepted=measured.box_area_accepted;
             a6_done_flag=measured.a6_done_flag;a6_done_settle_ms=measured.a6_done_settle_ms;view_image_polygon=measured.frame_view_image_polygon;
             body_envelope=measured.body_envelope;
-            tuning=measured.task;capture_config=measured.capture;measured_load_radius=measured.load_radius_m;measured_body_radius=measured.robot_swept_radius_m;
+            const auto cli_startup_us=tuning.startup_advance_us;const auto cli_startup_speed=tuning.startup_advance_speed;const auto cli_scan_wz=tuning.scan_wz;const auto cli_budget_us=tuning.attempt_budget_us;
+            tuning=measured.task;
+            tuning.startup_advance_us=cli_startup_us;tuning.startup_advance_speed=cli_startup_speed;tuning.scan_wz=cli_scan_wz;tuning.attempt_budget_us=cli_budget_us;
+            capture_config=measured.capture;measured_load_radius=measured.load_radius_m;measured_body_radius=measured.robot_swept_radius_m;
             load_half_width=measured.load_half_width_m;load_half_depth=measured.load_half_depth_m;
         }
         configureDemo(config,tuning);
@@ -272,9 +336,51 @@ int main(int argc, char **argv) {
         // 现场同步：主程序与demo共用的运动/搬运/限程参数（turn_min_rad保持主程序值，仅demo再收紧）。
         // 实测：指令0.1m/s*1s视觉距离仅降约2.2cm（指令/实际≈5:1），按指令积分的限程需放宽；实际速度仅为指令的1/5~1/10。
         tuning.max_speed=.40f;tuning.approach_speed=.40f;tuning.carry_speed=.34f;tuning.rush_speed=.32f;tuning.rush_budget_us=12000000;
-        tuning.rush_pulse_turn=true;
-        tuning.enter_speed=.30f;tuning.back_speed=.32f;tuning.turn_wz=.55f;tuning.max_wz=.55f;tuning.min_turn_wz=std::min(tuning.min_turn_wz,.40f);
-        tuning.field_carry=true;tuning.field_rush=true;tuning.corridor_confirm_frames=6;tuning.assume_enter_confirm=true;tuning.assume_align_push=true;tuning.assume_stall_near_m=.12f;tuning.assume_slant_max_rad=0.f;tuning.approach_limit_m=std::max(tuning.approach_limit_m,8.0f);
+        // 首次清扫触发距离0.5 m：冲入预算(.4指令×5 s)只够约0.5 m实际位移；更远的群先由SCATTER前驱靠近(≤1.4 m)再触发。
+        // 2026-10-11 22:58实测：远群均在y 1.7~2.1 m、|x|≈1.0，原1.4 m/0.9 m窗口把12次≥3点群全部排除，原地转137 s；窗口放宽到4.0 m（横向由±0.70 rad方位角限制）；>0.8 m时锁定不可信，哪怕只有单个锁定也直接前驱（blind_scatter_far_group，blind_scatter_far_lock_min=1；无锁定的纯杂物簇仍需3点），锁定进0.5 m后交给正常决策，前驱中单个锁定不打断，群进0.5 m窗口直接扫（blind_scatter_near_group）；追踪丢失时群仍在视野则直接扫（lost_group_sweep），不原地转圈。
+        tuning.blind_scatter_max_y_m=.50f;tuning.blind_scatter_far_max_y_m=4.0f;tuning.blind_scatter_half_x_m=2.5f;
+        tuning.blind_scatter_approach_budget_us=20000000;tuning.blind_scatter_approach_max=4;
+        // 盲扫缩短到15 s、次数上限加多（总清扫账本3→6，盲扫次数4→8）：单次不再拖长，但允许分多次清。
+        tuning.blind_scatter_budget_us=15000000;tuning.blind_scatter_max=8;tuning.sweep_total_max=4;tuning.sweep_time_budget_us=36000000;tuning.sweep_op_budget_us=24000000;tuning.sweep_match_budget_us=60000000;tuning.blind_scatter_passes=1;
+        // 开局首次成团撞击（整场仅一次）：远处接近与近处冲入均保持1.0 m/s指令，不在末段减速；随后首次摆框5.0 rad/s，后续清扫用常态速度。
+        tuning.first_burst=true;tuning.first_burst_full_impact=true;tuning.first_burst_speed=1.0f;tuning.first_burst_slow_m=.35f;tuning.first_burst_min_drive_m=.60f;tuning.first_burst_swing_wz=5.0f;
+        // 仅启动段提速：指令速度升到1.0，时长按 CLI速度/1.0 缩短（同样的指令积分行程）；其余阶段速度不变。
+        if(tuning.startup_advance_us>0&&tuning.startup_advance_speed>0.f&&tuning.startup_advance_speed<1.f){
+            tuning.startup_advance_us=uint64_t(double(tuning.startup_advance_us)*double(tuning.startup_advance_speed));
+            tuning.startup_advance_speed=1.0f;
+        }
+        tuning.demo_capture_motion=true;tuning.precise_rush=false;tuning.rush_stall_us=0;
+        tuning.rush_pulse_turn=false; // demo uses proportional alignment, not pulse-and-settle
+        tuning.sweep_observation_guard=true;
+        tuning.frame_open_default=true; // 2026-10-12: frame open by default; closes only to capture (LOWER_FRAME) and while carrying
+        tuning.disperse_turn_rad=1.4f+30.f*float(CV_PI)/180.f; // 2026-10-12: turn cap 1.4 rad + 30 deg (was 1.0 rad originally)
+        tuning.disperse_turn_push_m=.2f; // then push straight on 0.2 m along the new heading
+        tuning.disperse_turn_frame_check=true; // 2026-10-13: view ahead thin is not enough: camera drops to its lowest angle and the turn goes on until <=1 block sits in the frame zone (0.30 m ahead, +-0.14 m)
+        tuning.row_split_pile=true; // 2026-10-13: a row block touching an injured/dangerous/core piece is not skipped: PILE separates it, then SCAN re-locks
+        tuning.row_select=true; // 2026-10-12: a left-right row of blocks in front -> lock the middle block (clean frame footprint) by its box-bottom ground point, not the largest box
+        tuning.disperse_single_turn=true; // 2026-10-12: rush in, then ONE in-place turn (camera lifted to the 20deg stage first) toward the side with fewer blocks in view; replaces the 3 alternating swings
+        tuning.sweep_view_cap_mid=true;tuning.sweep_far_judge=true;tuning.swing_avoid_outside=false;tuning.dense_no_lock=true;tuning.approach_dense_burst_swing=true;
+        tuning.lock_max_visible=2;tuning.lock_multi_group_min=2;tuning.lock_multi_radius_m=.60f;tuning.dense_multi_ignore_gap=true; // 2026-10-12: lock only while <=2 targets are in view, otherwise open-frame sweep (ignores the 20 s gap; total/time budgets still apply)
+        tuning.pile_clear=true; // 2026-10-12: many blocks in the frame corridor -> advance 0.5 m with the open frame, back off, turn one block's angle and cut in, keeping ordinary supplies in the frame
+        tuning.pile_cool_us=5000000; tuning.pile_trigger_max_m=1.0f; tuning.pile_confirm=3; tuning.pile_max_runs=6; tuning.pile_cut_margin_m=.03f; // 2026-10-13: wider PILE entry (shorter cool-down, farther trigger, 3 hits of the last 10 ticks, a third run); the pre-check/RUSH vetoes of a cluster (incl. dangerous) route into PILE too
+        tuning.pile_cut_max_steps=3; // PILE cut keeps the enclosed set one type first: if one block-width of turn still leaves a non-ordinary block in the frame, try 2 and 3 block-widths
+        tuning.pile_cut_require_clean=true; tuning.pile_min_remaining_us=45000000; tuning.pile_cut_reserve_us=15000000; // 2026-10-13 run 054823: a stacked green-on-injured pile was cut anyway (left 2 other blocks in the frame) with 28 s left; give such piles up, and do not start PILE / a cut that cannot finish with a delivery after it
+        tuning.pile_cut_rounds=4; // PILE cut: up to 4 cut rounds per PILE run (default 2)
+        tuning.pile_cut_spin=true; // PILE cut: once the drive-in is done, spin one full revolution in place (cut's turn direction), then back out
+        tuning.pile_cut_capture=true; tuning.pile_budget_us=80000000; // PILE cut: look into the frame at 40deg after the drive-in; only ordinary supplies inside -> close and carry; every PILE back-out is pile_back_m; the drive-in budget scales with the planned travel
+        tuning.pile_cut_bias_rad=.1f; // PILE cut: every cut-in came up a little short of the angle, so aim 0.1 rad (~5.7deg, the faceYaw tolerance) further into the cut direction
+        tuning.pile_look_close_frac=1.f; // PILE cut: close and carry only after the cut-in is finished (no early close during the drive), and only with 1..2 ordinary blocks in the frame
+        tuning.carry_lane_guard=true; // 2026-10-13: bend the carry heading around loose blocks ahead of the frame instead of pushing them toward the safe zone
+        tuning.carry_lane_view=true; // 2026-10-13: zone located -> check the lane ahead at 20deg, bypass what blocks it, then 5deg back toward the zone
+        tuning.pile_cut_scan=true; // 2026-10-13: replaces the full-revolution cut spin: camera at 5deg, turn to a lane with no block, advance a short way
+        tuning.pile_precut=true; // 2026-10-13: one-shot check before every cut-in: standing aligned, judge the lane [-0.14,0.14] m with the corner points of every detection box of one fresh image (ordinary whole in, other classes whole out); re-aim one block-width once or abort with pile_precut_no_cut; the travel is re-derived from the nearest ordinary block's box-bottom row (kept if its pixel size disagrees with the projection or the box is clipped)
+        tuning.pile_chain=true; // 2026-10-12: after a swung disperse sweep keep tracking the pushed-out cluster: while it is deeper than one layer, face it, rush in, big-angle turn and back off again (max 3 rounds), then PILE cuts the last layer
+        tuning.occlusion_hold_us=2500000;tuning.occlusion_near_m=.8f;tuning.relock_window_us=4000000;tuning.relock_gate_frac=.10f; // frame-occluded lock: wait for the new id, re-lock the one nearest where it vanished
+        // 2026-10-12: pre-sweep view 20deg, swing judged at 5deg, side cap removed (both sides full disperse_turn_rad), groups split rather than locked
+        tuning.sweep_frame_open=true; // 2026-10-12 experiment: sweeps run with the frame open (set false to restore the closed-frame sweep)
+        tuning.disperse_swing_vx=0.f;tuning.disperse_passes=1;tuning.blind_scatter_passes=1; // rotate without advancing; observe before any further sweep
+        tuning.enter_speed=.30f;tuning.back_speed=.32f;tuning.turn_wz=.55f;tuning.max_wz=std::max(.55f,std::min(tuning.scan_wz,.8f));tuning.min_turn_wz=std::min(tuning.min_turn_wz,.40f);tuning.inplace_turn_boost=2.f;
+        tuning.field_carry=true;tuning.field_rush=true;tuning.verify_held_contents=true;tuning.corridor_confirm_frames=6;tuning.assume_enter_confirm=true;tuning.assume_align_push=true;tuning.assume_stall_near_m=.12f;tuning.assume_slant_max_rad=0.f;tuning.approach_limit_m=std::max(tuning.approach_limit_m,8.0f);
         tuning.retreat_limit_m=std::max(tuning.retreat_limit_m,4.0f);
         tuning.assume_carry_m=std::max(tuning.assume_carry_m,.60f);tuning.assume_push_m=.55f;tuning.enter_budget_us=std::max<uint64_t>(tuning.enter_budget_us,20000000);tuning.assume_back_m=std::max(tuning.assume_back_m,std::min(.50f,.85f*tuning.back_speed*float(tuning.retreat_budget_us)/1e6f)); // 须在后退时限内完成
         std::cout<<"[FIELD_CARRY] demo transport logic in main path: blind carry_m="<<tuning.assume_carry_m<<" back_m="<<tuning.assume_back_m
@@ -313,7 +419,7 @@ int main(int argc, char **argv) {
                   "far_track_ground_calibration");
             if(tuning.intermediate_pitch_cdeg!=kCameraPitchInvalid)
                 check(mapped && c.pitchUsable(tuning.intermediate_pitch_cdeg), "intermediate_ground_model");
-            check(config.controlled_empty_field || (!config.zone_color_file.empty() && ZoneColorConfig::load(config.zone_color_file).measured),
+            check(!config.zone_color_file.empty() && ZoneColorConfig::load(config.zone_color_file).measured,
                   "zone_identity_source");
             if(config.controlled_empty_field) check(measured_body_radius>0,"robot_swept_radius");
             check(!config.pose_model_path.empty() || !config.keypoints_file.empty(), "zone_pose_source");
@@ -326,6 +432,33 @@ int main(int argc, char **argv) {
                          "still require independent evidence. hardware_output=disabled\n";
             return missing ? 2 : 0;
         }
+        std::cout << "[CONTROL_TUNING] demo_capture_motion=" << tuning.demo_capture_motion
+                  << " rush_speed=" << tuning.rush_speed << " rush_stall_us=" << tuning.rush_stall_us
+                  << " precise_rush=" << tuning.precise_rush
+                  << " sweep_frame_open=" << tuning.sweep_frame_open
+                  << " frame_open_default=" << tuning.frame_open_default << " disperse_turn_rad=" << tuning.disperse_turn_rad
+                  << " sweep_view_cap_mid=" << tuning.sweep_view_cap_mid << " sweep_far_judge=" << tuning.sweep_far_judge
+                  << " swing_avoid_outside=" << tuning.swing_avoid_outside << " dense_no_lock=" << tuning.dense_no_lock << " approach_dense_burst_swing=" << tuning.approach_dense_burst_swing
+                  << " lock_max_visible=" << tuning.lock_max_visible << " lock_multi_group_min=" << tuning.lock_multi_group_min << " lock_multi_radius_m=" << tuning.lock_multi_radius_m
+                  << " dense_multi_ignore_gap=" << tuning.dense_multi_ignore_gap << " occlusion_hold_us=" << tuning.occlusion_hold_us << " relock_window_us=" << tuning.relock_window_us << " relock_gate_frac=" << tuning.relock_gate_frac
+                  << " carry_lane_guard=" << tuning.carry_lane_guard << " carry_lane_view=" << tuning.carry_lane_view << " pile_cut_scan=" << tuning.pile_cut_scan << " pile_precut=" << tuning.pile_precut << " pile_clear=" << tuning.pile_clear << " pile_corridor_min=" << tuning.pile_corridor_min << " pile_trigger_max_m=" << tuning.pile_trigger_max_m
+                  << " pile_advance_m=" << tuning.pile_advance_m << " pile_block_half_m=" << tuning.pile_block_half_m << " pile_back_m=" << tuning.pile_back_m
+                 
+                  << " rush_align_deadband_rad=" << tuning.rush_align_deadband_rad
+                  << " rush_align_wz=" << tuning.rush_align_wz << " rush_near_speed=" << tuning.rush_near_speed
+                  << " rush_slow_range_m=" << tuning.rush_slow_range_m
+                  << " rush_trigger_m=" << (tuning.field_rush || tuning.assume_all_safe ? tuning.assume_rush_trigger_m : tuning.grasp_trigger_y_m)
+                  << " corridor_half_width_m=" << capture_config.corridor_half_width_m
+                  << " corridor_extra_m=" << capture_config.corridor_extra_m
+                  << " sweep_observation_guard=" << tuning.sweep_observation_guard
+                  << " sweep_reobserve_us=" << tuning.sweep_reobserve_us
+                  << " blind_scatter_passes=" << tuning.blind_scatter_passes
+                  << " swing_vx=" << tuning.disperse_swing_vx
+                  << " first_burst_full_impact=" << tuning.first_burst_full_impact
+                  << " first_burst_speed=" << tuning.first_burst_speed
+                  << " disperse_turn_push_m=" << tuning.disperse_turn_push_m << " disperse_single_turn=" << tuning.disperse_single_turn << " disperse_turn_min_rad=" << tuning.disperse_turn_min_rad << " disperse_turn_view_range_m=" << tuning.disperse_turn_view_range_m
+                  << " disperse_turn_view_half_rad=" << tuning.disperse_turn_view_half_rad << " disperse_turn_clear_max=" << tuning.disperse_turn_clear_max << " disperse_turn_clear_frames=" << tuning.disperse_turn_clear_frames
+                  << " disperse_turn_look_us=" << tuning.disperse_turn_look_us << " disperse_turn_frame_check=" << tuning.disperse_turn_frame_check << " frame_max=" << tuning.disperse_turn_frame_max << " frame_range_m=" << tuning.disperse_turn_frame_range_m << " frame_half_m=" << tuning.disperse_turn_frame_half_m << " frame_extra_rad=" << tuning.disperse_turn_frame_extra_rad << "\n";
         PushTask task(tuning);
 #ifndef RESCUE_ENABLE_TELEMETRY
         if (config.telemetry)
@@ -380,7 +513,7 @@ int main(int argc, char **argv) {
         SensorFusion fusion({config.sensor_timeout_ms, config.tof_stop_distance_m, config.imu_tilt_limit_deg});
         std::unique_ptr<UARTController> feedback;
         std::unique_ptr<GeometryPipeline> geometry;
-        CameraCalibration vref_calibration;bool vref_ready=false;
+        CameraCalibration vref_calibration;bool vref_ready=false;uint64_t precut_diag_us=0;
         ZoneGeometry zone_geometry;
         if (!config.calibration_file.empty()) {
             CameraCalibration calibration;
@@ -429,7 +562,7 @@ int main(int argc, char **argv) {
         VisionLogic vision(config);
         NearestNeighborTracker tracker;
         CaptureMonitor capture(capture_config);
-        PixelSelector pixel_selector;MultiViewCapture multi_view(frame_views,{config.frame_width,config.frame_height},view_image_polygon);
+        PixelSelector pixel_selector;pixel_selector.setRelock(tuning.relock_window_us,tuning.relock_gate_frac);{RowParams rp;rp.min_n=tuning.row_min_n;rp.resid_m=tuning.row_resid_m;rp.max_tilt_rad=tuning.row_max_tilt_rad;rp.half_along_m=tuning.row_half_along_m;rp.half_across_m=tuning.row_half_across_m;pixel_selector.setRow(tuning.row_select,rp);}uint64_t progress_ref_us=0;int progress_total=-1;MultiViewCapture multi_view(frame_views,{config.frame_width,config.frame_height},view_image_polygon);
         bool observing=false;uint64_t observation_round=0;
         // Use the USB camera's MJPEG V4L2 path; automatic GStreamer negotiation
         // fails when applying the requested 720p/60 FPS settings on this board.
@@ -459,11 +592,17 @@ int main(int argc, char **argv) {
             }
         }
 #endif
+        bool vision_startup_saved=false,vision_match_saved=false,vision_first_lock_saved=false;
+        std::string vision_last_state,vision_last_reason;
+        std::map<std::string,uint64_t> vision_reason_last_us;
+        int vision_event_count=0;
         uint64_t frame_sequence = 0, rate_frames = 0;
         auto rate_started = Clock::now();
         double loop_fps = 0;
         PushOutput previous;previous.first_ordinary_delivered=tuning.assume_injured_trip;
         const std::string prefer_label=config.assume_injured_trip?"injured_person":"";
+        const auto obstacleConfidence=[&](const SegDetection&d){
+            return d.label=="injured_person"?std::min(config.confidence,config.injured_confidence):config.confidence;};
         auto last_report = Clock::now();
         MotionWatch motion_watch;
         const auto demo_started=Clock::now();int demo_exit=0;
@@ -497,24 +636,22 @@ int main(int argc, char **argv) {
             auto zone_color=previewBlueZoneDefault(
                 zone_colors.classify(frame,vision_result.halves,detections,config.pose_keypoint_confidence),
                 config.dry_run,config.team,blue_model_detected_both_halves);
-            if(config.controlled_empty_field && vision_result.pose_ran &&
-               vision_result.halves[0].valid && vision_result.halves[1].valid) {
-                zone_color.color=config.team;zone_color.verified=true;zone_color.assumed=false;
-                zone_color.reason="controlled_field_operator_identity";
-            } else {
-                // 现场同步：区域颜色固定为队伍色，不依赖检测。
-                zone_color.color=config.team;zone_color.verified=true;zone_color.assumed=true;
-                zone_color.reason="fixed_team_colour";
-            }
+            // Identity comes only from the measured zone colour; an enemy-colour zone is never labelled own.
+            zone_color=resolveZoneColor(zone_color,config.team,false);
             GeometryResult geometry_result;ExpectedStop expected_stop;ZoneEstimate vref_estimate;bool vref_ok=false;
             // Servo readback at capture time; without the feedback port it stays invalid.
             const FrameSensors frame_sensors=feedback?feedback->feedbackAt(timestamp):FrameSensors{};
             for(auto& d:detections)if(d.label=="injured_person")d.silhouette_hw=orangeSilhouetteAspect(frame,d.box);
+            // Close-range injured score below the target threshold: obstacle evidence only, and only with an orange blob (no mat/background ghosts).
+            detections.erase(std::remove_if(detections.begin(),detections.end(),[&](const SegDetection&d){
+                return d.label=="injured_person"&&d.confidence<config.confidence&&d.silhouette_hw<0;}),detections.end());
+            SensorState frame_imu=frame_sensors.imu;
+            if(imu)frame_imu=sensorStateFromImu(imu->snapshotAt(timestamp));
             if(geometry) {
                 GeometryFrame geometry_frame;geometry_frame.frame_id=frame_sequence;
                 geometry_frame.capture_us=timestamp;geometry_frame.now_us=observed_at;geometry_frame.image_size=frame.size();
                 geometry_frame.sensors=frame_sensors;
-                if(imu)geometry_frame.sensors.imu=sensorStateFromImu(imu->snapshotAt(timestamp));
+                geometry_frame.sensors.imu=frame_imu;
                 KeypointFrame points;points.frame_id=frame_sequence;points.capture_us=timestamp;
                 points.image_size=frame.size();points.zone_label=config.team+"_safe_zone";
                 // Stage 3 supplies measured same-frame points. Missing input is invalid,
@@ -543,25 +680,124 @@ int main(int argc, char **argv) {
                 }
                 detections=geometry_result.detections;
             }
+            auto rejected_ids=task.rejectedTargets(observed_at);
+            {
+                // A vetoed block keeps its world bearing even when the tracker re-issues its id.
+                const auto bearings=task.rejectedBearings(observed_at);
+                const auto pre_imu=imu?imu->snapshot():ImuSnapshot{};
+                if(!bearings.empty()&&pre_imu.fresh&&pre_imu.sample.measurements_valid&&std::isfinite(pre_imu.sample.body_rpy_rad[2])){
+                    const float heading=pre_imu.sample.body_rpy_rad[2];
+                    for(const auto &d:detections){
+                        if(!d.ground_position_valid||d.body_xy_m.y<=0.f)continue;
+                        const float world=heading+std::atan2(-d.body_xy_m.x,d.body_xy_m.y);
+                        const float range=std::hypot(d.body_xy_m.x,d.body_xy_m.y);
+                        const float tol=std::clamp(.05f/std::max(range,.15f),.04f,.2f);
+                        for(const auto &b:bearings){
+                            float diff=world-b.world_yaw;
+                            diff=std::atan2(std::sin(diff),std::cos(diff));
+                            if(std::abs(diff)<=tol&&std::abs(range-b.range_m)<=.6f){rejected_ids.push_back(d.track_id);break;}
+                        }
+                    }
+                }
+            }
+            {
+                // No delivery for a long time: stop being picky about crowded blocks (60 s: lane, 120 s: everything).
+                if(!progress_ref_us||previous.delivered_total!=progress_total){progress_ref_us=observed_at;progress_total=previous.delivered_total;}
+                const uint64_t idle_us=observed_at>progress_ref_us?observed_at-progress_ref_us:0;
+                pixel_selector.setRelax(idle_us>=120000000?2:idle_us>=60000000?1:0);
+            }
+            if(previous.state==PushState::SCATTER||previous.state==PushState::PILE)pixel_selector.forgetCenter(); // the sweep swings the view: the old pixel position no longer marks where the lock vanished
             const auto selection=pixel_selector.update(detections,frame.size(),frame_sensors.actuator.camera_pitch_cdeg,
                 frame_sensors.actuator.valid && frame_sensors.pitch_stable,observed_at,previous.first_ordinary_delivered,
-                config.confidence,task.rejectedTargets(observed_at),prefer_label);
+                config.confidence,rejected_ids,prefer_label);
             auto input = makePushObservation(detections, observed_at,previous.first_ordinary_delivered,config.confidence,
-                selection.id,task.rejectedTargets(observed_at),false,false,false,prefer_label);
+                selection.id,rejected_ids,false,false,false,prefer_label);
             if(!selection.locked) input.target_valid=false;
             (void)box_area_accepted; // 现场同步：像素比不再要求box_area_accepted标定（沿用demo）
             std::cout << "[PIXEL_SELECTION] timestamp="<<observed_at<<" pitch="<<frame_sensors.actuator.camera_pitch_cdeg
                 <<" stable="<<frame_sensors.pitch_stable<<" id="<<selection.id<<" mode="<<selection.mode
-                <<" raw="<<selection.raw<<" smooth="<<selection.smoothed<<" locked="<<selection.locked<<" reason="<<selection.reason<<"\n";
+                <<" raw="<<selection.raw<<" smooth="<<selection.smoothed<<" locked="<<selection.locked<<" reason="<<selection.reason
+                <<(selection.row.empty()?std::string():" ROW["+selection.row+"]")<<"\n";
             input.pixel_ratio_raw=selection.raw;input.pixel_ratio_smoothed=selection.smoothed;
-            input.pixel_mode=selection.mode;input.pixel_reason=selection.reason;input.pixel_locked=selection.locked;
+            input.pixel_mode=selection.mode;input.pixel_reason=selection.reason;input.pixel_locked=selection.locked;input.target_split=selection.row_split;
+            if(selection.locked&&selection.id>=0&&vref_ready&&vref_calibration.cameraMatrix().type()==CV_64F&&vref_calibration.cameraMatrix().rows==3)
+                for(const auto&d:detections)if(d.track_id==selection.id){
+                    const cv::Mat&K=vref_calibration.cameraMatrix();
+                    const double xc=(d.box.x+d.box.width*.5-K.at<double>(0,2))/K.at<double>(0,0),yc=(d.box.y+d.box.height*.5-K.at<double>(1,2))/K.at<double>(1,1);
+                    const double pitch=double(frame_sensors.actuator.camera_pitch_cdeg)*.01*CV_PI/180.;
+                    const double fwd=std::cos(pitch)-yc*std::sin(pitch);
+                    if(fwd>.05){input.pixel_bearing_valid=true;input.pixel_bearing=float(std::atan2(-xc,fwd));}
+                    input.pixel_confidence=d.confidence;
+                    std::cout<<"[VISUAL_SIGHT] id="<<selection.id<<" label="<<d.label<<" conf="<<d.confidence<<" bearing="<<input.pixel_bearing<<"\n";
+                    break;
+                }
             input.run = false; // MatchControl supplies the final authorization below.
             if(geometry)geometry->apply(input,geometry_result,expected_stop,config.team,imuNowUs());
+            if(vision_result.pose_ran)for(const auto&h:vision_result.halves){
+                if(!h.valid)continue;
+                const float th=config.pose_keypoint_confidence;
+                input.zone_far_pts|=h.confidence[0]>=th&&h.confidence[2]>=th;
+                input.zone_near_pts|=h.confidence[1]>=th&&h.confidence[3]>=th;
+            }
+            input.enemy_zone_seen=vision_result.pose_ran&&zone_color.verified&&!zone_color.assumed&&zone_color.color!=config.team;
+            if(vref_ready&&vision_result.pose_ran&&!zone_points.empty()&&vref_calibration.cameraMatrix().type()==CV_64F&&vref_calibration.cameraMatrix().rows==3){
+                cv::Point2f c(0,0);for(const auto&k:zone_points)c+=k.pixel;c*=1.f/float(zone_points.size());
+                const cv::Mat&K=vref_calibration.cameraMatrix();
+                const double xc=(c.x-K.at<double>(0,2))/K.at<double>(0,0),yc=(c.y-K.at<double>(1,2))/K.at<double>(1,1);
+                const double pitch=double(frame_sensors.actuator.camera_pitch_cdeg)*.01*CV_PI/180.;
+                const double fwd=std::cos(pitch)-yc*std::sin(pitch);
+                if(fwd>.05){input.zone_sight_valid=true;input.zone_sight_enemy=input.enemy_zone_seen;input.zone_sight_bearing=float(std::atan2(-xc,fwd));}
+            }
             for(const auto&d:detections)
                 if(d.label=="injured_person"&&d.track_id!=selection.id&&(d.injured_upright_rejected||!d.ground_contact_valid)&&
-                   d.ground_position_valid&&d.confidence>=config.confidence&&
+                   d.ground_position_valid&&d.confidence>=obstacleConfidence(d)&&
                    std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y))input.upright_body.push_back(d.body_xy_m);
             if(!input.upright_body.empty())input.upright_ts_us=observed_at;
+            for(const auto&d:detections)
+                if(d.track_id!=selection.id&&d.ground_position_valid&&d.confidence>=obstacleConfidence(d)&&
+                   std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y)){input.clutter_body.push_back(d.body_xy_m);if(d.label=="ordinary_supply")input.clutter_ordinary.push_back(d.body_xy_m);}
+            if(!input.clutter_body.empty())input.clutter_ts_us=observed_at;
+            for(const auto&d:detections)
+                if(d.ground_position_valid&&d.confidence>=obstacleConfidence(d)&&std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y)){input.look_body.push_back(d.body_xy_m);if(d.label=="ordinary_supply")input.look_ordinary.push_back(d.body_xy_m);}
+            input.look_ts_us=observed_at;
+            for(const auto&d:detections){
+                if(d.ground_position_valid||d.confidence<obstacleConfidence(d)||d.box.width<=0||d.box.height<=0)continue;
+                if(float(d.box.y+d.box.height)<float(frame.rows-tuning.look_edge_px))continue;
+                if(float(d.box.x+d.box.width)<=tuning.look_edge_x_lo*float(frame.cols)||float(d.box.x)>=tuning.look_edge_x_hi*float(frame.cols))continue;
+                (d.label=="ordinary_supply"?input.look_edge_ordinary:input.look_edge_other)++;
+            }
+            const bool pc_k_ok=vref_ready&&vref_calibration.cameraMatrix().type()==CV_64F&&vref_calibration.cameraMatrix().rows==3;
+            int pc_det=0,pc_gpv=0,pc_pass=0,pc_fail_l=0,pc_fail_r=0,pc_bad=0;bool pc_have_T=false;
+            if(pc_k_ok&&frame_sensors.actuator.valid){
+                const double fx=vref_calibration.cameraMatrix().at<double>(0,0);
+                const int16_t pc=frame_sensors.actuator.camera_pitch_cdeg;
+                cv::Matx34d T;const bool have_T=vref_calibration.cameraFromGround(pc,frame_imu,T);pc_have_T=have_T;
+                for(const auto&d:detections){
+                    ++pc_det;if(d.ground_position_valid)++pc_gpv;
+                    if(!d.ground_position_valid||d.confidence<obstacleConfidence(d)||!std::isfinite(d.body_xy_m.x)||!std::isfinite(d.body_xy_m.y)||d.box.width<=0)continue;
+                    ++pc_pass;
+                    const float bottom=float(d.box.y+d.box.height);
+                    cv::Point2f gl,gr;
+                    const bool ok_l=vref_calibration.pixelToGround({float(d.box.x),bottom},pc,gl,&frame_imu);
+                    const bool ok_r=vref_calibration.pixelToGround({float(d.box.x+d.box.width),bottom},pc,gr,&frame_imu);
+                    if(!ok_l)++pc_fail_l;
+                    if(!ok_r)++pc_fail_r;
+                    if(!ok_l||!ok_r)continue;
+                    PushObservation::PrecutBox pb;
+                    pb.xl=std::min(gl.x,gr.x);pb.xr=std::max(gl.x,gr.x);pb.y=.5f*(gl.y+gr.y);
+                    pb.ordinary=d.label=="ordinary_supply";pb.clipped=bottom>=float(frame.rows)-4.f||d.box.x<=2||d.box.x+d.box.width>=float(frame.cols)-2.f;
+                    if(have_T){ // a 40 mm block (mid-size between face and diagonal) subtends fx*0.048/width pixels at its depth
+                        const cv::Vec3d cp=T*cv::Vec4d(d.body_xy_m.x,d.body_xy_m.y,.02,1.);
+                        if(cp[2]>.05)pb.size_ratio=float((fx*.048/d.box.width)/cp[2]);
+                    }
+                    if(pb.y>0&&std::isfinite(pb.xl)&&std::isfinite(pb.xr))input.precut_boxes.push_back(pb);else ++pc_bad;
+                }
+            }
+            if(previous.state==PushState::PILE&&observed_at>=precut_diag_us+300000){ // 300 ms rate limit: why precut_boxes is (or is not) filled while PILE
+                precut_diag_us=observed_at;
+                std::cout<<"[PRECUT_DIAG] boxes="<<input.precut_boxes.size()<<" k_ok="<<pc_k_ok<<" actuator_valid="<<frame_sensors.actuator.valid<<" pitch_cdeg="<<frame_sensors.actuator.camera_pitch_cdeg
+                         <<" have_T="<<pc_have_T<<" det="<<pc_det<<" ground_valid="<<pc_gpv<<" conf_ok="<<pc_pass<<" px2g_fail_l="<<pc_fail_l<<" px2g_fail_r="<<pc_fail_r<<" bad_xy="<<pc_bad<<"\n";
+            }
             {
                 for(const auto&d:detections)
                     if(d.ground_position_valid&&d.confidence>=config.confidence&&std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y)&&
@@ -612,6 +848,38 @@ int main(int argc, char **argv) {
             }
             // Holding-region and rush-corridor inventory; uncertainty leaves them incomplete.
             capture.update(input, detections, observed_at);
+            if(input.target_valid&&input.geometry_valid){
+                static uint64_t last_clutter_log_us=0;
+                if(observed_at-last_clutter_log_us>=1000000){
+                    last_clutter_log_us=observed_at;
+                    std::cout<<"[CORRIDOR_NEIGHBOURS] target="<<input.target_id<<" dist="<<input.distance_m<<" head="<<input.heading_error
+                        <<" others=";
+                    for(const auto&d:detections){
+                        if(d.track_id==selection.id||!d.ground_position_valid||d.confidence<obstacleConfidence(d)||
+                           !std::isfinite(d.body_xy_m.x)||!std::isfinite(d.body_xy_m.y))continue;
+                        std::cout<<d.label<<"#"<<d.track_id<<"@("<<d.body_xy_m.x<<","<<d.body_xy_m.y<<") ";
+                    }
+                    std::cout<<"\n";
+                }
+            }
+            if(input.target_valid&&input.geometry_valid&&(previous.state==PushState::MID_APPROACH||previous.state==PushState::APPROACH||
+               previous.state==PushState::PREPARE||previous.state==PushState::RUSH)){
+                // Event log: only when the set of counted neighbours changes, or once a second as a heartbeat.
+                static std::string last_signature; static uint64_t last_evidence_log_us=0;
+                std::string signature;
+                for(const auto&e:capture.corridorEntries())signature+=std::to_string(e.track_id)+(e.counted?"+":"-")+(e.footprint_only?"f":"")+",";
+                if(signature!=last_signature||observed_at-last_evidence_log_us>=1000000){
+                    last_signature=signature;last_evidence_log_us=observed_at;
+                    std::cout<<"[CORRIDOR_EVIDENCE] state="<<PushTask::name(previous.state)<<" target="<<input.target_id<<" dist="<<input.distance_m
+                        <<" head="<<input.heading_error<<" complete="<<input.corridor_complete<<" clean="<<input.corridor_occlusion_free
+                        <<" counted=o"<<input.corridor.ordinary<<"/c"<<input.corridor.core<<"/i"<<input.corridor.injured
+                        <<"/d"<<input.corridor.dangerous<<"/u"<<input.corridor.unknown<<" entries=";
+                    for(const auto&e:capture.corridorEntries())
+                        std::cout<<e.label<<"#"<<e.track_id<<"{conf="<<e.confidence<<",age_ms="<<e.age_us/1000<<",along="<<e.along_m<<",across="<<e.across_m
+                            <<",fp="<<e.footprint_m<<","<<e.reason<<(e.footprint_only?",footprint_only":"")<<"} ";
+                    std::cout<<"\n";
+                }
+            }
             if(previous.state==PushState::VERIFY_CAPTURE){
                 const auto fb=feedback?feedback->latestActuatorFeedback():ActuatorFeedback{};
                 if(!observing){multi_view.begin(observed_at,fb.gripper_action_id,++observation_round);observing=true;}
@@ -648,6 +916,7 @@ int main(int argc, char **argv) {
                     std::isfinite(imu_data.sample.body_rpy_rad[2]);
                 input.heading_rad = imu_data.sample.body_rpy_rad[2];
                 input.imu_blocked_us = motion_watch.blockedUs();
+                input.imu_spin_stall_us = motion_watch.spinStallUs();
             }
             // A dead link (write failures or stale feedback) vetoes motion permission.
             std::string preflight_reason;
@@ -655,7 +924,7 @@ int main(int argc, char **argv) {
             else if(!task_calibrated) preflight_reason="gripper_calibration_required";
             else if(!loadFitsHalf(measured_load_radius,zone_geometry.width_m,zone_geometry.depth_m,
                                  zone_geometry.divider_exclusion_half_width_m,load_half_width,load_half_depth)) preflight_reason="load_footprint_does_not_fit";
-            else if(!config.controlled_empty_field && config.zone_color_file.empty()) preflight_reason="zone_color_calibration_required";
+            else if(config.zone_color_file.empty()) preflight_reason="zone_color_calibration_required";
             else if(config.controlled_empty_field && measured_body_radius<=0) preflight_reason="robot_swept_radius_required";
             else if(frame.cols!=config.frame_width || frame.rows!=config.frame_height) preflight_reason="camera_size_mismatch";
             else if(!geometry) preflight_reason="ground_mapping_not_ready";
@@ -685,10 +954,73 @@ int main(int argc, char **argv) {
                 auto_start_requested=true;match.command(MatchCommand::START,input.now_us);
             }
             const auto match_status=match.status(input.now_us);
-            input.run=match_status.permit;
+            if(config.vision_log_dir!="none"){
+                // frame 8 lets auto-exposure settle; the second record is the first frame in which the match is permitted
+                const bool warm=!vision_startup_saved&&frame_sequence>=8;
+                const bool started=!vision_match_saved&&match_status.permit;
+                if(warm||started){
+                    saveVisionJudge(config.vision_log_dir,warm?"startup":"match_start",frame_sequence,frame,detections);
+                    if(warm)vision_startup_saved=true;
+                    if(started)vision_match_saved=true;
+                }
+            }
+            input.run=match_status.permit; input.match_remaining_us=(!config.no_match_time_limit&&match_status.state==MatchState::RUNNING)?match_status.remaining_us:UINT64_MAX;
             input.safety_ok=match_status.permit && preflight_reason.empty();
             navigator.update(input,previous);
             auto out = task.update(input);
+            // Remember where the locked target was last seen, so an event can show which detection replaced it.
+            static int last_out_id=-1;static std::string last_out_label;static cv::Point2f last_out_centre;
+            if(out.target_id>=0){
+                last_out_id=out.target_id;
+                for(const auto& d:detections)if(d.track_id==out.target_id){last_out_label=d.label;last_out_centre=d.center();break;}
+            }
+            if(config.vision_log_dir!="none"&&vision_event_count<100){
+                const std::string st=PushTask::name(out.state);
+                const bool state_changed=st!=vision_last_state;
+                const bool reason_changed=out.reason!=vision_last_reason;
+                static const std::set<std::string> key_states={"PREPARE","RUSH","LOWER_FRAME","VERIFY_CAPTURE","CARRY",
+                    "RAISE_RELEASE","VERIFY_DELIVERY","CAPTURE_FAIL","LOST_HOLD","ABORT_DROP","SAFE_STOP"};
+                static const std::set<std::string> key_reasons={"target_id_mismatch","target_missing","lost_target_search",
+                    "sweep_upright_out","pile_cut_align","pile_precut","pile_precut_no_cut","pile_cut_scan","pile_scan_hold","pile_scan_advance","pile_scan_return","pile_verify","pile_frame_already_ok","pile_cluster_clear","pile_cut_no_gain","pile_split_done","pile_split_unresolved","pile_cut_look","pile_frame_enclosed","pile_capture"};
+                const bool first_lock=!vision_first_lock_saved&&st=="APPROACH"&&out.target_id>=0;
+                bool key_reason=false;
+                if(reason_changed&&key_reasons.count(out.reason)){
+                    const auto it=vision_reason_last_us.find(out.reason);
+                    key_reason=it==vision_reason_last_us.end()||input.now_us-it->second>3000000;
+                }
+                if((state_changed&&key_states.count(st))||first_lock||key_reason){
+                    std::string tag="ev-"+st+"-"+out.reason;
+                    for(auto& ch:tag)if(!std::isalnum(static_cast<unsigned char>(ch))&&ch!='-')ch='_';
+                    if(tag.size()>48)tag.resize(48);
+                    std::ostringstream cap;
+                    cap<<std::fixed<<std::setprecision(1)<<match_status.remaining_us/1e6<<"s "<<st<<" "<<out.reason
+                       <<" | in#"<<input.target_id<<" "<<(input.label.empty()?"-":input.label)
+                       <<" d="<<std::setprecision(2)<<input.distance_m<<"m h="<<std::setprecision(1)
+                       <<input.heading_error*57.2958f<<"deg | out#"<<out.target_id<<" cap#"<<out.capture_target_id;
+                    bool out_present=out.target_id<0;
+                    for(const auto& d:detections)if(d.track_id==out.target_id)out_present=true;
+                    int near_id=-1;
+                    if(!out_present&&out.target_id>=0&&out.target_id==last_out_id){
+                        float best=1e9f;
+                        for(const auto& d:detections){
+                            if(d.label!=last_out_label)continue;
+                            const float dist=float(cv::norm(d.center()-last_out_centre));
+                            if(dist<best){best=dist;near_id=d.track_id;}
+                        }
+                    }
+                    saveVisionJudge(config.vision_log_dir,tag.c_str(),frame_sequence,frame,detections,cap.str(),out.target_id,
+                                    input.target_id,near_id,!out_present);
+                    std::cout<<"[VISION_EVENT] state="<<st<<" reason="<<out.reason<<" remaining_s="<<match_status.remaining_us/1e6
+                             <<" input_target="<<input.target_id<<" label="<<(input.label.empty()?"-":input.label)
+                             <<" dist_m="<<input.distance_m<<" heading_err_rad="<<input.heading_error
+                             <<" out_target="<<out.target_id<<" capture_target="<<out.capture_target_id
+                             <<" pixel_id_locked="<<input.pixel_locked<<" frame="<<frame_sequence<<"\n";
+                    ++vision_event_count;
+                    if(first_lock)vision_first_lock_saved=true;
+                    if(key_reason)vision_reason_last_us[out.reason]=input.now_us;
+                }
+                vision_last_state=st;vision_last_reason=out.reason;
+            }
             std::cout<<"[ANCHOR] state="<<int(out.state)<<" reason="<<out.reason<<" "<<task.anchorDebug()<<"\n";
             {const std::string dz=task.takeDropZoneEvent();if(!dz.empty())std::cout<<dz<<std::flush;}
             guardDemoMotion(config.demo_mode,out.motion,demo_hold_angle,demo_hold_pitch);
@@ -723,14 +1055,19 @@ int main(int argc, char **argv) {
             const bool stopped = out.motion.vx_mps == 0 && out.motion.wz_rps == 0;
             std::ostringstream stop_detail;
             stop_detail << "stopped=" << stopped << " state=" << PushTask::name(out.state)
-                << " task_reason=" << out.reason << " preflight=" << preflight_reason
+                << " task_reason=" << out.reason
+                << " vx=" << out.motion.vx_mps << " wz=" << out.motion.wz_rps
+                << " pitch_cmd=" << out.motion.camera_pitch_cdeg << " frame_offset=" << int(out.motion.gripper_offset)
+                << " preflight=" << preflight_reason
                 << " match=" << match_status.reason << " locked_id=" << out.target_id
                 << " observed_id=" << input.target_id << " target_valid=" << input.target_valid
                 << " id_match=" << (out.target_id >= 0 && out.target_id == input.target_id)
                 << " geometry=" << input.geometry_valid << " mapping=" << geometry_result.mapping_valid
                 << " geometry_reason=" << geometry_result.reason
                 << " region=" << input.target_region_valid << " in_zone=" << input.target_in_zone
-                << " path=" << input.path_safe << " opponent_clear=" << input.opponent_zone_clear
+                << " path=" << input.path_safe << " retreat=" << input.retreat_safe << " turn_safe=" << input.turn_safe
+                << " arc=" << input.arc_safe << " jaw_open=" << input.jaw_open_safe << " dir_clear_valid=" << input.directional_clearance_valid
+                << " blockers=[" << controlled_field.blockers() << "] opponent_clear=" << input.opponent_zone_clear
                 << " pitch_stable=" << input.camera_pitch_stable << " gripper_done=" << input.gripper_done
                 << " corridor_complete=" << input.corridor_complete;
             if (feedback) {
@@ -738,7 +1075,8 @@ int main(int argc, char **argv) {
                 stop_detail << " command_id=" << int(feedback->gripperActionId())
                     << " feedback_id=" << int(fb.gripper_action_id) << " feedback_valid=" << fb.valid;
             }
-            const auto signature = stopped ? stop_detail.str() : std::string("moving");
+            // A moving-to-moving reason or command change is a control transition too.
+            const auto signature = stop_detail.str();
             if (signature != last_stop_signature) {
                 async_log.submit("[CONTROL_CHANGE] timestamp_us=" + std::to_string(input.now_us)
                     + " " + stop_detail.str() + "\n");
@@ -756,6 +1094,9 @@ int main(int argc, char **argv) {
                 std::ostringstream log;
                 if(config.controlled_empty_field) log<<(config.assume_all_safe?"[TEMP_ASSUMPTION] assume_all_safe=1 ":"")<<"[CONTROLLED_TEST] clearance=" << (config.controlled_ignore_clearance?"DISABLED_CONTACT_TEST":"operator_confirmed") << " identity=own_zone_only "
                     <<"inventory="<<controlled_field.reason()<<" translation_watchdog=disabled phase_budgets=enabled\n";
+                if(config.controlled_empty_field) log<<"[SAFETY] path="<<input.path_safe<<" retreat="<<input.retreat_safe<<" turn="<<input.turn_safe
+                    <<" arc="<<input.arc_safe<<" jaw="<<input.jaw_open_safe<<" dir_valid="<<input.directional_clearance_valid
+                    <<" state="<<PushTask::name(out.state)<<" blockers=["<<controlled_field.blockers()<<"]\n";
                 for(const auto& d:detections) log<<"[TARGET] id="<<d.track_id<<" label="<<d.label
                     <<" position="<<d.ground_position_valid<<" contact="<<d.ground_contact_valid
                     <<" reason="<<d.ground_contact_reason<<" xy="<<d.body_xy_m.x<<","<<d.body_xy_m.y

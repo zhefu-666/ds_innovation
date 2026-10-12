@@ -74,6 +74,7 @@ void printUsage(const char *program) {
         << "  --fps N             Capture FPS, default 60\n"
         << "  --input-size N      Model input size (both models), default 640\n"
         << "  --conf X            Confidence threshold, default 0.5\n"
+        << "  --injured-conf X    Lower detector threshold for injured_person (obstacle evidence only), default 0.25\n"
         << "  --nms X             NMS threshold, default 0.45\n"
         << "  --cuda              Use OpenCV DNN CUDA backend\n"
         << "  --no-show           Do not open display window\n"
@@ -92,9 +93,11 @@ void printUsage(const char *program) {
         << "  --no-match-time-limit Disable total duration limit for debugging; phase/health gates remain\n"
         << "  --match-seconds N   Competition duration, default 180 s (1..86400)\n"
         << "  --startup-advance-ms N  Initial straight advance before scan, default 15000 (0..60000)\n"
+        << "  --vision-log-dir DIR     Save raw/annotated JPEGs with [VISION_JUDGE] log at startup, default telemetry_logs/vision; 'none' disables\n"
         << "  --startup-speed V        Startup forward speed in m/s (0 < V <= 1.0)\n"
         << "  --scan-wz W              Target/zone search rotation in rad/s (0 < W <= 3)\n"
         << "  --turn-wz W              Post-delivery rotation in rad/s (0 < W <= 3)\n"
+        << "  --clear-neighbours       Sweep aside (never carry) neighbours that make the rush corridor illegal\n"
         << "  --search-cues             Closed-gripper short pushes before first ordinary delivery (controlled test only)\n"
         << "  --controlled-ignore-clearance  Disable travel/jaw collision checks in controlled test mode only\n"
         << "  --controlled-empty-field  Attest own-zone-only, cleared forward/rear test area; no people/opponents\n"
@@ -155,6 +158,8 @@ Config parseArgs(int argc, char **argv) {
             if(arg=="--startup-speed")config.startup_speed_mps=v;
             else if(arg=="--scan-wz")config.scan_wz_rps=v;
             else config.turn_wz_rps=v;
+        } else if (arg == "--clear-neighbours") {
+            config.clear_neighbours = true;
         } else if (arg == "--search-cues") {
             config.search_cues = true;
         } else if (arg == "--controlled-ignore-clearance") {
@@ -219,6 +224,8 @@ Config parseArgs(int argc, char **argv) {
             config.input_size = std::stoi(needValue(arg));
         } else if (arg == "--conf") {
             config.confidence = std::stof(needValue(arg));
+        } else if (arg == "--injured-conf") {
+            config.injured_confidence = std::stof(needValue(arg));
         } else if (arg == "--nms") {
             config.nms = std::stof(needValue(arg));
         } else if (arg == "--sensor-timeout-ms") {
@@ -286,6 +293,8 @@ Config parseArgs(int argc, char **argv) {
             config.startup_advance_ms=static_cast<uint32_t>(v);
         } else if (arg == "--zone-color-calibration") {
             config.zone_color_file=needValue(arg);
+        } else if (arg == "--vision-log-dir") {
+            config.vision_log_dir=needValue(arg);
         } else if (arg == "--task-calibration") {
             config.task_calibration_file=needValue(arg);
         } else if (arg == "--match-socket") {
@@ -340,7 +349,8 @@ Config parseArgs(int argc, char **argv) {
         (!config.pose_model_blue_path.empty() || !config.pose_model_red_path.empty()))
         throw std::runtime_error("No pose model for selected --team; provide its model or --pose-model fallback");
     if (config.input_size <= 0 || !std::isfinite(config.confidence) || config.confidence < 0 || config.confidence > 1 ||
-        !std::isfinite(config.nms) || config.nms < 0 || config.nms > 1)
+        !std::isfinite(config.nms) || config.nms < 0 || config.nms > 1 ||
+        !std::isfinite(config.injured_confidence) || config.injured_confidence < 0 || config.injured_confidence > 1)
         throw std::runtime_error("Invalid model size or confidence/NMS thresholds");
     if (config.class_names.empty()) throw std::runtime_error("--classes must name at least one class");
     auto validThreshold = [](float v) { return std::isfinite(v) && v >= 0 && v <= 1; };

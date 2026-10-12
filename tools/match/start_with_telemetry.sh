@@ -53,6 +53,6 @@ else
   fi
 fi
 
-echo 'Foxglove: ws://192.168.34.7:8765'
+echo 'Foxglove: ws://192.168.175.7:8765'
 echo 'Starting hardware host; match auto-starts only after live preflight passes.'
 bash tools/match/start_hardware_blue.sh --auto-run

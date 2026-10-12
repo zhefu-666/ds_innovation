@@ -1,6 +1,6 @@
 // Node 22+: subscribe to the real main program and validate all channels.
 import { writeFileSync } from 'node:fs';
-const host = process.argv[2] || '192.168.34.7';
+const host = process.argv[2] || '192.168.175.7';
 const output = process.argv[3] || '/tmp/rescue-project-preview.jpg';
 const status = await (await fetch(`http://${host}:8080/status`, {signal: AbortSignal.timeout(5000)})).json();
 if (!status.health.robot_data_connected) throw new Error(JSON.stringify(status));

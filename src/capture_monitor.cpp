@@ -1,4 +1,5 @@
 #include "rescue/capture_monitor.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <opencv2/imgproc.hpp>
@@ -17,10 +18,19 @@ const HoldingView *CaptureMonitor::view(int16_t pitch, bool stable) const {
         if (std::abs(int(pitch) - int(v.pitch_cdeg)) <= c_.pitch_tolerance_cdeg) return &v;
     return nullptr;
 }
+float CaptureMonitor::footprintHalf(const std::string &label) const {
+    switch (targetKind(label)) {
+    case TargetKind::ORDINARY: return c_.footprint_ordinary_m;
+    case TargetKind::DANGEROUS: return c_.footprint_dangerous_m;
+    case TargetKind::CORE: return c_.footprint_core_m;
+    case TargetKind::INJURED: return c_.footprint_injured_m;
+    default: return c_.footprint_unknown_m;
+    }
+}
 void CaptureMonitor::update(PushObservation &in, const std::vector<SegDetection> &detections, uint64_t now) {
-    in.held = {}; in.captured = false; in.held_complete = false; in.hold_observable = false;
+    in.held = {}; in.held_objects.clear(); in.captured = false; in.held_complete = false; in.hold_observable = false;
     in.corridor = {}; in.corridor_complete = false; in.corridor_occlusion_free = false;
-    diag_ = {};
+    diag_ = {}; corridor_diag_.clear();
     // Image positions are only comparable at one fixed, settled camera pitch.
     if (!in.camera_pitch_stable || in.camera_pitch_cdeg == kCameraPitchInvalid) { reset(); return; }
     std::vector<const SegDetection *> fresh;
@@ -59,6 +69,7 @@ void CaptureMonitor::update(PushObservation &in, const std::vector<SegDetection>
         if (!inside) { ambiguous = true; diag_.ambiguous.push_back(d->track_id); } // centre inside but box crosses the edge
         if (b.y + b.height < v->min_visible_bottom_y_px) { ambiguous = true; diag_.ambiguous.push_back(d->track_id); continue; }
         in.held.add(labelOf(*d));
+        in.held_objects.push_back({d->track_id, labelOf(*d), d->confidence});
         if (d->track_id < 0) { followed = false; diag_.unfollowed.push_back(-1); continue; }
         auto &track = next[d->track_id];
         const auto it = history_.find(d->track_id);
@@ -82,21 +93,45 @@ void CaptureMonitor::update(PushObservation &in, const std::vector<SegDetection>
     bool complete = true, occlusion_free = true;
     std::vector<const SegDetection *> members;
     for (const auto *d : fresh) {
+        CorridorEntry e;
+        e.track_id = d->track_id; e.label = d->label; e.confidence = d->confidence; e.age_us = now - d->timestamp_us;
         if (!d->ground_position_valid || !std::isfinite(d->body_xy_m.x) || !std::isfinite(d->body_xy_m.y)) {
-            complete = false; continue; // cannot tell whether it lies in the corridor
+            complete = false; e.reason = "no_ground_position"; corridor_diag_.push_back(e); continue; // cannot tell whether it lies in the corridor
         }
         // Rotate into the rush direction: heading_error is the bearing, positive left.
         const float along = c * d->body_xy_m.y - s * d->body_xy_m.x;
         const float across = s * d->body_xy_m.y + c * d->body_xy_m.x;
-        if (along < 0 || along > reach || std::abs(across) > c_.corridor_half_width_m) continue;
+        e.along_m = along; e.across_m = across; e.footprint_m = footprintHalf(labelOf(*d));
+        const bool lateral_centre = std::abs(across) <= c_.corridor_half_width_m;
+        const bool lateral_foot = std::abs(across) <= c_.corridor_half_width_m + e.footprint_m;
+        if (along < -e.footprint_m || along > reach + e.footprint_m || !lateral_foot) {
+            e.reason = along < -e.footprint_m ? "behind" : along > reach + e.footprint_m ? "beyond_reach" : "outside_lateral";
+            corridor_diag_.push_back(e); continue;
+        }
+        e.counted = true; e.footprint_only = !lateral_centre || along < 0 || along > reach; e.reason = "counted";
+        corridor_diag_.push_back(e);
         in.corridor.add(labelOf(*d));
         members.push_back(d);
         // Cut by the image bottom: part of the object, or one behind it, may be unseen.
-        if (d->box.y + d->box.height >= c_.image_height_px - 2) occlusion_free = false;
+        if (d->box.y + d->box.height >= c_.image_height_px - 2 && targetKind(labelOf(*d)) != TargetKind::ORDINARY) occlusion_free = false;
     }
+    // Image overlap only matters for something that can really sit in or behind the corridor: a box whose
+    // measured ground position is clearly off to the side (or well beyond reach) is a neighbour, not a hidden object.
+    const auto beside = [&](const SegDetection *d) {
+        if (!d->ground_position_valid || !std::isfinite(d->body_xy_m.x) || !std::isfinite(d->body_xy_m.y)) return false;
+        const float along = c * d->body_xy_m.y - s * d->body_xy_m.x;
+        const float across = s * d->body_xy_m.y + c * d->body_xy_m.x;
+        return std::abs(across) > c_.corridor_half_width_m + c_.occlusion_side_margin_m || along > reach + c_.occlusion_side_margin_m;
+    };
     for (size_t i = 0; i < members.size(); ++i)
         for (size_t j = 0; j < fresh.size(); ++j)
-            if (fresh[j] != members[i] && iou(members[i]->box, fresh[j]->box) > c_.occlusion_iou) occlusion_free = false;
+            if (fresh[j] != members[i] && !beside(fresh[j]) && iou(members[i]->box, fresh[j]->box) > c_.occlusion_iou) {
+                // Two overlapping ordinary supplies are just a pair; a hidden third is still caught by the trip limit.
+                const bool pair = targetKind(labelOf(*members[i])) == TargetKind::ORDINARY &&
+                                  std::find(members.begin(), members.end(), fresh[j]) != members.end() &&
+                                  targetKind(labelOf(*fresh[j])) == TargetKind::ORDINARY;
+                if (!pair) occlusion_free = false;
+            }
     in.corridor_complete = complete;
     in.corridor_occlusion_free = complete && occlusion_free;
 }

@@ -17,7 +17,11 @@ namespace rescue {
 struct MotionWatchConfig {
     float cmd_min_mps = .05f, cmd_min_wz_rps = .08f;
     float still_acc_std_mps2 = .15f, still_gyro_rps = .04f;
-    uint64_t window_us = 400000, suspect_us = 1500000, imu_max_age_us = 200000;
+    // window 0.7 s / 3 samples: the control loop runs at only ~6-10 Hz, a 0.4 s window never held the 5 samples `still` used to need
+    uint64_t window_us = 700000, suspect_us = 1500000, imu_max_age_us = 200000;
+    size_t still_min_samples = 3;
+    // pure-rotation stall: commanded to spin in place but the gyro stays ~0 (free spin measured >=0.1 rad/s, stalled ~0.005)
+    float spin_min_wz_rps = .2f, spin_max_vx_mps = .05f, spin_still_gyro_rps = .05f;
     float block_min_vx_mps = .10f, block_min_turn_rad = .25f, block_ratio = .16f, block_release_ratio = .22f;
     uint64_t block_window_us = 1200000;
 };
@@ -40,7 +44,7 @@ public:
             while (!win_.empty() && now_us - win_.front().first > c_.window_us) win_.pop_front();
         } else win_.clear();
         acc_std_ = stddev();
-        const bool still = imu_fresh && win_.size() >= 5 && acc_std_ < c_.still_acc_std_mps2 && gyro_norm_ < c_.still_gyro_rps;
+        const bool still = imu_fresh && win_.size() >= c_.still_min_samples && acc_std_ < c_.still_acc_std_mps2 && gyro_norm_ < c_.still_gyro_rps;
         auto &s = per_state_[state];
         if (cmd) {
             cmd_run_us_ += dt; s.cmd_us += dt;
@@ -48,6 +52,7 @@ public:
             if (still) s.still_us += dt;
         } else { cmd_run_us_ = still_run_us_ = 0; }
         updateBlocked(now_us, dt, cmd_vx, cmd_wz, output_enabled && imu_fresh);
+        updateSpinStall(dt, cmd_vx, cmd_wz, output_enabled && imu_fresh);
         const bool was = suspect_;
         suspect_ = cmd && still_run_us_ >= c_.suspect_us;
         if (suspect_) { suspect_total_us_ += dt; s.suspect_us += dt; longest_us_ = std::max(longest_us_, still_run_us_); }
@@ -58,6 +63,7 @@ public:
     }
     bool suspect() const { return suspect_; }
     uint64_t blockedUs() const { return blocked_run_us_; }
+    uint64_t spinStallUs() const { return spin_stall_us_; }
     float blockRatio() const { return block_ratio_; }
     uint64_t suspectTotalUs() const { return suspect_total_us_; }
     uint64_t longestUs() const { return longest_us_; }
@@ -70,7 +76,7 @@ public:
           << " acc_norm=" << acc_norm_ << " acc_std=" << acc_std_ << " gyro=" << gyro_norm_
           << " roll=" << rpy_[0] << " pitch=" << rpy_[1]
           << " cmd_run_ms=" << cmd_run_us_ / 1000 << " still_run_ms=" << still_run_us_ / 1000
-          << " blk_ratio=" << block_ratio_ << " blocked_ms=" << blocked_run_us_ / 1000
+          << " blk_ratio=" << block_ratio_ << " blocked_ms=" << blocked_run_us_ / 1000 << " spin_stall_ms=" << spin_stall_us_ / 1000
           << " suspect=" << suspect_ << " suspect_total_ms=" << suspect_total_us_ / 1000 << " longest_ms=" << longest_us_ / 1000
           << " per_state=";
         bool first = true;
@@ -108,6 +114,17 @@ private:
         }
         was_blocked_ = blocked;
     }
+    void updateSpinStall(uint64_t dt, float cmd_vx, float cmd_wz, bool enabled) {
+        const bool spin = enabled && dt > 0 && dt <= 500000 && std::abs(cmd_wz) >= c_.spin_min_wz_rps && std::abs(cmd_vx) < c_.spin_max_vx_mps;
+        const bool stalled = spin && gyro_norm_ < c_.spin_still_gyro_rps;
+        if (stalled) {
+            if (!spin_stall_us_) events_ << "[MOTION_EVENT] spin_stall_begin state=" << state_ << " cmd_wz=" << cmd_wz << " gyro=" << gyro_norm_ << "\n";
+            spin_stall_us_ += dt;
+        } else if (spin_stall_us_) {
+            events_ << "[MOTION_EVENT] spin_stall_end state=" << state_ << " ms=" << spin_stall_us_ / 1000 << "\n";
+            spin_stall_us_ = 0;
+        }
+    }
     struct Acc { uint64_t cmd_us = 0, still_us = 0, suspect_us = 0; };
     float stddev() const {
         if (win_.size() < 2) return 0.f;
@@ -125,7 +142,7 @@ private:
     std::array<float, 3> rpy_{};
     std::deque<std::pair<uint64_t, float>> win_;
     std::deque<BlkSample> blk_;
-    uint64_t blocked_run_us_ = 0;
+    uint64_t blocked_run_us_ = 0, spin_stall_us_ = 0;
     float block_ratio_ = -1.f;
     bool was_blocked_ = false;
     std::map<std::string, Acc> per_state_;

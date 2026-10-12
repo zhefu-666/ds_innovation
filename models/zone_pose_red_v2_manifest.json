@@ -1,0 +1,68 @@
+{
+  "format_version": 1,
+  "target_platform": "rk3588",
+  "compatible_boards": [
+    "RK3588",
+    "RK3588S"
+  ],
+  "source_onnx": {
+    "file": "zone_pose_red_v2.onnx",
+    "sha256": "8a2c253046598c406437bc69e0ae83c621d9e15070187bba0b7c676218f4df19",
+    "opset": 17
+  },
+  "input": {
+    "name": "images",
+    "shape": [
+      1,
+      3,
+      640,
+      640
+    ],
+    "source_layout": "NCHW",
+    "board_layout": "NHWC",
+    "dtype": "uint8",
+    "color": "RGB",
+    "width": 640,
+    "height": 640,
+    "mean": [
+      0,
+      0,
+      0
+    ],
+    "std": [
+      255,
+      255,
+      255
+    ]
+  },
+  "outputs": [
+    {
+      "name": "output0",
+      "shape": [
+        1,
+        18,
+        8400
+      ]
+    }
+  ],
+  "classes": [
+    "zone_left",
+    "zone_right"
+  ],
+  "class_count": 2,
+  "task": "pose",
+  "kpt_count": 4,
+  "kpt_shape": [
+    4,
+    3
+  ],
+  "rknn_toolkit2": "2.3.2",
+  "conversion_mode": "fp",
+  "calibration_image_count": 0,
+  "default_confidence": 0.25,
+  "default_nms_iou": 0.45,
+  "generated_at": "2026-10-10T23:03:07+0800",
+  "model_files": [
+    "model_fp.rknn"
+  ]
+}

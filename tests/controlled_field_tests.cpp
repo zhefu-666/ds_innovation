@@ -29,20 +29,18 @@ int main(){
     d.body_xy_m={-.16,.65};d.ground_contact_valid=false;tick({d});assert(!in.zone_counts_valid);
     halves[1].valid=false;tick();assert(!in.zone_counts_valid);halves[1].valid=true;
     tick({},false);assert(!in.path_safe&&!in.retreat_safe&&!in.zone_counts_valid);
-    d.label="dangerous_object";d.body_xy_m={0,.3};tick({d});assert(!in.path_safe&&!in.retreat_safe);
-    // No extra 15 cm margin, but the actual body radius is still protected.
-    d.body_xy_m={0,.46f};tick({d});assert(in.path_safe&&in.retreat_safe);
-    d.body_xy_m={0,.32f};tick({d});assert(!in.path_safe&&!in.retreat_safe);
-    d.body_xy_m={0,.321f};tick({d});assert(in.path_safe&&in.retreat_safe);
-    d.ground_position_valid=false;tick({d});assert(!in.path_safe&&!in.retreat_safe);
+    // dangerous_object never restricts motion (only carrying it is forbidden): in the body, ahead, or unlocated.
+    d.label="dangerous_object";d.body_xy_m={0,.3};tick({d});assert(in.path_safe&&in.retreat_safe);
+    d.body_xy_m={0,.1f};tick({d});assert(in.path_safe&&in.retreat_safe);
+    d.body_xy_m={0,0};tick({d});assert(in.path_safe&&in.retreat_safe);
+    d.ground_position_valid=false;tick({d});assert(in.path_safe&&in.retreat_safe);
     d.ground_position_valid=true;d.body_xy_m={0,.3f};
-    // Even a legacy cue-contact flag cannot bypass body collision protection.
     d.ground_contact_valid=true;d.track_id=7;
     previous.state=PushState::CUE_APPROACH;previous.target_is_search_cue=true;previous.cue_contact_allowed=true;previous.target_id=7;
-    tick({d});assert(!in.path_safe);
-    d.label="unknown";tick({d});assert(!in.path_safe);
+    tick({d});assert(in.path_safe);
+    d.label="unknown";tick({d});assert(!in.path_safe&&!in.retreat_safe); // unknown objects stay conservative
     d.label="dangerous_object";previous.state=PushState::APPROACH;
-    tick({d});assert(!in.path_safe);
+    tick({d});assert(in.path_safe);
     previous.target_is_search_cue=false;
     previous.first_ordinary_delivered=true;in.target_region_valid=false;in.geometry_valid=true;tick();
     assert(!in.target_region_valid); // no re-picking unseen delivered objects
@@ -51,13 +49,24 @@ int main(){
         PushObservation obs;obs.geometry_valid=true;obs.distance_m=.4f;
         SegDetection blue;blue.label="dangerous_object";blue.ground_position_valid=true;blue.body_xy_m={.25f,.1f};
         directional.update(obs,{blue},halves,{1280,720},previous,true);
-        assert(obs.directional_clearance_valid&&obs.path_safe&&obs.jaw_open_safe&&!obs.turn_safe&&!obs.arc_safe);
-        blue.body_xy_m={.085f,.272f};directional.update(obs,{blue},halves,{1280,720},previous,true);
-        assert(!obs.path_safe); // The actual observed front blue really blocks this path.
-        blue.body_xy_m={0,-.25f};directional.update(obs,{blue},halves,{1280,720},previous,true);
-        assert(obs.path_safe&&!obs.retreat_safe);
+        assert(obs.directional_clearance_valid&&obs.path_safe&&obs.jaw_open_safe&&obs.turn_safe&&obs.arc_safe&&obs.retreat_safe);
+        blue.label="unknown";directional.update(obs,{blue},halves,{1280,720},previous,true);
+        assert(!obs.arc_safe&&!obs.turn_safe); // unknown objects keep the full travel-radius bound
+        blue.label="dangerous_object";
+        // The run-59 deadlock case: a blue just beyond the frame front, in the corridor, in the swept radius, unlocated.
+        for(const cv::Point2f p:std::vector<cv::Point2f>{{.093f,.231f},{.085f,.272f},{0,-.25f},{0,0}}) {
+            blue.body_xy_m=p;directional.update(obs,{blue},halves,{1280,720},previous,true);
+            assert(obs.path_safe&&obs.retreat_safe&&obs.turn_safe&&obs.arc_safe&&obs.jaw_open_safe);
+            assert(directional.blockers().empty());
+        }
         blue.ground_position_valid=false;directional.update(obs,{blue},halves,{1280,720},previous,true);
-        assert(!obs.path_safe&&!obs.retreat_safe&&!obs.turn_safe&&!obs.jaw_open_safe);
+        assert(obs.path_safe&&obs.retreat_safe&&obs.turn_safe&&obs.arc_safe&&obs.jaw_open_safe);
+        blue.label="unknown";directional.update(obs,{blue},halves,{1280,720},previous,true);
+        assert(!obs.path_safe&&!obs.retreat_safe&&!obs.arc_safe&&!obs.jaw_open_safe);
+        assert(directional.blockers().find("unlocated")!=std::string::npos);
+        blue.label="dangerous_object";
+        blue.label="unlabeled_thing";directional.update(obs,{blue},halves,{1280,720},previous,true);
+        assert(!obs.turn_safe);
     }
     { // Only explicit contact-test permission overrides missing and blocked clearance.
         ControlledField field(g,.32f,{.22f,.10f,.15f,.15f,.18f,.22f});
