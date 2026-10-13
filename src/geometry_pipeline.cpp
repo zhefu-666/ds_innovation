@@ -157,7 +157,7 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,const KeypointFr
 }
 void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const ExpectedStop& stop,
                              const std::string& team,uint64_t now) const {
-    in.target_region_valid=false;in.target_in_zone=false;in.delivery_observed=false;
+    in.target_region_valid=false;in.target_in_zone=false;in.delivery_observed=false;in.target_center_valid=false;
     in.zone_identity_verified=r.identity_verified;
     in.geometry_valid=false;in.zone_valid=false;in.zone_own=false;in.zone_class.clear();
     in.zone_estimate=r.zone;
@@ -165,6 +165,7 @@ void GeometryPipeline::apply(PushObservation& in,const GeometryResult& r,const E
         now>=d.timestamp_us&&now-d.timestamp_us<=200000) {
         in.geometry_valid=d.ground_contact_valid||(contact_.accept_size_mismatch&&d.ground_contact_reason=="size_mismatch");in.distance_m=cv::norm(d.body_xy_m);
         in.heading_error=std::atan2(-d.body_xy_m.x,d.body_xy_m.y); // positive left/CCW
+        in.target_center_valid=d.body_center_valid;if(d.body_center_valid)in.target_center_body=d.body_center_xy_m;
     }
     in.zone_valid=r.zone.trusted(now);in.zone_own=in.zone_identity_verified&&in.zone_valid&&r.zone.zone_label==team+"_safe_zone";
     // Only a trusted, independently identified own zone can classify the target.

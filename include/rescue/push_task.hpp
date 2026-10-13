@@ -35,7 +35,6 @@ struct PushObservation {
     double pixel_ratio_raw=0,pixel_ratio_smoothed=0;
     std::string pixel_mode="none",pixel_reason,multi_view_reason;
     bool pixel_locked=false;int observation_view=0,observation_frames=0;
-    bool target_split=false; // row mode: the locked ordinary block has an injured/dangerous/core piece in its frame footprint
     float pixel_confidence=0; // detector confidence of the locked box
     bool pixel_bearing_valid=false;float pixel_bearing=0; // bearing of the locked box centre from its pixels alone (positive left); needs no ground projection
     uint64_t observation_round=0;
@@ -84,8 +83,6 @@ struct PushObservation {
     ZoneEstimate zone_estimate;
     // Coarse sighting of a safe zone at any range (no geometry fix needed): body bearing, left positive. enemy: measured enemy colour.
     bool zone_sight_valid = false, zone_sight_enemy = false; float zone_sight_bearing = 0;
-    // This frame's confident zone corners: both far corners of one half / both near corners of one half (all four = both true).
-    bool zone_far_pts = false, zone_near_pts = false;
     // TEMP_ASSUMPTION visual zone reference (coarse, >=2 pose points); never a safety gate.
     bool vref_valid = false;
     int vref_points = 0;
@@ -98,16 +95,10 @@ struct PushObservation {
     std::vector<CargoImg> cargo_img;
     // On-end injured blocks (never transport targets), body-frame ground points of the current frame.
     std::vector<cv::Point2f> upright_body; uint64_t upright_ts_us = 0;
+    cv::Point2f target_center_body; bool target_center_valid = false; // filled by geometry_pipeline.cpp for the locked target
     // Every other confident, ground-located detection (any class) except the locked target; only read when clear_neighbours is on.
     std::vector<cv::Point2f> clutter_body; uint64_t clutter_ts_us = 0;
     std::vector<cv::Point2f> clutter_ordinary; // subset of clutter_body that are ordinary supplies (exact same points)
-    std::vector<cv::Point2f> look_body, look_ordinary; uint64_t look_ts_us = 0; // every ground-valid detection incl. the locked target (clutter_* excludes it); look_ts_us is set on every frame, empty or not
-    uint64_t match_remaining_us = UINT64_MAX; // match time left; UINT64_MAX = unknown / no limit
-    int look_edge_ordinary = 0, look_edge_other = 0; // confident boxes that touch the image bottom inside the frame's pixel span: never ground-projected (box_outside_image), so absent from look_body; counted by the PILE look from pixels
-    // Pre-cut check (one shot, PILE phase 14): every confident ground-located detection of the current frame, as the lateral extent [xl,xr] of its box-bottom corners
-    // and the forward ground distance y of the box-bottom row (body frame). size_ratio = depth from pixel size / depth from ground projection (1 = they agree).
-    struct PrecutBox { float xl = 0, xr = 0, y = 0, size_ratio = 1.f; bool ordinary = false, clipped = false; };
-    std::vector<PrecutBox> precut_boxes; // stamped by look_ts_us
     std::string zone_class; // primary target's expected half, diagnostic only
     // Objects fully inside each half of our zone, off the fence and at rest.
     bool zone_counts_valid = false;
@@ -223,7 +214,6 @@ struct TaskTuning {
     // After the rush-in: stop, lift the camera to the 20deg stage, then turn once in place toward the side with fewer blocks in view (no oscillation, no re-centring).
     // The turn runs until at least disperse_turn_min_rad AND the view ahead of the frame mouth holds <= disperse_turn_clear_max blocks for disperse_turn_clear_frames fresh frames, never past disperse_turn_rad.
     bool disperse_single_turn=false; float disperse_turn_min_rad=.60f, disperse_turn_view_range_m=1.0f, disperse_turn_view_half_rad=.60f; int disperse_turn_clear_max=1, disperse_turn_clear_frames=2; uint64_t disperse_turn_look_us=1200000;
-    bool row_split_pile=false; // APPROACH: a locked row block flagged target_split goes to PILE (separate it) instead of being skipped by the row selector
     bool row_select=false; int row_min_n=3; float row_resid_m=.03f, row_max_tilt_rad=.6f, row_half_along_m=.09f, row_half_across_m=.06f; // PixelSelector row mode: middle block of a left-right row
     float disperse_turn_push_m=0.f; uint64_t disperse_turn_push_budget_us=3000000; // after the single turn: drive straight on this far (0 = off) before the sweep ends
     // Frame-zone check (needs the 20deg stage): once the view ahead is thin and disperse_turn_min_rad is reached, the camera drops to track_pitch (lowest) and the turn goes on until the blocks seen in the zone
@@ -233,32 +223,13 @@ struct TaskTuning {
     // PILE: the corridor ahead of the frame mouth holds many blocks. Look far (5deg) for an empty bearing, carry the pile there with the frame open
     // while turning a large angle, then (one layer left) back off a little, measure the remaining cluster and split it with one side edge of the frame.
     bool pile_clear=false; int pile_corridor_min=3, pile_confirm=5, pile_max_runs=2; float pile_trigger_max_m=.75f; uint64_t pile_budget_us=40000000, pile_cool_us=15000000;
-    int pile_window=10; // APPROACH PILE trigger: pile_confirm frames out of the last pile_window ticks (counts flicker by one block per frame, so strict consecutive frames almost never completes)
-    bool pile_on_veto=true, pile_veto_dangerous=true; int pile_occluded_min=2, pile_veto_corridor_min=2; float pile_cut_margin_m=0.f; // a TOO_MANY_SUPPLIES / INJURED_BEFORE_FIRST pre-check veto (corridor >= pile_corridor_min) or a RUSH OCCLUDED veto (corridor >= pile_occluded_min) starts PILE (still honours the PILE cool-down and pile_max_runs, so it cannot starve other states)
     float pile_advance_m=.5f, pile_advance_speed=.25f, pile_turn_wz=2.0f, pile_align_tol_rad=.22f, pile_block_half_m=.03f; uint64_t pile_advance_budget_us=12000000, pile_back_budget_us=9000000;
-    float pile_cut_extra_m=.1f; // PILE cut: constant added to the planned drive-in distance pile_cut_m_ (the judged distance came out too short), applied after the .65 m clamp
-    float pile_cluster_radius_m=.45f, pile_cluster_half_x_m=.55f, pile_back_m=.25f, pile_frame_half_m=.14f, pile_cut_depth_m=.35f, pile_cut_speed=.25f; uint64_t pile_measure_us=700000, pile_cut_budget_us=8000000;
-    float pile_cut_bias_rad=0.f; // PILE cut: constant extra turn added in the cut direction (the in-place turn stops pile_align_tol short, so every cut-in was a little under-angled)
-    // PILE cut scan: replaces the cut spin. Camera at far_pitch (5deg), rotate in the cut's turn direction until a lane (|x|<=lane_half, near_m<y<=range_m ahead) holds no block for scan_frames fresh frames while standing still; drive advance_m that way, look into the frame (phase 13); if still not clean, retrace and back out along the cut heading.
-    // CARRY lane guard: while carrying to the safe zone, loose blocks seen (or remembered) in the swept lane ahead of the frame are steered around instead of plowed in front of it.
-    bool carry_lane_guard=false; float carry_lane_half_m=.21f, carry_lane_range_m=.45f, carry_lane_step_rad=.15f, carry_lane_max_rad=1.3f, carry_lane_blind_m=.35f, carry_lane_zone_margin_m=.05f, carry_lane_merge_m=.05f; uint64_t carry_lane_mem_us=30000000, carry_lane_hold_us=1500000;
-    // Lane view: zone located -> 20deg check/bypass of blocks ahead of the frame, then 5deg back toward the zone bearing (assumed carry only).
-    bool carry_lane_view=false; int16_t carry_lane_pitch_cdeg=2000; int carry_lane_look_frames=2, carry_lane_cycles_max=2; uint64_t carry_lane_look_us=1000000; float carry_lane_pass_margin_m=.04f;
-    float carry_lane_realign_rad=.14f; uint64_t carry_lane_realign_us=4000000; // after a detour / give-up: turn in place until the zone yaw error is within this, then drive on
-    bool pile_cut_scan=false; float pile_scan_wz=1.0f, pile_scan_lane_half_m=.26f, pile_scan_half_rad=.40f, pile_scan_near_m=.30f, pile_scan_range_m=.80f, pile_scan_advance_m=.20f; int pile_scan_frames=2; uint64_t pile_scan_budget_us=9000000, pile_scan_settle_us=300000;
-    bool pile_cut_spin=false; float pile_spin_wz=1.5f; uint64_t pile_spin_budget_us=9000000; // PILE cut: after the drive-in finishes, spin one full revolution in place (same direction as the cut turn) before backing out
-    bool pile_precut=false; float pile_precut_size_tol=.3f, pile_precut_block_half_m=.02f, pile_precut_max_shift_m=.25f; uint64_t pile_precut_settle_us=400000, pile_precut_timeout_us=1500000; // PILE one-shot pre-cut check: standing aligned for the cut, judge the frame lane against the boxes of one fresh image (whole in / whole out / straddling); re-aim once or give up, then drive without further correction
+    float pile_cluster_radius_m=.45f, pile_cluster_half_x_m=.55f, pile_view_back_m=.20f, pile_frame_half_m=.14f, pile_cut_depth_m=.2f, pile_cut_speed=.25f; uint64_t pile_measure_us=700000, pile_cut_budget_us=8000000;
     int pile_cut_max_steps=1; // PILE cut: while the enclosed set still mixes in a non-ordinary block, try 2..N block-widths of turn to each side (1 = one block only)
-    bool pile_cut_require_clean=false; // PILE cut: when no cut can leave a frame without non-ordinary blocks, give the pile up (and keep SCAN away from it for blacklist_us) instead of cutting anyway
-    uint64_t pile_min_remaining_us=0, pile_cut_reserve_us=0; // >0: no PILE entry below this match time left / a cut round (plan+back) must fit with this much time to spare for the delivery after it, else the pile is given up
-    int pile_cut_rounds=2; // PILE cut: max cut rounds per PILE run; after each cut the robot backs out and re-measures, and only reports pile_split_done when the frame ahead is really clean
-    uint64_t pile_cut_budget_max_us=16000000; float pile_ratio_max=5.5f; // PILE cut: the drive-in budget scales with the planned travel (planned / speed * 1.25 + 2.5 s), never below pile_cut_budget_us nor above this
-    int look_edge_px=4; float look_edge_x_lo=.08f, look_edge_x_hi=.92f; // main.cpp: a box whose bottom is within look_edge_px of the image bottom and that overlaps [lo,hi] x image width counts as inside the frame for the PILE look
-    bool pile_cut_capture=false; int pile_look_frames=2; float pile_look_pitch_frac=0.f, pile_look_close_frac=.5f; // PILE cut: the look runs during the drive-in (camera down at pile_look_pitch_frac of the travel, frame may close from pile_look_close_frac on), then again after the drive-in (and spin); hold the camera at near_pitch_cdeg and look into the frame; 1..kMaxSuppliesPerTrip ordinary blocks and nothing else for pile_look_frames fresh frames -> close the frame and carry them (no re-search)
     // PILE chain: a disperse sweep that really swung hands over to PILE instead of the plain re-search. While the cluster ahead of the frame is deeper than pile_layer_depth_m
-    // (more than one layer), rush in pile_chain_rush_m and turn the big angle again (the disperse step), then back off pile_back_m and re-measure; at most pile_chain_max rounds, then the PILE cut splits the last layer.
+    // (more than one layer), rush in pile_chain_rush_m and turn the big angle again (the disperse step), then back off pile_chain_back_frac of the way in and re-measure; at most pile_chain_max rounds, then the PILE cut splits the last layer.
     // The big-angle turn leaves the pushed-out blocks outside the camera's field of view, so after the back-off the car first looks where they went (the middle of the turn, then the heading it rushed in on) before it gives the cluster up.
-    bool pile_chain=false; int pile_chain_max=3; float pile_layer_depth_m=.08f, pile_chain_rush_m=.15f;
+    bool pile_chain=false; int pile_chain_max=3; float pile_layer_depth_m=.08f, pile_chain_rush_m=.15f, pile_chain_back_frac=.35f, pile_chain_min_back_m=.2f;
     bool dense_no_lock=false;      // SCAN: a group of several objects is split by a committed sweep instead of locking one of them
     bool sweep_non_supply=true;    // a locked target that is not ordinary_supply is swept aside (rush + swings) instead of grabbed, then vetoed
     // Open-jaw corridor rejected because a few neighbours sit beside the target: nudge them aside with a small closed-frame swing, then re-acquire.
@@ -292,7 +263,7 @@ struct TaskTuning {
     bool rush_pulse_turn=false; float rush_pulse_wz=.55f, rush_pulse_max_rad=.20f, rush_pulse_done_frac=.85f;
     uint64_t rush_pulse_budget_us=2500000, rush_pulse_settle_us=500000; int rush_pulse_max=4;
     bool assume_probe=true; uint64_t assume_probe_first_us=1200000, assume_probe_len_us=900000, assume_probe_gap_us=1500000; // 直推时周期性小偏航探测，让IMU能看出堵转
-    uint64_t assume_verify_fix_wait_us=7000000, assume_verify_far_after_us=1500000; float assume_inside_min_hold_y_m=.03f, assume_blocked_deep_hold_y_m=.10f; // 视觉定不了货物(被遮/截断)时，IMU堵转且框已深入此深度→视为推到位，不重推
+    uint64_t assume_verify_fix_wait_us=7000000, assume_verify_far_after_us=1500000; float assume_inside_min_hold_y_m=.06f, assume_blocked_deep_hold_y_m=.10f; // 视觉定不了货物(被遮/截断)时，IMU堵转且框已深入此深度→视为推到位，不重推
     // 假设模式：后退后、前推前先用视觉把方框对准货物（原地转向），推进时按货物方位纯追踪，斜推角收小；货物丢失后保持丢失前航向。默认关闭。
     bool assume_align_push=false; float assume_align_tol_rad=.06f, assume_align_wz=.30f, assume_slant_max_rad=.45f; uint64_t assume_align_budget_us=3000000;
     uint64_t attempt_budget_us=0; // enabled by schema 2, never reset by target reselection
@@ -356,9 +327,6 @@ struct TaskTuning {
     // sighted/remembered zone (else back along the start line) and spin carry_search_respin_turns again. Sightings older than carry_sight_mem_us are dropped.
     float carry_search_turns = 2.f, carry_search_respin_turns = 1.f;
     uint64_t carry_leg_us = 6000000, carry_leg_turn_cap_us = 20000000, carry_spin_cap_us = 40000000, carry_sight_fresh_us = 1500000, carry_sight_mem_us = 40000000;
-    // Carrying with only the far zone corners in view for carry_far_only_us: stop and tilt to assume_view_pitch_cdeg for up to carry_look_us to bring the
-    // near corners in. Success keeps that view for carry_view_hold_us after the last zone sighting; a failed look backs off for carry_look_cool_us.
-    uint64_t carry_far_only_us = 600000, carry_look_us = 2500000, carry_look_cool_us = 5000000, carry_view_hold_us = 8000000;
     uint64_t zone_search_budget_us = 45000000; // includes stopped NEAR checks while searching
     // Holding a load while searching our zone: after enemy_evade_frames consecutive enemy-colour frames, turn about
     // (IMU-measured, in the scan direction) and drive a long straight leg away (enemy_evade_m is real distance; commanded = x motion ratio).
@@ -431,19 +399,9 @@ private:
     uint64_t approach_last_us_ = 0;
     // PILE state
     int disperse_turn_phase_ = 0, disperse_clear_n_ = 0; float disperse_turn_dir_ = 1; uint64_t disperse_look_ready_us_ = 0, disperse_frame_ts_us_ = 0; float disperse_frame_turned0_ = 0.f; // 1: camera lift + look, 2: turning, 3: push on, 4: low-camera frame-zone check + turning (only meaningful while sweep_phase_ == 5)
-    int pile_cut_n_ = 0; // PILE cut rounds finished in this run (> 0 means the measure phase is a post-cut verification)
-    uint64_t pile_cut_budget_dyn_us_ = 0; // drive-in budget of the current cut round (set at the cut decision)
-    bool pile_near_ = false; uint64_t pile_look_ready_us_ = 0, pile_look_ts_us_ = 0; int pile_look_ok_ = 0, pile_look_n_ = 0; bool pile_look_pre_ = false, pile_enclosed_ = false; // pre-look: first look right after the drive-in (before the spin); enclosed: LOWER_FRAME goes straight to CARRY // PILE look phase: camera held at near pitch from the first look on; look state
-    int pile_phase_ = 0, pile_runs_ = 0, pile_seen_ = 0; uint16_t pile_hist_ = 0; uint64_t pile_phase_us_ = 0, pile_cool_until_us_ = 0;
+    int pile_phase_ = 0, pile_runs_ = 0, pile_seen_ = 0; uint64_t pile_phase_us_ = 0, pile_cool_until_us_ = 0;
     float pile_yaw0_ = 0, pile_travel0_ = 0, pile_cut_yaw_ = 0, pile_cut_m_ = 0, pile_push0_ = -1.f;
-    bool pile_precut_done_ = false; float pile_theta_ = 0; // pre-cut check already used for this cut / one block's angular size at the measure range
-    std::vector<cv::Point2f> carry_obs_zone_; std::vector<uint64_t> carry_obs_ts_; uint64_t carry_obs_frame_us_ = 0, carry_obs_tick_us_ = ~0ull, carry_lane_block_us_ = 0; float carry_lane_delta_ = 0; bool carry_lane_gave_up_ = false;
-    int carry_lane_phase_ = 0, carry_lane_look_n_ = 0, carry_lane_cycles_ = 0; // 0 off, 1 check (20deg), 2 detour (20deg), 3 return (5deg)
-    bool carry_lane_realign_ = false, carry_lane_square_ = false; uint64_t carry_lane_realign_t0_ = 0, carry_lane_square_t0_ = 0; // square_: a bend was taken, so the release line must be met square to the zone
-    uint64_t carry_lane_look_t0_ = 0; const char *carry_lane_why_ = "carry_lane_blocked";
-    bool pile_scan_ = false, pile_scan_moved_ = false, pile_scan_used_ = false; int pile_scan_sub_ = 0, pile_scan_ok_ = 0; float pile_scan_acc_ = 0, pile_scan_last_ = 0, pile_scan_yaw_ = 0; uint64_t pile_scan_stop_us_ = 0, pile_scan_ts_ = 0; // PILE cut scan: camera at far pitch / advanced off the cut heading / detour started; sub 0 rotating 1 standing-confirm; turn so far
-    float pile_spin_dir_ = 1.f, pile_spin_acc_ = 0, pile_spin_last_ = 0; // PILE cut spin: turn direction (left +) / signed yaw turned so far / previous yaw sample
-    int pile_chain_n_ = 0, pile_chain_look_ = 0; float pile_chain_yaw_pre_ = 0, pile_chain_yaw_mid_ = 0; // PILE chain: rounds spent / looks spent this round / heading before the turn / middle of the turn
+    int pile_chain_n_ = 0, pile_chain_look_ = 0; float pile_chain_in_m_ = 0, pile_chain_yaw_pre_ = 0, pile_chain_yaw_mid_ = 0; // PILE chain: rounds spent / looks spent this round / metres driven in this round / heading before the turn / middle of the turn
     int approach_last_id_ = -1; float approach_last_heading_ = 0.f, approach_last_distance_ = 0.f, approach_last_world_yaw_ = 0.f; bool approach_last_world_valid_ = false;
     bool approach_rebind_ = false; // 分级下压后允许改绑跟踪器新ID一次
     int16_t approach_pitch_ = kCameraPitchInvalid; // APPROACH分级下压：远处保持当前角，贴近时 5°→20°→40°
@@ -455,8 +413,6 @@ private:
     bool zone_mem_ = false, zone_enemy_ = false, cs_active_ = false, cs_last_set_ = false; int cs_phase_ = 0;
     float zone_mem_yaw_ = 0, zone_enemy_yaw_ = 0, cs_turned_ = 0, cs_goal_ = 0, cs_last_yaw_ = 0;
     uint64_t zone_mem_us_ = 0, cs_t0_ = 0, cs_leg_t0_ = 0;
-    bool carry_view20_ = false, carry_looking_ = false;
-    uint64_t carry_far_since_us_ = 0, carry_far_seen_us_ = 0, carry_look_t0_ = 0, carry_view_until_us_ = 0, carry_look_cool_until_us_ = 0;
     int enemy_evade_phase_ = 0, enemy_seen_frames_ = 0, enemy_evade_count_ = 0; // phase: 0 idle, 1 turning about, 2 driving away
     float enemy_evade_turned_ = 0, enemy_evade_yaw_ = 0, enemy_evade_last_yaw_ = 0;
     uint64_t enemy_evade_start_us_ = 0, enemy_evade_cool_until_us_ = 0;
@@ -518,7 +474,6 @@ private:
     bool ratio_snap_ = false, imu_seen_ = false, vref_used_ = false;
     float drRatio(uint64_t now) const { const bool stale = now - vref_seen_us_ > 400000; return motionRatio() * ((stale && (state_ == PushState::CARRY || state_ == PushState::BACK_OUT)) ? t_.assume_dr_pessimism : 1.f); }
     float motionRatio() const { return ratio_est_ > 0 ? ratio_est_ : t_.assume_motion_ratio; }
-    float pileRatio() const { return std::clamp(motionRatio(), t_.assume_motion_ratio, t_.pile_ratio_max); }
     cv::Point2f drop_centre_zone_;
     bool heading_seen_ = false;
     int lost_round_ = 0; // LOST_SEARCH: 0 FAR sweep, 1 intermediate (20deg) sweep for close cargo
@@ -559,7 +514,6 @@ private:
     int holdSeen(const PushObservation &in) const; // 1 seen, 0 in view but not held, -1 out of view
     int16_t desiredPitch() const;
     int pitchWait(const PushObservation &in, uint64_t now); // 1 ready, 0 moving, -1 timeout
-    bool carryLane(float &heading, float goal_m, const ZoneEstimate &z, const PushObservation &in, uint64_t now); // false = lane blocked, stop and wait
     float halfX() const;
     float holdCenter() const;
     PushState resumeState() const;

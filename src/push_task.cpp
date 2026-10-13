@@ -1,6 +1,5 @@
 #include "rescue/push_task.hpp"
 #include <algorithm>
-#include <bitset>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -50,12 +49,10 @@ void PushTask::enter(PushState s, uint64_t now, const char *why) {
     retreat_origin_valid_ = false; retreat_mode_ = 0; assume_blind_ = false;
     unstick_step_ = 0; prelower_us_ = 0;
     enemy_evade_phase_ = 0; enemy_seen_frames_ = 0; enemy_evade_cool_until_us_ = 0;
-    carry_view20_ = carry_looking_ = false; carry_far_since_us_ = carry_far_seen_us_ = carry_look_t0_ = 0;
     if (s != PushState::SCAN) { scatter_idle_since_us_ = 0; scatter_seen_ = 0; confirm_since_us_ = 0; vis_hits_ = vis_miss_ = 0; vis_chase_t0_ = 0; scan_hold_t0_ = scan_hold_cool_until_us_ = 0; }
     if (s != PushState::RUSH) rush_yaw_ref_set_ = false; // PREPARE (tracked) -> RUSH keeps the last seen target bearing
     if (s == PushState::START_ADVANCE) delivery_seen_ = false;
     if (s == PushState::APPROACH) precheck_seen_ = 0;
-    if (s != PushState::APPROACH) pile_hist_ = 0;
     if (s == PushState::RUSH) { rush_stall_phase_ = false; rush_stall_id_ = -1; rush_stall_samples_ = 0; rush_stall_last_us_ = 0; }
     if (s == PushState::VERIFY_CAPTURE) { vc_obs_frames_ = vc_label_frames_ = vc_bad_frames_ = 0; vc_bad_verdict_ = RuleVerdict::OK; vc_re_active_ = false; vc_re_track_ = -1; vc_re_frames_ = vc_re_strong_ = vc_re_clear_ = 0; }
     // 有20°中间角时，APPROACH沿用当前相机角（远处不提前下压），由接近距离分级切换；否则保持直接用TRACK角。
@@ -232,120 +229,6 @@ bool PushTask::tracking(const PushObservation &in) const {
 bool PushTask::zoneOk(const PushObservation &in) const {
     return in.zone_identity_verified && in.zone_valid && in.zone_own && in.zone_estimate.trusted(in.now_us);
 }
-// CARRY lane guard. Blocks seen ahead are kept in the zone frame (so they survive the camera blind zone and the
-// robot's own turning); the heading is bent to the nearest direction whose swept lane is clear. Zone-interior
-// points are the destination, not obstacles. false = every direction within the limit is blocked.
-bool PushTask::carryLane(float &heading, float goal_m, const ZoneEstimate &z, const PushObservation &in, uint64_t now) {
-    if (!t_.carry_lane_guard || !z.valid) return true;
-    carry_lane_why_ = "carry_lane_blocked";
-    if (carry_obs_tick_us_ != carry_us_) { // new carry trip (or resumed after a pause); camera moves and hold checks do not reset it
-        carry_obs_zone_.clear(); carry_obs_ts_.clear(); carry_obs_frame_us_ = 0; carry_lane_delta_ = 0; carry_lane_block_us_ = 0; carry_lane_gave_up_ = false;
-        carry_lane_phase_ = carry_lane_look_n_ = carry_lane_cycles_ = 0; carry_lane_look_t0_ = 0; carry_lane_realign_ = carry_lane_square_ = false; carry_lane_realign_t0_ = carry_lane_square_t0_ = 0;
-    }
-    carry_obs_tick_us_ = carry_us_;
-    const bool view = t_.carry_lane_view && carryLogic();
-    const auto pitchGate = [&]() { // false while the camera is still moving to this phase's preset
-        if (!view || pitchWait(in, now) != 0) return true;
-        carry_lane_why_ = "carry_lane_pitch_wait"; return false;
-    };
-    if (view && !carry_lane_phase_) {
-        carry_lane_phase_ = 1; carry_lane_look_n_ = 0; carry_lane_look_t0_ = 0;
-        std::cout << "[CARRY] lane view check pitch_deg=" << t_.carry_lane_pitch_cdeg * .01f << "\n";
-    }
-    if (!pitchGate()) return false;
-    const bool fresh = in.look_ts_us && in.look_ts_us != carry_obs_frame_us_ && now >= in.look_ts_us && now - in.look_ts_us <= t_.sweep_fresh_us;
-    std::vector<cv::Point2f> seen;
-    if (fresh) {
-        carry_obs_frame_us_ = in.look_ts_us;
-        for (const auto &p : in.look_body) {
-            if (!std::isfinite(p.x) || !std::isfinite(p.y) || p.y <= .05f || p.y > 1.5f) continue;
-            if (p.y <= t_.sweep_frame_front_m + .02f && std::abs(p.x) <= t_.pile_frame_half_m + .03f) continue; // the carried load / the frame itself
-            const cv::Point2f zp = z.bodyToZone(p);
-            if (zp.y > -t_.carry_lane_zone_margin_m) continue;
-            seen.push_back(zp);
-        }
-    }
-    const float merge = t_.carry_lane_merge_m;
-    size_t n = 0;
-    for (size_t i = 0; i < carry_obs_zone_.size(); ++i) {
-        const cv::Point2f b = z.zoneToBody(carry_obs_zone_[i]);
-        bool keep = now - carry_obs_ts_[i] <= t_.carry_lane_mem_us && b.y > -.1f;
-        if (keep && fresh && b.y >= t_.carry_lane_blind_m && std::abs(b.x) <= .3f) { // in plain view and not re-detected: gone
-            keep = false;
-            for (const auto &q : seen) if (std::hypot(q.x - carry_obs_zone_[i].x, q.y - carry_obs_zone_[i].y) <= 2 * merge) { keep = true; break; }
-        }
-        if (keep) { carry_obs_zone_[n] = carry_obs_zone_[i]; carry_obs_ts_[n] = carry_obs_ts_[i]; ++n; }
-    }
-    carry_obs_zone_.resize(n); carry_obs_ts_.resize(n);
-    for (const auto &q : seen) {
-        size_t j = 0;
-        for (; j < carry_obs_zone_.size(); ++j) if (std::hypot(q.x - carry_obs_zone_[j].x, q.y - carry_obs_zone_[j].y) <= merge) break;
-        if (j < carry_obs_zone_.size()) { carry_obs_zone_[j] = q; carry_obs_ts_[j] = now; }
-        else if (carry_obs_zone_.size() < 64) { carry_obs_zone_.push_back(q); carry_obs_ts_.push_back(now); }
-    }
-    std::vector<cv::Point2f> body;
-    for (const auto &m : carry_obs_zone_) body.push_back(z.zoneToBody(m));
-    const float front = t_.sweep_frame_front_m + .01f;
-    const float range = std::min(t_.carry_lane_range_m, std::max(0.f, goal_m) + front); // blocks past the goal are the zone's business, not the way there
-    const auto blockedAt = [&](float h, float *side, float half) {
-        const float c = std::cos(h), sn = std::sin(h);
-        float best = 1e9f;
-        for (const auto &b : body) {
-            const float along = -b.x * sn + b.y * c, perp = b.x * c + b.y * sn;
-            if (along > -.02f && along <= range && std::abs(perp) <= half && along < best) { best = along; if (side) *side = perp; }
-        }
-        return best < 1e8f;
-    };
-    if (view && carry_lane_phase_ == 1 && carry_lane_look_n_ < t_.carry_lane_look_frames) { // stand still and look before moving at the check view
-        if (!carry_lane_look_t0_) carry_lane_look_t0_ = now;
-        if (fresh) ++carry_lane_look_n_;
-        if (carry_lane_look_n_ < t_.carry_lane_look_frames && now - carry_lane_look_t0_ < t_.carry_lane_look_us) { carry_lane_why_ = "carry_lane_look"; return false; }
-        carry_lane_look_n_ = t_.carry_lane_look_frames;
-    }
-    const float half = t_.carry_lane_half_m;
-    float side = 0;
-    if (!blockedAt(heading, &side, half)) {
-        if (view && carry_lane_phase_ == 2) {
-            if (carry_lane_delta_ != 0 && blockedAt(heading, nullptr, half + t_.carry_lane_pass_margin_m)) { heading = wrapAngle(heading + carry_lane_delta_); return true; } // clear the block's edge with margin before turning back
-            carry_lane_phase_ = 3; carry_lane_delta_ = 0; carry_lane_block_us_ = 0; carry_lane_gave_up_ = false;
-            carry_lane_realign_ = true; carry_lane_realign_t0_ = 0;
-            std::cout << "[CARRY] lane detour done, view back to far pitch_deg=" << t_.far_pitch_cdeg * .01f << "\n";
-            return pitchGate();
-        }
-        carry_lane_delta_ = 0; carry_lane_block_us_ = 0; carry_lane_gave_up_ = false; return true;
-    }
-    if (view && carry_lane_phase_ == 3 && carry_lane_cycles_ < t_.carry_lane_cycles_max) { // a new block on the way back: look again at the check view
-        ++carry_lane_cycles_; carry_lane_phase_ = 1; carry_lane_look_n_ = 0; carry_lane_look_t0_ = 0;
-        std::cout << "[CARRY] lane view re-check cycle=" << carry_lane_cycles_ << "\n";
-        carry_lane_why_ = "carry_lane_pitch_wait"; return false;
-    }
-    if (view && carry_lane_phase_ == 1) { carry_lane_phase_ = 2; std::cout << "[CARRY] lane detour start\n"; }
-    if (carry_lane_gave_up_) return true;
-    const int steps = std::max(1, int(t_.carry_lane_max_rad / std::max(.01f, t_.carry_lane_step_rad)));
-    const auto firstClear = [&](float sign) { // smallest bend on one side that clears the lane, 0 = none
-        for (int k = 1; k <= steps; ++k) if (!blockedAt(wrapAngle(heading + sign * k * t_.carry_lane_step_rad), nullptr, half)) return k;
-        return 0;
-    };
-    float sign;
-    const int kl = firstClear(1.f), kr = firstClear(-1.f);
-    if (carry_lane_delta_ != 0) sign = carry_lane_delta_ > 0 ? 1.f : -1.f; // keep the side already taken
-    else if (kl && kr) sign = kl != kr ? (kl < kr ? 1.f : -1.f) : (side > 0 ? 1.f : -1.f); // blocker on the right -> bend left
-    else sign = kl ? 1.f : -1.f;
-    int k = sign > 0 ? kl : kr;
-    if (!k) { sign = -sign; k = sign > 0 ? kl : kr; }
-    if (k) {
-        const float d = sign * k * t_.carry_lane_step_rad;
-        if (carry_lane_delta_ == 0) std::cout << "[CARRY] lane guard bend_deg=" << d * 57.2958f << " blockers=" << body.size() << "\n";
-        heading = wrapAngle(heading + d); carry_lane_delta_ = d; carry_lane_block_us_ = 0; carry_lane_square_ = true; return true;
-    }
-    if (!carry_lane_block_us_) { carry_lane_block_us_ = now; std::cout << "[CARRY] lane guard blocked blockers=" << body.size() << "\n"; }
-    if (now - carry_lane_block_us_ >= t_.carry_lane_hold_us) {
-        carry_lane_gave_up_ = true; std::cout << "[CARRY] lane guard give up\n";
-        if (view && carry_lane_delta_ != 0) { carry_lane_realign_ = true; carry_lane_realign_t0_ = 0; } // already bent away: square up to the zone before driving on
-        return true;
-    }
-    return false;
-}
 // The held set must still be the verified trip; a changed or partial view is not a hold.
 bool PushTask::holding(const PushObservation &in) const {
     return in.hold_observable && in.captured && in.held_complete && in.held == trip_;
@@ -374,9 +257,7 @@ int16_t PushTask::desiredPitch() const {
         if (t_.sweep_far_judge && sweep_phase_ >= 4 && sweep_phase_ <= 6) return t_.far_pitch_cdeg;
         return t_.sweep_view_handoff && midPitch() && sweep_pitch_ != kCameraPitchInvalid ? sweep_pitch_ : t_.far_pitch_cdeg;
     case PushState::TURN_SCAN: return t_.far_pitch_cdeg;
-    case PushState::PILE: // the close cluster is looked at from the mid (or tracking) view throughout; after the in-frame look the camera stays at the near preset
-        if (pile_scan_) return t_.far_pitch_cdeg; // cut scan: the far view looks for a block-free direction
-        if (pile_near_) return t_.near_pitch_cdeg;
+    case PushState::PILE: // the close cluster is looked at from the mid (or tracking) view throughout
         return midPitch() ? t_.intermediate_pitch_cdeg : t_.track_pitch_cdeg;
     case PushState::APPROACH: return approach_pitch_!=kCameraPitchInvalid?approach_pitch_:t_.track_pitch_cdeg;
     // TEMP_ASSUMPTION：开框由MCU完成标志确认，不需要为此下压到40°；货物贴近时在40°画面顶边会被截断（box_at_image_edge），
@@ -389,8 +270,6 @@ int16_t PushTask::desiredPitch() const {
     case PushState::LOWER_FRAME: return t_.near_pitch_cdeg;
     case PushState::VERIFY_CAPTURE: return multi_view_pitch_==kCameraPitchInvalid?t_.near_pitch_cdeg:multi_view_pitch_;
     case PushState::CARRY: case PushState::GATE: // step 1: stopped NEAR hold check
-        if (state_ == PushState::CARRY && carry_view20_ && assumeView()) return t_.assume_view_pitch_cdeg;
-        if (state_ == PushState::CARRY && carry_lane_phase_ && carryLogic() && t_.carry_lane_view) return carry_lane_phase_ == 3 ? t_.far_pitch_cdeg : t_.carry_lane_pitch_cdeg;
         return step_ ? t_.near_pitch_cdeg : t_.far_pitch_cdeg;
     case PushState::CAPTURE_FAIL: case PushState::LOST_HOLD: case PushState::ABORT_DROP: return t_.far_pitch_cdeg;
     case PushState::ENTER: case PushState::BACK_OUT: return assumeView() ? t_.assume_view_pitch_cdeg : t_.track_pitch_cdeg; // fence and mouth
@@ -539,11 +418,11 @@ PushOutput PushTask::update(const PushObservation &in) {
     };
     if (in.reset) {
         attempt_started_=0;bounded_approach_=bounded_retreat_=0;
-        clearTrip(); rejected_.clear(); rejected_bearings_.clear(); disperse_cool_until_us_ = 0; scatter_cool_until_us_ = 0; sweep_gap_until_us_ = 0; sweep_spent_us_ = 0; sweep_done_ = 0; sweep_match_spent_us_ = 0; sweep_chain_t0_ = sweep_chain_acc_ = 0; sweep_chain_active_ = sweep_chain_swung_ = false; confirm_since_us_ = 0; sweep_observe_until_us_ = 0; zone_mem_ = zone_enemy_ = cs_active_ = run_yaw0_set_ = false; scatter_count_ = 0; scatter_approach_n_ = 0; scatter_far_ = false; burst_drive_used_ = burst_fast_ = burst_swing_armed_ = burst_swing_ = false; scan_turn_acc_ = 0; scan_mid_limit_ = 0; post_disperse_mid_ = false; disperse_small_ = false; mid_clear_n_ = 0; precheck_seen_ = 0; precheck_rejects_ = 0; pile_hist_ = 0; total_ = 0; first_ = t_.assume_injured_trip; fault_ = false;clear_attempts_=0;near_failures_=0;lost_round_=0;startup_commanded_us_=0;startup_yaw0_set_=false;
+        clearTrip(); rejected_.clear(); rejected_bearings_.clear(); disperse_cool_until_us_ = 0; scatter_cool_until_us_ = 0; sweep_gap_until_us_ = 0; sweep_spent_us_ = 0; sweep_done_ = 0; sweep_match_spent_us_ = 0; sweep_chain_t0_ = sweep_chain_acc_ = 0; sweep_chain_active_ = sweep_chain_swung_ = false; confirm_since_us_ = 0; sweep_observe_until_us_ = 0; zone_mem_ = zone_enemy_ = cs_active_ = run_yaw0_set_ = false; scatter_count_ = 0; scatter_approach_n_ = 0; scatter_far_ = false; burst_drive_used_ = burst_fast_ = burst_swing_armed_ = burst_swing_ = false; scan_turn_acc_ = 0; scan_mid_limit_ = 0; post_disperse_mid_ = false; disperse_small_ = false; mid_clear_n_ = 0; precheck_seen_ = 0; precheck_rejects_ = 0; total_ = 0; first_ = t_.assume_injured_trip; fault_ = false;clear_attempts_=0;near_failures_=0;lost_round_=0;startup_commanded_us_=0;startup_yaw0_set_=false;
         odo_ = ratio_est_ = 0; vref_used_ = false; zone_.reset(); ratio_snap_ = imu_seen_ = false; vref_fix_us_ = vref_seen_us_ = 0;
         frame_raised_ = 0; gripper_us_ = now; stopped_from_ = PushState::WAIT_START;
         sweep_open_ = sweep_open_done_ = sweep_open_disabled_ = sweep_close_wait_ = false; sweep_open_us_ = sweep_close_us_ = 0;
-        pitch_cmd_ = t_.far_pitch_cdeg; pitch_wait_us_ = now; carry_look_cool_until_us_ = 0;
+        pitch_cmd_ = t_.far_pitch_cdeg; pitch_wait_us_ = now;
         enter(PushState::WAIT_START, now, "reset"); last_us_ = now;
         return result();
     }
@@ -685,7 +564,7 @@ PushOutput PushTask::update(const PushObservation &in) {
             (state_ == PushState::APPROACH || state_ == PushState::MID_APPROACH || state_ == PushState::CUE_APPROACH || state_ == PushState::SELECT_CARGO))
             motion.wz_rps *= t_.inplace_turn_boost;
     };
-    const auto scanSpin = [&](float dir = 1.f) { scan_spin = true; drive(0, dir * t_.scan_wz); scan_spin = false; };
+    const auto scanSpin = [&] { scan_spin = true; drive(0, t_.scan_wz); scan_spin = false; };
     // Searching our zone with a load: an enemy-colour zone in view means turn about and drive a long leg away. true: this tick's motion is owned.
     const auto evadeEnemy = [&]() -> bool {
         const bool heading_ok = in.heading_valid && std::isfinite(in.heading_rad);
@@ -767,23 +646,6 @@ PushOutput PushTask::update(const PushObservation &in) {
         }
         reason_ = fresh ? "carry_drive_to_sighted_zone" : known ? "carry_drive_to_remembered_zone" : "carry_drive_start_line";
         steer(t_.carry_speed, err);
-    };
-    // Only the far corners of our zone in view for a while: stand still at the 20deg view until the near corners show up. true = this tick is spent looking.
-    const auto zoneLook = [&]() -> bool {
-        if (!assumeView() || !t_.carry_far_only_us) return false;
-        if (carry_looking_) {
-            if (!carry_look_t0_) carry_look_t0_ = now; // the clock starts once the pitch wait has released this state
-            if (now - carry_look_t0_ <= t_.carry_look_us) { reason_ = "zone_near_look"; return true; }
-            carry_looking_ = carry_view20_ = false; carry_look_t0_ = 0; carry_look_cool_until_us_ = now + t_.carry_look_cool_us;
-            return false;
-        }
-        if (carry_view20_ || now < carry_look_cool_until_us_) return false;
-        if (in.zone_far_pts && !in.zone_near_pts) { if (!carry_far_since_us_) carry_far_since_us_ = now; carry_far_seen_us_ = now; }
-        else if (in.zone_near_pts || now - carry_far_seen_us_ > t_.carry_far_only_us) carry_far_since_us_ = 0;
-        if (!carry_far_since_us_ || now - carry_far_since_us_ < t_.carry_far_only_us) return false;
-        carry_looking_ = carry_view20_ = true; carry_look_t0_ = carry_far_since_us_ = 0;
-        reason_ = "zone_far_only_tilt";
-        return true;
     };
     const auto trackingReason = [&]() -> const char* {
         if (!in.target_valid) return "target_missing";
@@ -867,29 +729,17 @@ PushOutput PushTask::update(const PushObservation &in) {
         }
         enter(PushState::SCATTER, now, why);
     };
-    const auto pileTimeOk = [&]() { return t_.pile_min_remaining_us == 0 || in.match_remaining_us == UINT64_MAX || in.match_remaining_us >= t_.pile_min_remaining_us; }; // a PILE (advance + measure + cut + back + delivery) is not worth starting with little match time left
     const auto beginPile = [&](const char *why) {
         target_id_ = -1; confirmations_ = 0; cue_mode_ = false;
         pile_yaw0_ = wrapAngle(in.heading_rad + in.heading_error); // world bearing of the pile (the target sits in it)
-        pile_phase_ = 0; pile_seen_ = 0; pile_hist_ = 0; pile_push0_ = -1.f; ++pile_runs_; pile_chain_n_ = 0; pile_cut_n_ = 0; pile_near_ = false; pile_look_pre_ = pile_enclosed_ = false; pile_scan_ = pile_scan_moved_ = pile_scan_used_ = false;
+        pile_phase_ = 0; pile_seen_ = 0; pile_push0_ = -1.f; ++pile_runs_; pile_chain_n_ = 0;
         enter(PushState::PILE, now, why);
         pile_phase_us_ = now;
     };
-    // A rule veto on a cluster is a pile to split, not a target to drop: PILE keeps the ordinary blocks in the frame and sheds the rest. Dangerous/unknown stay vetoes.
-    const auto pileOnVeto = [&](RuleVerdict v) -> bool {
-        const bool occluded = v == RuleVerdict::OCCLUDED;
-        const bool mixed = v == RuleVerdict::TOO_MANY_SUPPLIES || v == RuleVerdict::INJURED_BEFORE_FIRST || v == RuleVerdict::INJURED_NOT_ALONE || (t_.pile_veto_dangerous && v == RuleVerdict::DANGEROUS);
-        if (!t_.pile_on_veto || !t_.pile_clear || !(occluded || mixed) || !pileTimeOk()) return false;
-        if (now < pile_cool_until_us_ || pile_runs_ >= t_.pile_max_runs || !scan_ok || disperse_small_ || trip_.total() != 0 || !in.heading_valid || !std::isfinite(in.heading_rad) || !std::isfinite(in.heading_error)) return false;
-        if (in.corridor.total() < (occluded ? t_.pile_occluded_min : t_.pile_veto_corridor_min) || !(in.distance_m <= t_.pile_trigger_max_m)) return false;
-        clearTrip();
-        beginPile(occluded ? "pile_veto_occluded" : v == RuleVerdict::TOO_MANY_SUPPLIES ? "pile_veto_too_many_supplies" : v == RuleVerdict::DANGEROUS ? "pile_veto_dangerous" : "pile_veto_injured");
-        return true;
-    };
     const auto beginPileFromSweep = [&](const char *why) { // a disperse sweep that really swung continues in PILE (layer loop) instead of the plain re-search
-        if (!t_.pile_chain || !t_.pile_clear || !pileTimeOk() || disperse_small_ || frame_raised_ != 0 || trip_.total() != 0 || !in.heading_valid || !std::isfinite(in.heading_rad)) return false;
+        if (!t_.pile_chain || !t_.pile_clear || disperse_small_ || frame_raised_ != 0 || trip_.total() != 0 || !in.heading_valid || !std::isfinite(in.heading_rad)) return false;
         target_id_ = -1; confirmations_ = 0; cue_mode_ = false;
-        pile_yaw0_ = in.heading_rad; pile_phase_ = 7; pile_seen_ = 0; pile_hist_ = 0; pile_push0_ = -1.f; pile_chain_n_ = 0; pile_cut_n_ = 0; pile_near_ = false; pile_look_pre_ = pile_enclosed_ = false; pile_scan_ = pile_scan_moved_ = pile_scan_used_ = false; sweep_phase_ = 0;
+        pile_yaw0_ = in.heading_rad; pile_phase_ = 7; pile_seen_ = 0; pile_push0_ = -1.f; pile_chain_n_ = 0; sweep_phase_ = 0;
         enter(PushState::PILE, now, why);
         pile_phase_us_ = now;
         return true;
@@ -1253,7 +1103,7 @@ PushOutput PushTask::update(const PushObservation &in) {
                     scan_hold_t0_ = 0; scan_hold_cool_until_us_ = now + t_.scan_hold_cool_us;
                 }
             }
-            scanSpin(-1.f); break; // SCAN search spin is clockwise (negative wz)
+            scanSpin(); break;
         }
         scatter_idle_since_us_ = 0; scatter_seen_ = 0;
         if (confirmations_ + 1 >= t_.confirm_frames) scatter_approach_n_ = 0;
@@ -1373,14 +1223,9 @@ PushOutput PushTask::update(const PushObservation &in) {
             std::cout << "[PILE] end why=" << why << " runs=" << pile_runs_ << "\n";
             enter(PushState::SCAN, now, why);
         };
-        const auto pileAbandon = [&](const char *why, float world_yaw, float range_m) { // give this pile up: end PILE and keep the next SCAN from walking back into the same cluster (pileEnd clears the rejected lists)
-            pileEnd(why);
-            if (rejected_bearings_.size() >= 8) rejected_bearings_.erase(rejected_bearings_.begin());
-            rejected_bearings_.push_back({world_yaw, range_m, now + t_.blacklist_us});
-        };
         const auto setPhase = [&](int ph) { pile_phase_ = ph; pile_phase_us_ = now; pile_seen_ = 0; pile_travel0_ = travel_; pile_push0_ = -1.f; };
         if (!in.heading_valid || !std::isfinite(in.heading_rad)) { pileEnd("pile_no_heading"); break; }
-        if (elapsed > t_.pile_budget_us + ((pile_near_ || pile_scan_ || pile_scan_used_) ? t_.pile_spin_budget_us + 2 * t_.disperse_turn_look_us + (pile_scan_used_ ? t_.pile_scan_budget_us + 8000000 : 0) : 0)) { pileEnd("pile_timeout"); break; } // once the camera is down for the look, the spin and look are not cut off
+        if (elapsed > t_.pile_budget_us) { pileEnd("pile_timeout"); break; }
         const float yaw = in.heading_rad;
         struct Blk { cv::Point2f p; bool ordinary = false; };
         // Visible blocks in body coordinates; the locked target can be missing from the clutter list.
@@ -1425,46 +1270,9 @@ PushOutput PushTask::update(const PushObservation &in) {
             if (motion.wz_rps != 0) motion.wz_rps = wz;
             return false;
         };
-        const auto toBack = [&] { setPhase(pile_scan_moved_ ? 17 : 6); }; // a scan advance left the cut heading: retrace first
-        const auto goAfterCut = [&] { // the drive-in (and spin) is over: look into the frame at the near preset, or back out at once
-            if (t_.pile_cut_capture) { pile_near_ = true; pile_look_ready_us_ = 0; setPhase(13); }
-            else toBack();
-        };
-        const auto startSpin = [&] {
-            if (t_.pile_cut_scan) { // camera to the far preset and turn until a lane ahead is free of blocks
-                pile_scan_ = pile_scan_used_ = true; pile_scan_moved_ = false; pile_near_ = false; pile_scan_sub_ = 0; pile_scan_ok_ = 0; pile_scan_ts_ = 0; pile_scan_stop_us_ = 0;
-                pile_scan_acc_ = 0; pile_scan_last_ = yaw; std::cout << "[PILE] cut scan start\n"; setPhase(15); return;
-            }
-            pile_spin_acc_ = 0; pile_spin_last_ = yaw; std::cout << "[PILE] cut spin\n"; setPhase(12);
-        };
-        const auto lookStep = [&](bool may_close) { // count fresh frames whose frame zone holds only 1..kMaxSuppliesPerTrip ordinary blocks; true once the frame was closed on them
-            if (!pile_look_ready_us_) { pile_look_ready_us_ = now; pile_look_ts_us_ = 0; pile_look_ok_ = 0; }
-            if (in.look_ts_us >= pile_look_ready_us_ && in.look_ts_us != pile_look_ts_us_ && now >= in.look_ts_us && now - in.look_ts_us <= t_.sweep_fresh_us) {
-                pile_look_ts_us_ = in.look_ts_us;
-                int n = 0, ord = 0;
-                for (const auto &q : in.look_body) {
-                    if (!std::isfinite(q.x) || !std::isfinite(q.y) || q.y <= 0.f || q.y > t_.disperse_turn_frame_range_m || std::abs(q.x) > t_.disperse_turn_frame_half_m) continue;
-                    ++n;
-                    for (const auto &o : in.look_ordinary) if (std::abs(o.x - q.x) < 1e-4f && std::abs(o.y - q.y) < 1e-4f) { ++ord; break; }
-                }
-                n += in.look_edge_ordinary + in.look_edge_other; ord += in.look_edge_ordinary;
-                const bool ok = n >= 1 && n <= kMaxSuppliesPerTrip && ord == n;
-                pile_look_ok_ = ok ? pile_look_ok_ + 1 : 0; if (ok) pile_look_n_ = n;
-                std::cout << "[PILE] look frame n=" << n << " ordinary=" << ord << " edge=" << in.look_edge_ordinary << "+" << in.look_edge_other << " ok_frames=" << pile_look_ok_ << "/" << t_.pile_look_frames << "\n";
-            }
-            if (may_close && pile_look_ok_ >= t_.pile_look_frames) {
-                pending_ = Inventory{}; pending_.ordinary = pile_look_n_;
-                label_ = "ordinary_supply"; target_id_ = capture_target_id_ = -1;
-                std::cout << "[PILE] frame enclosed ordinary=" << pending_.ordinary << " -> capture\n";
-                pile_enclosed_ = true; pile_look_pre_ = false;
-                enter(PushState::LOWER_FRAME, now, "pile_frame_enclosed");
-                return true;
-            }
-            return false;
-        };
-        const auto backTo = [&](uint64_t budget) { // every PILE back-out is the same fixed pile_back_m; true when done
+        const auto backTo = [&](float metres, uint64_t budget) { // reverse a measured distance; true when done
             if (!in.retreat_safe) { reason_ = "pile_back_unsafe"; return true; }
-            if (travel_ - pile_travel0_ >= t_.pile_back_m * pileRatio() || now - pile_phase_us_ > budget) return true;
+            if (travel_ - pile_travel0_ >= metres * motionRatio() || now - pile_phase_us_ > budget) return true;
             drive(-t_.blind_scatter_back_speed, 0);
             if (motion.vx_mps < 0) motion.vx_mps = -t_.blind_scatter_back_speed;
             return false;
@@ -1483,24 +1291,23 @@ PushOutput PushTask::update(const PushObservation &in) {
             break;
         }
         case 2: { // straight into the pile with the frame open: pile_advance_m at pile_advance_speed
-            if ((travel_ - pile_travel0_) >= t_.pile_advance_m * pileRatio() || now - pile_phase_us_ > t_.pile_advance_budget_us) { setPhase(3); break; }
+            if ((travel_ - pile_travel0_) >= t_.pile_advance_m * motionRatio() || now - pile_phase_us_ > t_.pile_advance_budget_us) { setPhase(3); break; }
             const float err = wrapAngle(pile_yaw0_ - yaw);
             reason_ = "pile_advance";
             drive(t_.pile_advance_speed, std::abs(err) > .04f ? t_.heading_gain * err : 0.f);
             break;
         }
         case 3: { // short back-off so the camera sees the remaining cluster
-            if (backTo(t_.pile_back_budget_us)) { setPhase(4); break; }
+            if (backTo(t_.pile_view_back_m, t_.pile_back_budget_us)) { setPhase(4); break; }
             reason_ = "pile_view_back";
             break;
         }
         case 4: { // measure the cluster, turn by one block's angular size to the better side and cut in
-            const bool verify = pile_cut_n_ > 0; // measuring again after a cut + back-out: decide whether the cut really separated the pile
-            if (now - pile_phase_us_ < t_.pile_measure_us) { reason_ = verify ? "pile_verify" : "pile_measure"; break; }
+            if (now - pile_phase_us_ < t_.pile_measure_us) { reason_ = "pile_measure"; break; }
             const auto c = pileCluster();
             if (c.size() < 2) {
-                if (++pile_seen_ < 8) { reason_ = verify ? "pile_verify_wait" : "pile_measure_wait"; break; }
-                pileEnd(verify ? "pile_split_done" : "pile_cluster_clear"); break;
+                if (++pile_seen_ < 8) { reason_ = "pile_measure_wait"; break; }
+                pileEnd("pile_cluster_clear"); break;
             }
             float cx = 0, cy = 0, ymin = 1e9f;
             for (const auto &b : c) { cx += b.p.x / float(c.size()); cy += b.p.y / float(c.size()); ymin = std::min(ymin, b.p.y); }
@@ -1511,7 +1318,7 @@ PushOutput PushTask::update(const PushObservation &in) {
                 Eval e; const float un = -std::sin(beta), uy = std::cos(beta), nx = std::cos(beta), ny = std::sin(beta);
                 for (const auto &b : c) {
                     const float along = b.p.x * un + b.p.y * uy, lat = b.p.x * nx + b.p.y * ny;
-                    const bool in_frame = along > 0 && std::abs(lat) <= t_.pile_frame_half_m + (b.ordinary ? -t_.pile_cut_margin_m : t_.pile_cut_margin_m); // keep only what is safely inside the frame, shed only what is safely outside: a block on the edge line gets pushed away by the frame arm and the cut closes on empty floor
+                    const bool in_frame = along > 0 && std::abs(lat) <= t_.pile_frame_half_m;
                     if (in_frame) { (b.ordinary ? e.ord_in : e.other_in)++; e.along_min = std::min(e.along_min, along); }
                     else (b.ordinary ? e.ord_shed : e.other_shed)++;
                 }
@@ -1521,128 +1328,41 @@ PushOutput PushTask::update(const PushObservation &in) {
                 return e;
             };
             const Eval e0 = eval(0.f), el = eval(theta), er = eval(-theta);
-            std::cout << "[PILE] " << (verify ? "verify" : "measure") << " round=" << pile_cut_n_ << " n=" << c.size() << " range=" << range << " block_deg=" << theta * 57.2958f
+            std::cout << "[PILE] measure n=" << c.size() << " range=" << range << " block_deg=" << theta * 57.2958f
                       << " straight(cost=" << e0.cost << " in=" << e0.ord_in << "+" << e0.other_in << ") left(cost=" << el.cost << " in=" << el.ord_in << "+" << el.other_in
                       << " shed=" << el.ord_shed << "+" << el.other_shed << ") right(cost=" << er.cost << " in=" << er.ord_in << "+" << er.other_in
                       << " shed=" << er.ord_shed << "+" << er.other_shed << ")\n";
             // Same-type first: a mixed frame is the dominant cost (other_in), so widen the cut one block at a time until the enclosed set is clean; ties keep the smaller turn, then the left side.
-            // A cut must still enclose an ordinary supply: a cut that sheds every block drives the full travel through empty floor and splits nothing.
-            bool left = true; int best_k = 0; Eval best;
-            const auto consider = [&](int k, bool wleft, const Eval &e) {
-                if (e.ord_in > 0 && (best_k == 0 || e.cost < best.cost)) { best = e; left = wleft; best_k = k; }
-            };
-            consider(1, true, el); consider(1, false, er);
-            for (int k = 2; k <= t_.pile_cut_max_steps && (best_k == 0 || best.other_in > 0); ++k) {
-                consider(k, true, eval(k * theta)); consider(k, false, eval(-k * theta));
+            bool left = el.cost <= er.cost; int best_k = 1; Eval best = left ? el : er;
+            for (int k = 2; k <= t_.pile_cut_max_steps && best.other_in > 0; ++k) {
+                const Eval wl = eval(k * theta), wr = eval(-k * theta);
+                for (const bool wleft : {true, false}) { // a wide turn can sweep the frame clear of every block: only cuts that still enclose an ordinary supply count
+                    const Eval &wb = wleft ? wl : wr;
+                    if (wb.ord_in > 0 && wb.cost < best.cost) { best = wb; left = wleft; best_k = k; }
+                }
             }
-            if (e0.need <= 0) { pileEnd(verify ? "pile_split_done" : "pile_frame_already_ok"); break; } // nothing the corridor rules would reject is enclosed any more
-            if (verify && (pile_cut_n_ >= t_.pile_cut_rounds || best_k == 0 || !(best.need < e0.need))) { // no further cut helps: only a non-ordinary block left in the frame counts as unresolved, extra ordinary supplies are left for the trip limit
-                pileEnd(e0.other_in == 0 ? "pile_split_done" : "pile_split_unresolved"); break;
-            }
-            const float pile_world_yaw = wrapAngle(yaw + std::atan2(-cx, cy));
-            if (best_k == 0 || !(best.need < e0.need)) { if (t_.pile_cut_require_clean) pileAbandon("pile_cut_no_gain", pile_world_yaw, range); else pileEnd("pile_cut_no_gain"); break; }
-            if (t_.pile_cut_require_clean && best.other_in > 0) { pileAbandon("pile_cut_unclean", pile_world_yaw, range); break; } // even the best cut would still enclose a non-ordinary block: cutting it only plows the pile
-            pile_cut_yaw_ = wrapAngle(yaw + (left ? 1.f : -1.f) * (float(best_k) * theta + t_.pile_cut_bias_rad));
-            pile_cut_m_ = std::clamp(best.along_min - t_.sweep_frame_front_m + t_.pile_cut_depth_m, 0.f, .65f) + t_.pile_cut_extra_m;
-            std::cout << "[PILE] cut side=" << (left ? "left" : "right") << " steps=" << best_k << " turn_deg=" << (best_k * theta + t_.pile_cut_bias_rad) * 57.2958f << " bias_deg=" << t_.pile_cut_bias_rad * 57.2958f << " in=" << best.ord_in << "+" << best.other_in << " travel=" << pile_cut_m_ << "\n";
-            const float plan_s = pile_cut_m_ * pileRatio() / std::max(.05f, t_.pile_cut_speed); // open-loop: the commanded travel takes pileRatio() times longer on the floor
-            pile_cut_budget_dyn_us_ = std::clamp<uint64_t>(uint64_t(plan_s * 1.25e6f) + 2500000, t_.pile_cut_budget_us, std::max(t_.pile_cut_budget_us, t_.pile_cut_budget_max_us));
-            const float back_s = t_.pile_back_m * pileRatio() / std::max(.05f, t_.blind_scatter_back_speed);
-            const uint64_t round_us = uint64_t((plan_s + back_s) * 1e6f) + 4000000;
-            if (t_.pile_cut_reserve_us > 0 && in.match_remaining_us != UINT64_MAX && in.match_remaining_us < round_us + t_.pile_cut_reserve_us) { // drive in + back out + the delivery that must follow do not fit in the match any more
-                std::cout << "[PILE] no_time remaining_ms=" << in.match_remaining_us / 1000 << " round_ms=" << round_us / 1000 << "\n";
-                pileAbandon("pile_no_time", pile_world_yaw, range); break;
-            }
-            if (verify) { // a further round must fit in what is left of the PILE budget (drive in + back out + look/spin slack)
-                if (elapsed + round_us > t_.pile_budget_us) { pileEnd(e0.other_in == 0 ? "pile_split_done" : "pile_split_unresolved"); break; }
-            }
-            pile_spin_dir_ = left ? 1.f : -1.f;
-            pile_theta_ = theta; pile_precut_done_ = false;
+            if (e0.need <= 0) { pileEnd("pile_frame_already_ok"); break; } // nothing the corridor rules would reject is enclosed any more
+            if (!(best.need < e0.need)) { pileEnd("pile_cut_no_gain"); break; }
+            pile_cut_yaw_ = wrapAngle(yaw + (left ? 1.f : -1.f) * float(best_k) * theta);
+            pile_cut_m_ = std::clamp(best.along_min - t_.sweep_frame_front_m + t_.pile_cut_depth_m, 0.f, .5f);
+            std::cout << "[PILE] cut side=" << (left ? "left" : "right") << " steps=" << best_k << " turn_deg=" << best_k * theta * 57.2958f << " in=" << best.ord_in << "+" << best.other_in << " travel=" << pile_cut_m_ << "\n";
             setPhase(5);
             break;
         }
         case 5: { // turn, then drive the edge in
-            if (now - pile_phase_us_ > pile_cut_budget_dyn_us_) { pile_cut_m_ = pile_push0_ >= 0 ? (travel_ - pile_push0_) / pileRatio() : 0.f; setPhase(6); break; }
+            if (now - pile_phase_us_ > t_.pile_cut_budget_us) { pile_cut_m_ = pile_push0_ >= 0 ? (travel_ - pile_push0_) / motionRatio() : 0.f; setPhase(6); break; }
             if (pile_push0_ >= 0) {
-                if (travel_ - pile_push0_ >= pile_cut_m_ * pileRatio()) {
-                    if (t_.pile_cut_capture) { pile_look_pre_ = t_.pile_cut_spin || t_.pile_cut_scan; pile_near_ = true; pile_look_ready_us_ = 0; setPhase(13); } // look first; the spin only if the frame is not clean
-                    else if (t_.pile_cut_spin || t_.pile_cut_scan) startSpin();
-                    else goAfterCut();
-                    break;
-                }
-                if (t_.pile_cut_capture) { // the look runs together with the drive: camera down from the start (pile_look_pitch_frac), frame closes early once deep enough
-                    const float prog = (travel_ - pile_push0_) / std::max(.01f, pile_cut_m_ * pileRatio());
-                    if (!pile_near_ && prog >= t_.pile_look_pitch_frac) pile_near_ = true;
-                    if (pile_near_ && lookStep(prog >= t_.pile_look_close_frac)) break;
-                }
+                if (travel_ - pile_push0_ >= pile_cut_m_ * motionRatio()) { setPhase(6); break; }
                 const float err = wrapAngle(pile_cut_yaw_ - yaw);
                 reason_ = "pile_cut_drive";
                 drive(t_.pile_cut_speed, std::abs(err) > .04f ? t_.heading_gain * err : 0.f);
                 break;
             }
-            if (faceYaw(pile_cut_yaw_, .1f, "pile_cut_align")) {
-                if (t_.pile_precut && !pile_precut_done_) setPhase(14); // aligned: one look at the lane before driving in
-                else pile_push0_ = travel_;
-            }
+            if (faceYaw(pile_cut_yaw_, .1f, "pile_cut_align")) pile_push0_ = travel_;
             break;
         }
-        case 14: { // one-shot pre-cut check: standing aligned, judge the frame lane against the boxes of one fresh image; re-aim at most once, then drive without further correction
-            reason_ = "pile_precut";
-            if (now - pile_phase_us_ < t_.pile_precut_settle_us) break;
-            const bool fresh = in.look_ts_us >= pile_phase_us_ + t_.pile_precut_settle_us && now >= in.look_ts_us && now - in.look_ts_us <= t_.sweep_fresh_us && !in.precut_boxes.empty();
-            if (!fresh) {
-                if (now - pile_phase_us_ > t_.pile_precut_timeout_us) { std::cout << "[PILE] precut timeout (no usable image), cut as planned travel=" << pile_cut_m_ << "\n"; pile_precut_done_ = true; setPhase(5); }
-                break;
-            }
-            struct Lane { int ord_in = 0, ord_edge = 0, other_in = 0, other_edge = 0; float y_near = 1e9f; bool near_clipped = false; float near_ratio = 1.f; };
-            const float reach = t_.sweep_frame_front_m + pile_cut_m_ + .05f, half = t_.pile_frame_half_m;
-            const auto judge = [&](float d) { // lane test with the heading turned by d (left positive); box corners rotated about the robot
-                Lane l; const float cs = std::cos(d), sn = std::sin(d);
-                for (const auto &b : in.precut_boxes) {
-                    const float la = b.xl * cs + b.y * sn, lb = b.xr * cs + b.y * sn;
-                    const float yy = .5f * ((-b.xl * sn + b.y * cs) + (-b.xr * sn + b.y * cs));
-                    if (yy <= 0 || yy > reach) continue;
-                    const float lo = std::min(la, lb), hi = std::max(la, lb);
-                    if (hi < -half || lo > half) continue; // whole out
-                    const bool whole_in = lo >= -half && hi <= half;
-                    if (b.ordinary) {
-                        (whole_in ? l.ord_in : l.ord_edge)++;
-                        if (yy < l.y_near) { l.y_near = yy; l.near_clipped = b.clipped; l.near_ratio = b.size_ratio; }
-                    } else (whole_in ? l.other_in : l.other_edge)++;
-                }
-                return l;
-            };
-            const auto clean = [](const Lane &l) { return l.other_in + l.other_edge == 0 && l.ord_in >= 1; };
-            const auto cost = [](const Lane &l) { return 20 * std::max(0, l.ord_in + l.ord_edge - kMaxSuppliesPerTrip) + 5 * l.ord_edge; };
-            float shift = 0; Lane use = judge(0.f); int steps = 0; bool found = clean(use);
-            for (int k = 1; !found && k <= std::max(1, t_.pile_cut_max_steps); ++k) {
-                const Lane ll = judge(k * pile_theta_), lr = judge(-k * pile_theta_);
-                const bool cl = clean(ll), cr = clean(lr);
-                if (!cl && !cr) continue;
-                const bool pick_left = cl && (!cr || cost(ll) <= cost(lr));
-                use = pick_left ? ll : lr; shift = (pick_left ? 1.f : -1.f) * float(k) * pile_theta_; steps = k; found = true;
-            }
-            const Lane l0 = judge(0.f);
-            std::cout << "[PILE] precut lane0 in=" << l0.ord_in << "+" << l0.other_in << " edge=" << l0.ord_edge << "+" << l0.other_edge << " boxes=" << in.precut_boxes.size()
-                      << " result=" << (found ? (steps ? "re-aim" : "clean") : "none") << " shift_deg=" << shift * 57.2958f << "\n";
-            pile_precut_done_ = true;
-            if (!found) { pileEnd("pile_precut_no_cut"); break; }
-            if (steps) { pile_cut_yaw_ = wrapAngle(yaw + shift); pile_spin_dir_ = shift > 0 ? 1.f : -1.f; }
-            if (use.y_near < 1e8f && !use.near_clipped && std::abs(use.near_ratio - 1.f) <= t_.pile_precut_size_tol) {
-                const float want = std::clamp(use.y_near + t_.pile_precut_block_half_m - t_.sweep_frame_front_m + t_.pile_cut_depth_m, 0.f, .65f) + t_.pile_cut_extra_m;
-                if (std::abs(want - pile_cut_m_) <= t_.pile_precut_max_shift_m) {
-                    std::cout << "[PILE] precut travel " << pile_cut_m_ << " -> " << want << " (near_y=" << use.y_near << " size_ratio=" << use.near_ratio << ")\n";
-                    pile_cut_m_ = want;
-                    const float plan_s = pile_cut_m_ * pileRatio() / std::max(.05f, t_.pile_cut_speed);
-                    pile_cut_budget_dyn_us_ = std::clamp<uint64_t>(uint64_t(plan_s * 1.25e6f) + 2500000, t_.pile_cut_budget_us, std::max(t_.pile_cut_budget_us, t_.pile_cut_budget_max_us));
-                } else std::cout << "[PILE] precut travel kept " << pile_cut_m_ << " (pixel estimate " << want << " too far off)\n";
-            } else if (use.y_near < 1e8f) std::cout << "[PILE] precut travel kept " << pile_cut_m_ << " (clipped=" << use.near_clipped << " size_ratio=" << use.near_ratio << ")\n";
-            setPhase(5);
-            break;
-        }
-        case 6: { // back out to the viewing position, then re-measure (phase 4 verifies); SCAN picks the target from what is left
-            pile_near_ = false; pile_look_pre_ = false; // the measure after the back-out needs the normal view pitch
-            if (backTo(t_.pile_back_budget_us)) { ++pile_cut_n_; pile_scan_used_ = false; setPhase(4); break; } // measure again from the viewing position before declaring the pile split
+        case 6: { // back out to the viewing position; SCAN picks the target from what is left
+            if (backTo(pile_cut_m_, t_.pile_back_budget_us)) { pileEnd("pile_split_done"); break; }
             reason_ = "pile_cut_back";
             break;
         }
@@ -1686,95 +1406,19 @@ PushOutput PushTask::update(const PushObservation &in) {
                 sweep_phase_ = 0; sweep_chain_swung_ = false;
                 pile_chain_yaw_mid_ = wrapAngle(sweep_yaw0_ + .5f * wrapAngle(yaw - sweep_yaw0_));
                 pile_chain_look_ = 0;
+                pile_chain_in_m_ = std::max(0.f, travel_ - pile_travel0_) / motionRatio();
                 setPhase(10);
             }
             break;
         }
         case 10: { // chain: back off part of the way in so the camera sees what is left
-            if (backTo(t_.pile_back_budget_us)) { pile_yaw0_ = pile_chain_yaw_mid_; setPhase(11); break; }
+            if (backTo(std::max(pile_chain_in_m_ * t_.pile_chain_back_frac, t_.pile_chain_min_back_m), t_.pile_back_budget_us)) { pile_yaw0_ = pile_chain_yaw_mid_; setPhase(11); break; }
             reason_ = "pile_chain_back";
             break;
         }
         case 11: { // chain: turn to where the pushed-out blocks went, then measure
             if (now - pile_phase_us_ > t_.pile_advance_budget_us) { pileEnd("pile_chain_look_timeout"); break; }
             if (faceYaw(pile_yaw0_, .6f * t_.pile_align_tol_rad, "pile_chain_look")) setPhase(7);
-            break;
-        }
-        case 12: { // after the cut drive-in: one full in-place revolution in the cut's turn direction, then settle on the cut heading and back out
-            pile_spin_acc_ += pile_spin_dir_ * wrapAngle(yaw - pile_spin_last_);
-            pile_spin_last_ = yaw;
-            if (now - pile_phase_us_ > t_.pile_spin_budget_us) { goAfterCut(); break; }
-            if (pile_spin_acc_ < 2.f * float(CV_PI) - .6f) {
-                reason_ = "pile_cut_spin";
-                const float wz = pile_spin_dir_ * t_.pile_spin_wz;
-                drive(0, wz);
-                if (motion.wz_rps != 0) motion.wz_rps = wz;
-                break;
-            }
-            if (faceYaw(pile_cut_yaw_, .1f, "pile_cut_spin_settle")) goAfterCut();
-            break;
-        }
-        case 13: { // cut done: camera at the near preset (pitchWait has already settled it), look into the frame; only 1..kMaxSuppliesPerTrip ordinary blocks -> close and carry them
-            if (lookStep(true)) break;
-            if (now - pile_look_ready_us_ > t_.disperse_turn_look_us) {
-                pile_look_ready_us_ = 0;
-                if (pile_look_pre_) { pile_look_pre_ = false; startSpin(); break; } // not clean right after the drive-in: spin to shake the frame, then look again
-                toBack(); break;
-            } // not a clean enclosure: back out and re-measure as before
-            reason_ = "pile_cut_look";
-            break;
-        }
-        case 15: { // cut scan: far camera, turn in the cut's direction; stop at the first lane free of blocks, confirm it standing still
-            pile_scan_acc_ += pile_spin_dir_ * wrapAngle(yaw - pile_scan_last_);
-            pile_scan_last_ = yaw;
-            if (!pile_scan_stop_us_) pile_scan_stop_us_ = now; // pitchWait has settled the far view: earlier frames do not count
-            if (pile_scan_sub_ == 2) { // no free lane: back on the cut heading, then look into the frame as after the spin
-                if (faceYaw(pile_cut_yaw_, .1f, "pile_scan_settle") || now - pile_phase_us_ > t_.pile_scan_budget_us + 3000000) { pile_scan_ = false; goAfterCut(); }
-                break;
-            }
-            if (now - pile_phase_us_ > t_.pile_scan_budget_us || pile_scan_acc_ >= 2.f * float(CV_PI) - .3f) {
-                std::cout << "[PILE] scan no free lane turned=" << pile_scan_acc_ << "\n";
-                pile_scan_sub_ = 2; break;
-            }
-            if (in.look_ts_us >= pile_scan_stop_us_ && in.look_ts_us != pile_scan_ts_ && now >= in.look_ts_us && now - in.look_ts_us <= t_.sweep_fresh_us) {
-                pile_scan_ts_ = in.look_ts_us;
-                bool free_lane = true;
-                for (const auto &q : in.look_body)
-                    if (std::isfinite(q.x) && std::isfinite(q.y) && q.y > t_.pile_scan_near_m && q.y <= t_.pile_scan_range_m && std::abs(q.x) <= std::max(t_.pile_scan_lane_half_m, q.y * std::tan(t_.pile_scan_half_rad))) { free_lane = false; break; }
-                if (!free_lane) { pile_scan_sub_ = 0; pile_scan_ok_ = 0; pile_scan_stop_us_ = now; }
-                else if (pile_scan_sub_ == 0) { pile_scan_sub_ = 1; pile_scan_ok_ = 0; pile_scan_stop_us_ = now + t_.pile_scan_settle_us; }
-                else if (++pile_scan_ok_ >= t_.pile_scan_frames) {
-                    pile_scan_yaw_ = yaw; pile_scan_moved_ = true;
-                    std::cout << "[PILE] scan free lane yaw_deg=" << yaw * 57.2958f << " turned_deg=" << pile_scan_acc_ * 57.2958f << "\n";
-                    setPhase(16); break;
-                }
-            }
-            if (pile_scan_sub_ == 1) { reason_ = "pile_scan_hold"; break; }
-            reason_ = "pile_cut_scan";
-            const float wz = pile_spin_dir_ * t_.pile_scan_wz;
-            drive(0, wz);
-            if (motion.wz_rps != 0) motion.wz_rps = wz;
-            break;
-        }
-        case 16: { // cut scan: a short way along the free lane, then look into the frame at the near preset
-            if (pile_push0_ < 0) pile_push0_ = travel_;
-            const float plan_s = t_.pile_scan_advance_m * pileRatio() / std::max(.05f, t_.pile_cut_speed);
-            if (travel_ - pile_push0_ >= t_.pile_scan_advance_m * pileRatio() || now - pile_phase_us_ > uint64_t(plan_s * 1.25e6f) + 2500000) {
-                std::cout << "[PILE] scan advanced " << (travel_ - pile_push0_) / pileRatio() << "\n";
-                pile_scan_ = false; pile_near_ = true; pile_look_pre_ = false; pile_look_ready_us_ = 0; setPhase(13);
-                break;
-            }
-            const float err = wrapAngle(pile_scan_yaw_ - yaw);
-            reason_ = "pile_scan_advance";
-            drive(t_.pile_cut_speed, std::abs(err) > .04f ? t_.heading_gain * err : 0.f);
-            break;
-        }
-        case 17: { // the scan advance did not close the frame: retrace it and face the cut heading, then back out as usual
-            if (pile_seen_ == 0) {
-                if (!backTo(t_.pile_back_budget_us)) { reason_ = "pile_scan_back"; break; }
-                pile_seen_ = 1; pile_phase_us_ = now;
-            }
-            if (faceYaw(pile_cut_yaw_, .1f, "pile_scan_return") || now - pile_phase_us_ > t_.pile_advance_budget_us) { pile_scan_moved_ = false; setPhase(6); }
             break;
         }
         default: pileEnd("pile_bad_phase"); break;
@@ -2156,16 +1800,15 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (desiredPitch() != pitch_cmd_) { reason_="camera_pitch_wait"; break; }
         reason_ = "approach_target";
         // Many blocks in the corridor ahead of the frame mouth: carry the pile away and split the last layer instead of poking at it.
-        bool pile_now; pile_now = t_.pile_clear && pileTimeOk() && trip_.total() == 0 && frame_raised_ == 0 && now >= pile_cool_until_us_ && pile_runs_ < t_.pile_max_runs && scan_ok &&
-            in.heading_valid && std::isfinite(in.heading_rad) && ((in.corridor_complete && in.corridor.total() >= t_.pile_corridor_min) || (t_.row_split_pile && in.target_split)) &&
-            in.distance_m <= t_.pile_trigger_max_m;
-        // The counted corridor flickers by a block per frame: confirm on pile_confirm hits within the last pile_window ticks, not on consecutive ones.
-        pile_hist_ = uint16_t(((unsigned(pile_hist_) << 1) | (pile_now ? 1u : 0u)) & ((1u << std::clamp(std::max(t_.pile_window, t_.pile_confirm), 1, 16)) - 1u));
-        if (pile_now) {
-            if (std::bitset<16>(pile_hist_).count() < size_t(std::max(t_.pile_confirm, 1))) { reason_ = "pile_confirm"; break; }
-            beginPile(in.corridor_complete && in.corridor.total() >= t_.pile_corridor_min ? "pile_many_in_frame" : "pile_row_split");
+        if (t_.pile_clear && trip_.total() == 0 && frame_raised_ == 0 && now >= pile_cool_until_us_ && pile_runs_ < t_.pile_max_runs && scan_ok &&
+            in.heading_valid && std::isfinite(in.heading_rad) && in.corridor_complete && in.corridor.total() >= t_.pile_corridor_min &&
+            in.distance_m <= t_.pile_trigger_max_m) {
+            if (++pile_seen_ < t_.pile_confirm) { reason_ = "pile_confirm"; break; }
+            pile_seen_ = 0;
+            beginPile("pile_many_in_frame");
             break;
         }
+        pile_seen_ = 0;
         if (in.distance_m <= t_.rush_start_m) {
             if (std::abs(in.heading_error) <= t_.rush_heading_rad) {
                 const bool non_supply = t_.sweep_non_supply && t_.disperse && targetKind(label_) != TargetKind::ORDINARY;
@@ -2213,9 +1856,7 @@ PushOutput PushTask::update(const PushObservation &in) {
                         v == RuleVerdict::INJURED_BEFORE_FIRST || v == RuleVerdict::INJURED_NOT_ALONE || v == RuleVerdict::TOO_MANY_SUPPLIES;
                     if (fatal) {
                         if (++precheck_seen_ < t_.corridor_precheck_confirm) { reason_ = "corridor_precheck_confirm"; break; }
-                        precheck_seen_ = 0;
-                        if (pileOnVeto(v)) break;
-                        ++precheck_rejects_; verdict_ = v;
+                        precheck_seen_ = 0; ++precheck_rejects_; verdict_ = v;
                         blacklist(now); clearTrip();
                         const std::string why = std::string("corridor_precheck_") + verdictName(v);
                         enter(PushState::SCAN, now, why.c_str()); break;
@@ -2320,7 +1961,6 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (t_.demo_capture_motion && !t_.assume_all_safe && in.corridor.total() > 0) {
             const auto v = checkTrip(in.corridor, first_);
             if (v != RuleVerdict::OK) {
-                if (pileOnVeto(v)) break;
                 verdict_ = v; blacklist(now);
                 const std::string why = std::string("rush_corridor_") + verdictName(v);
                 enter(PushState::CAPTURE_FAIL, now, why.c_str()); break;
@@ -2379,7 +2019,6 @@ PushOutput PushTask::update(const PushObservation &in) {
         verdict_ = t_.assume_all_safe ? RuleVerdict::OK : checkCorridor(in.corridor, in.corridor_complete,
                                 in.corridor_occlusion_free, label_, first_);
         if (verdict_ != RuleVerdict::OK) {
-            if (pileOnVeto(verdict_)) break;
             reason_ = std::string("rush_corridor_") + verdictName(verdict_);
             blacklist(now); enter(PushState::CAPTURE_FAIL, now, ""); break;
         }
@@ -2417,12 +2056,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         commandFrame(0, now);
         const int g = frameWait(in, 0, now);
         if (g < 0) { fail("frame_close_timeout"); state_=PushState::SAFE_STOP; }
-        else if (g > 0 && pile_enclosed_ && rushLogic()) { // the PILE look already saw only ordinary supplies in the frame: skip the multi-view verify and carry
-            pile_enclosed_ = false;
-            trip_ = pending_; carry_us_ = now; carry_progress_us_ = 0; zone_search_started_us_ = 0;
-            enter(PushState::CARRY, now, "pile_capture"); hold_seen_us_ = now; carried_ = 0;
-        }
-        else if (g > 0) { pile_enclosed_ = false; enter(PushState::VERIFY_CAPTURE, now, "frame_lowered"); }
+        else if (g > 0) enter(PushState::VERIFY_CAPTURE, now, "frame_lowered");
         break;
     }
     case PushState::VERIFY_CAPTURE: {
@@ -2521,14 +2155,6 @@ PushOutput PushTask::update(const PushObservation &in) {
             // TEMP_ASSUMPTION: the hold is assumed (no NEAR checks). With a fresh zone plan drive the
             // normal gate approach; otherwise search briefly, then a bounded straight leg to an assumed drop point.
             step_ = 0;
-            if (carry_view20_) {
-                const bool zone_seen = zone_.valid(now) || in.zone_near_pts;
-                if (carry_looking_ && zone_seen) { carry_looking_ = false; carry_look_t0_ = 0; } // near corners (or a fix) appeared: carry on from the 20deg view
-                if (!carry_looking_) {
-                    if (zone_seen) carry_view_until_us_ = now + t_.carry_view_hold_us;
-                    else if (now > carry_view_until_us_) { carry_view20_ = false; carry_look_cool_until_us_ = now + t_.carry_look_cool_us; }
-                }
-            }
             const bool plan = zoneOk(in) && in.navigation_timestamp_us && now >= in.navigation_timestamp_us &&
                 now - in.navigation_timestamp_us <= 200000 && in.drop_plan_valid && in.carry_plan_valid &&
                 std::isfinite(in.drop_centre_zone.x) && std::isfinite(in.drop_centre_zone.y) &&
@@ -2540,9 +2166,8 @@ PushOutput PushTask::update(const PushObservation &in) {
                 const cv::Point2f gate = in.zone_estimate.zoneToBody({halfX(), -t_.gate_clearance_m - holdCenter()});
                 if (std::hypot(gate.x, gate.y) <= t_.gate_tolerance_m) { enter(PushState::GATE, now, "gate_reached"); break; }
                 reason_ = "carrying_to_own_zone";
-                float ph = std::atan2(-in.carry_waypoint_body.x, in.carry_waypoint_body.y);
-                if (!carryLane(ph, float(cv::norm(in.carry_waypoint_body)), in.zone_estimate, in, now)) { reason_ = carry_lane_why_; drive(0, 0); break; }
-                steer(std::max(.03f, std::min(t_.carry_speed, float(cv::norm(in.carry_waypoint_body)))), ph);
+                steer(std::max(.03f, std::min(t_.carry_speed, float(cv::norm(in.carry_waypoint_body)))),
+                      std::atan2(-in.carry_waypoint_body.x, in.carry_waypoint_body.y));
                 break;
             }
             // 视觉闭环：YOLO-pose区域位姿锚定在里程系；沿区域中轴“追踪前视点”接近，丢失视野时用IMU航向+缩放位移继续推算。
@@ -2560,36 +2185,17 @@ PushOutput PushTask::update(const PushObservation &in) {
                 noteDropZone(imu_blocked ? "release_stall_imu" : "release_stall", hold);
                 enter(PushState::RAISE_RELEASE, now, imu_blocked ? "assumed_drop_point_imu_blocked" : "assumed_drop_point_stalled"); break;
             }
-            if (hold.y >= -t_.assume_release_gap_m && carry_lane_square_) {
-                const float yaw = wrapAngle(z.yaw_body_rad);
-                if (!carry_lane_square_t0_) carry_lane_square_t0_ = now;
-                if (std::abs(yaw) > t_.carry_lane_realign_rad && now - carry_lane_square_t0_ < t_.carry_lane_realign_us) {
-                    reason_ = "carry_lane_square"; drive(0, t_.heading_gain * yaw); break;
-                }
-                std::cout << "[CARRY] lane square done yaw_deg=" << yaw * 57.2958f << "\n";
-                carry_lane_square_ = false;
-            }
             if (hold.y >= -t_.assume_release_gap_m) { noteDropZone("release", hold); enter(PushState::RAISE_RELEASE, now, fresh ? "assumed_drop_point_visual" : "assumed_drop_point_visual_dr"); break; }
                 const cv::Point2f carrot = z.zoneToBody({halfX(), std::min(hold.y + t_.assume_lookahead_m, -t_.assume_release_gap_m)});
                 reason_ = fresh ? "assumed_visual_carry" : "assumed_visual_dead_reckoning";
-                float h = std::atan2(-carrot.x, std::max(.02f, carrot.y - holdCenter()));
-                if (!carryLane(h, std::hypot(carrot.x, std::max(0.f, carrot.y - holdCenter())), z, in, now)) { reason_ = carry_lane_why_; drive(0, 0); break; }
-                if (carry_lane_realign_) {
-                    const float yaw = wrapAngle(z.yaw_body_rad);
-                    if (!carry_lane_realign_t0_) carry_lane_realign_t0_ = now;
-                    if (std::abs(yaw) > t_.carry_lane_realign_rad && now - carry_lane_realign_t0_ < t_.carry_lane_realign_us) {
-                        reason_ = "carry_lane_realign"; drive(0, t_.heading_gain * yaw); break;
-                    }
-                    carry_lane_realign_ = false;
-                    std::cout << "[CARRY] lane realign done yaw_deg=" << yaw * 57.2958f << "\n";
-                }
+                const float h = std::atan2(-carrot.x, std::max(.02f, carrot.y - holdCenter()));
                 if (std::abs(h) > t_.rotate_in_place_rad && hold.y < -t_.assume_release_gap_m - t_.assume_align_zone_m) {
                     // 离区前沿还远：边走边转，不原地等转向（原地转实测很慢，会卡几秒）；临近前沿再原地对正。
                     drive(t_.carry_speed * std::max(.4f, std::cos(std::min(std::abs(h), 1.f))), t_.heading_gain * h);
                 } else steer(t_.carry_speed, h);
                 break;
             }
-            if (!t_.assume_all_safe) { if (evadeEnemy()) break; if (zoneLook()) break; carrySearch(); break; } // no verified own zone: never release blind
+            if (!t_.assume_all_safe) { if (evadeEnemy()) break; carrySearch(); break; } // no verified own zone: never release blind
             if (!assume_blind_) {
                 if (!zone_search_started_us_) zone_search_started_us_ = now;
                 if (now - zone_search_started_us_ < t_.assume_zone_search_us) { reason_ = "assumed_zone_search"; scanSpin(); break; }
@@ -2639,8 +2245,7 @@ PushOutput PushTask::update(const PushObservation &in) {
         if (dist <= t_.gate_tolerance_m) {
             enter(PushState::GATE, now, "gate_reached"); break;
         }
-        float bearing = std::atan2(-in.carry_waypoint_body.x, in.carry_waypoint_body.y);
-        if (!carryLane(bearing, float(cv::norm(in.carry_waypoint_body)), z, in, now)) { reason_ = carry_lane_why_; drive(0, 0); break; }
+        const float bearing = std::atan2(-in.carry_waypoint_body.x, in.carry_waypoint_body.y);
         steer(std::max(.03f, std::min(t_.carry_speed, float(cv::norm(in.carry_waypoint_body)))), bearing);
         break;
     }

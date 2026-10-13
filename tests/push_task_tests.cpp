@@ -119,7 +119,6 @@ struct Sim {
             assert(mapped || stationaryPitchWork(out,reason));
         }
         if(all_ordinary)in.clutter_ordinary=in.clutter_body;
-        in.look_body=in.clutter_body;in.look_ordinary=in.clutter_ordinary;in.look_ts_us=in.clutter_ts_us;
         out = task.update(in);
         if(live_camera_guard) {
             inhibitUnmappedMotion(out.motion,mapped);
@@ -962,28 +961,15 @@ void pileTests() {
     const auto base=[]{ TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;
         t.assume_motion_ratio=1.f;t.pile_clear=true;return t; };
     struct Blk{cv::Point2f p;bool ordinary;};
-    struct R{float drive_yaw=0,cut_m_seen=-1;int cuts=0;bool entered=false,ended=false;std::string end;std::set<std::string> reasons;float advanced=0,dyn_budget=0,cut_yaw=0,phi_cut=0,y_measure=0,y_end=0,spin_turn=0,phi_prev=0;std::string carry_reason;int near_cdeg_at_drive_end=0;float scan_turn=0,scan_phi=0,scan_dist=0,scan_ax=0,scan_ay=0,phi_back=-99;int scan_pitch=-1,scan_n=0;bool scanned=false;};
-    uint64_t match_rem=UINT64_MAX; // match time left fed to every run() below
-    const auto run=[&](TaskTuning t,std::vector<Blk> world_rel,int corridor,float dist,int ticks=2400,const Blk*tgt=nullptr,const std::vector<Blk>*look=nullptr,const std::vector<PushObservation::PrecutBox>*pre=nullptr,bool stale=false,const std::function<bool(float,int)>*scan=nullptr,int edge_other=0,int edge_ord=0){
-        Sim s(t);s.all_ordinary=false;s.in.distance_m=.5f;s.in.match_remaining_us=match_rem;assert(s.until(PushState::APPROACH,80));
+    struct R{bool entered=false,ended=false;std::string end;std::set<std::string> reasons;float advanced=0,cut_yaw=0,phi_cut=0,y_measure=0,y_end=0;};
+    const auto run=[&](TaskTuning t,std::vector<Blk> world_rel,int corridor,float dist,int ticks=2400,const Blk*tgt=nullptr){
+        Sim s(t);s.all_ordinary=false;s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
         const float x0=s.px,y0=s.py;R r;PushState prev=s.out.state;
         for(int i=0;i<ticks&&!r.ended;++i){
             s.in.clutter_body.clear();s.in.clutter_ordinary.clear();const float c=std::cos(s.phi),sn=std::sin(s.phi);
             for(const auto&b:world_rel){const float dx=x0+b.p.x-s.px,dy=y0+b.p.y-s.py;const cv::Point2f q{dx*c+dy*sn,-dx*sn+dy*c};
                 s.in.clutter_body.push_back(q);if(b.ordinary)s.in.clutter_ordinary.push_back(q);}
             s.in.clutter_ts_us=s.in.now_us;
-            if(t.pile_precut&&s.out.state==PushState::PILE&&s.task.pile_phase_==14){ // what the camera sees while standing aligned for the cut
-                s.in.precut_boxes.clear();
-                if(pre)s.in.precut_boxes=*pre;
-                else for(const auto&b:world_rel){const float dx=x0+b.p.x-s.px,dy=y0+b.p.y-s.py;const float qx=dx*c+dy*sn,qy=-dx*sn+dy*c;
-                    if(qy>0)s.in.precut_boxes.push_back({qx-.025f,qx+.025f,qy-.02f,1.f,b.ordinary,false});}
-                if(stale)s.in.clutter_ts_us=1; // Sim::tick copies clutter_ts_us into look_ts_us: an old stamp = no fresh image
-            }
-            if(scan&&s.out.state==PushState::PILE&&s.task.pile_phase_==15){s.in.clutter_body.clear();s.in.clutter_ordinary.clear(); // the 5deg camera: a block 0.5 m ahead in every direction the callback calls blocked
-                if((*scan)(float(std::remainder(s.phi,2.0*CV_PI)),r.scan_n++))s.in.clutter_body.push_back({.02f,.5f});}
-            if(look&&s.out.state==PushState::PILE&&(s.task.pile_phase_==13||(s.task.pile_phase_==5&&s.task.pile_near_))){s.in.clutter_body.clear();s.in.clutter_ordinary.clear(); // what the 40deg camera sees inside the frame
-                for(const auto&b:*look){s.in.clutter_body.push_back(b.p);if(b.ordinary)s.in.clutter_ordinary.push_back(b.p);}}
-            s.in.look_edge_other=look&&s.out.state==PushState::PILE?edge_other:0;s.in.look_edge_ordinary=look&&s.out.state==PushState::PILE?edge_ord:0; // bottom-clipped boxes the ground projection drops
             if(tgt&&(s.out.state==PushState::PILE||r.entered)){ // locked target kept valid inside PILE, at a fixed world spot
                 const float dx=x0+tgt->p.x-s.px,dy=y0+tgt->p.y-s.py;const cv::Point2f q{dx*c+dy*sn,-dx*sn+dy*c};
                 s.in.target_valid=true;s.in.distance_m=std::hypot(q.x,q.y);s.in.heading_error=std::atan2(-q.x,q.y);s.in.label="ordinary_supply";}
@@ -994,23 +980,11 @@ void pileTests() {
                 r.entered=true;r.reasons.insert(s.out.reason);
                 if(s.out.reason=="pile_advance")r.advanced=s.py-y0;
                 if(s.out.reason=="pile_measure"&&r.y_measure==0)r.y_measure=s.py;
-                if((s.out.reason=="pile_cut_align"||s.out.reason=="pile_cut_drive")&&s.task.pile_cut_n_==0){if(r.cut_yaw==0)r.cut_yaw=s.task.pile_cut_yaw_;r.phi_cut=s.phi;}
-                if(s.task.pile_cut_n_>r.cuts)r.cuts=s.task.pile_cut_n_;
-                if(s.out.reason=="pile_cut_drive"&&s.task.pile_cut_n_==0){r.drive_yaw=s.task.pile_cut_yaw_;if(r.cut_m_seen<0)r.cut_m_seen=s.task.pile_cut_m_;}
-                r.dyn_budget=std::max(r.dyn_budget,float(s.task.pile_cut_budget_dyn_us_));
-                if(s.out.reason=="pile_cut_drive"&&s.task.pile_near_)r.near_cdeg_at_drive_end=1;
-                if(s.out.reason=="pile_cut_spin"&&s.task.pile_cut_n_==0)r.spin_turn+=std::fabs(float(std::remainder(s.phi-r.phi_prev,2.0*CV_PI)));
+                if(s.out.reason=="pile_cut_align"||s.out.reason=="pile_cut_drive"){r.cut_yaw=s.task.pile_cut_yaw_;r.phi_cut=s.phi;}
             }
-            if(s.out.state==PushState::PILE){
-                if(s.out.reason=="pile_cut_scan"&&s.task.pile_cut_n_==0){r.scan_pitch=s.out.motion.camera_pitch_cdeg;r.scan_turn+=std::fabs(float(std::remainder(s.phi-r.phi_prev,2.0*CV_PI)));}
-                if(s.out.reason=="pile_scan_advance"){if(!r.scanned){r.scanned=true;r.scan_ax=s.px;r.scan_ay=s.py;r.scan_phi=float(std::remainder(s.phi,2.0*CV_PI));}r.scan_dist=std::hypot(s.px-r.scan_ax,s.py-r.scan_ay);}
-                if(r.scanned&&s.out.reason=="pile_cut_back"&&r.phi_back<-98)r.phi_back=s.phi;
-            }
-            r.phi_prev=s.phi;
             if(prev==PushState::PILE&&s.out.state!=PushState::PILE){r.ended=true;r.end=s.out.reason;r.y_end=s.py;}
             prev=s.out.state;
         }
-        if(r.end=="pile_frame_enclosed"){for(int i=0;i<300&&s.out.state!=PushState::CARRY;++i)s.tick();r.carry_reason=s.out.state==PushState::CARRY?s.out.reason:"";}
         return r;
     };
     // 3个普通物资在框内(超过2个会被走廊规则拒绝) + 1个非普通物资在左侧框内。
@@ -1023,124 +997,12 @@ void pileTests() {
             if(!r.reasons.count(k)){std::cerr<<"missing pile reason "<<k<<"\n";assert(false);}
         assert(r.end=="pile_split_done");
         assert(r.advanced>.47f&&r.advanced<.55f);
-        assert(std::abs(r.y_end-(r.y_measure+r.cut_m_seen*std::cos(r.drive_yaw)-base().pile_back_m))<.08f); // 切入后固定后退 pile_back_m，与切入深度无关
+        assert(std::abs(r.y_end-r.y_measure)<.08f); // 切入后只退回观察位，不再多退一段
         // 把左边那个非普通物资筛掉、普通物资全留在框里：向右转一个物块视角(约7.6度)，镜像场景向左。
         const float turn=r.cut_yaw-0.f;
         assert(turn<-.09f&&turn>-.2f);
         const auto m=run(base(),pile_right_bad,3,.5f);
         assert(m.end=="pile_split_done"&&m.cut_yaw>.09f&&m.cut_yaw<.2f);
-    }
-    { // row_split_pile：行选择器标出的"脚印内有伤员/危险物"的锁定块不再被跳过，而是进 PILE 分开；关开关或未标记则不进。
-        const auto go=[&](bool on,bool split,std::string*why){
-            TaskTuning t=base();t.row_split_pile=on;Sim s(t);s.all_ordinary=false;s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
-            for(int i=0;i<200;++i){s.in.target_valid=true;s.in.distance_m=.5f;s.in.corridor=inv(0);s.in.target_split=split;s.tick();
-                if(s.out.state==PushState::PILE){if(why)*why=s.out.reason;return true;}}
-            return false;
-        };
-        std::string why;
-        assert(go(true,true,&why)&&why.find("pile")==0);
-        assert(!go(false,true,nullptr)&&!go(true,false,nullptr));
-    }
-    { // pile_cut_spin：切入前进完后原地自转一周(转向与切向一致)，再回到切向后退；默认关闭时不自转。
-        TaskTuning sp=base();sp.pile_cut_spin=true;
-        for(const std::vector<Blk>*scene:{&pile_left_bad,(const std::vector<Blk>*)&pile_right_bad}){
-            const auto r=run(sp,*scene,3,.5f);
-            assert(r.entered&&r.ended&&r.end=="pile_split_done");
-            assert(r.reasons.count("pile_cut_drive")&&r.reasons.count("pile_cut_spin")&&r.reasons.count("pile_cut_back"));
-            assert(r.spin_turn>5.2f&&r.spin_turn<6.9f);
-        }
-        const auto off=run(base(),pile_left_bad,3,.5f);
-        assert(!off.reasons.count("pile_cut_spin")&&off.spin_turn==0);
-    }
-    { // pile_cut_capture：切入后相机固定40°看框里；只有1~2个普通物资 -> 直接进LOWER_FRAME/抓取，不再回搜；有非普通物资或数量超限 -> 照旧后退重新量。
-        TaskTuning cap=base();cap.pile_cut_capture=true;
-        const std::vector<Blk> in_ok{{{.0f,.20f},true},{{.06f,.22f},true}};
-        const auto r=run(cap,pile_left_bad,3,.5f,2400,nullptr,&in_ok);
-        assert(r.entered&&r.ended&&r.end=="pile_frame_enclosed"&&r.reasons.count("pile_cut_drive")&&!r.reasons.count("pile_cut_back"));
-        const std::vector<Blk> in_bad{{{.0f,.20f},true},{{.06f,.22f},false}};
-        const auto b=run(cap,pile_left_bad,3,.5f,2400,nullptr,&in_bad);
-        assert(b.ended&&b.end!="pile_frame_enclosed"&&b.reasons.count("pile_cut_look")&&b.reasons.count("pile_cut_back"));
-        const std::vector<Blk> in_many{{{.0f,.20f},true},{{.05f,.22f},true},{{-.05f,.22f},true}};
-        const auto m=run(cap,pile_left_bad,3,.5f,2400,nullptr,&in_many);
-        assert(m.ended&&m.end!="pile_frame_enclosed"&&m.reasons.count("pile_cut_back"));
-        const auto off=run(base(),pile_left_bad,3,.5f,2400,nullptr,&in_ok);
-        assert(off.end=="pile_split_done"&&!off.reasons.count("pile_cut_look"));
-        assert(r.carry_reason=="pile_capture"&&r.near_cdeg_at_drive_end==1); // 相机在切入末段(未到头)已放到40°；框内只有普通物资 -> 关框后直接CARRY，不走VERIFY_CAPTURE
-        TaskTuning late=cap;late.pile_look_close_frac=9.f; // 切入同时看：默认过半就关框，比切完再看更早
-        const auto rl=run(late,pile_left_bad,3,.5f,2400,nullptr,&in_ok);
-        assert(rl.end=="pile_frame_enclosed"&&r.y_end<rl.y_end-.08f);
-        TaskTuning sp=cap;sp.pile_cut_spin=true;
-        const auto rs=run(sp,pile_left_bad,3,.5f,2400,nullptr,&in_ok);
-        assert(rs.end=="pile_frame_enclosed"&&!rs.reasons.count("pile_cut_spin")&&rs.carry_reason=="pile_capture"); // 切完先看，干净就不再自转
-        const auto bs=run(sp,pile_left_bad,3,.5f,2400,nullptr,&in_bad);
-        assert(bs.ended&&bs.end!="pile_frame_enclosed"&&bs.reasons.count("pile_cut_spin")&&bs.reasons.count("pile_cut_back")); // 不干净 -> 自转 -> 再看 -> 后退
-        const std::vector<Blk> in_one{{{.0f,.20f},true}};
-        const auto eo=run(cap,pile_left_bad,3,.5f,2400,nullptr,&in_one,nullptr,false,nullptr,1,0); // 底边被图像截掉的伤员/危险物没有地面坐标，只能按像素计数：框内有异类 -> 不关框
-        assert(eo.ended&&eo.end!="pile_frame_enclosed"&&eo.reasons.count("pile_cut_back"));
-        const auto e1=run(cap,pile_left_bad,3,.5f,2400,nullptr,&in_one,nullptr,false,nullptr,0,1); // 截掉底边的普通物资照样算一个：1+1=2 仍可关框
-        assert(e1.end=="pile_frame_enclosed"&&e1.carry_reason=="pile_capture");
-        const auto e3=run(cap,pile_left_bad,3,.5f,2400,nullptr,&in_ok,nullptr,false,nullptr,0,1); // 2个投影到的 + 1个截底的普通物资 = 3 > 2 -> 不关框
-        assert(e3.end!="pile_frame_enclosed"&&e3.reasons.count("pile_cut_back"));
-    }
-    { // pile_cut_bias_rad：切角朝切的方向多转一个常量；关框要等切入完成(close_frac=1)，且框内普通物资<=2
-        TaskTuning b0=base(),b1=base();b1.pile_cut_bias_rad=.1f;
-        const auto r0=run(b0,pile_left_bad,3,.5f,2400,nullptr,nullptr);
-        const auto r1=run(b1,pile_left_bad,3,.5f,2400,nullptr,nullptr);
-        assert(r0.cut_yaw!=0.f&&std::fabs(r1.cut_yaw-r0.cut_yaw)>.09f&&std::fabs(r1.cut_yaw-r0.cut_yaw)<.11f&&r1.cut_yaw*r0.cut_yaw>0.f&&std::fabs(r1.cut_yaw)>std::fabs(r0.cut_yaw));
-        TaskTuning c1=base();c1.pile_cut_capture=true;c1.pile_look_close_frac=1.f;
-        const std::vector<Blk> in_ok{{{.0f,.20f},true},{{.06f,.22f},true}};
-        const auto rc=run(c1,pile_left_bad,3,.5f,2400,nullptr,&in_ok);
-        TaskTuning c2=base();c2.pile_cut_capture=true;
-        const auto re=run(c2,pile_left_bad,3,.5f,2400,nullptr,&in_ok);
-        assert(rc.end=="pile_frame_enclosed"&&rc.carry_reason=="pile_capture"&&rc.y_end>re.y_end+.08f); // 切完才关框：比过半就关走得更深
-        const std::vector<Blk> in_many{{{.0f,.20f},true},{{.05f,.22f},true},{{-.05f,.22f},true}};
-        const auto rm=run(c1,pile_left_bad,3,.5f,2400,nullptr,&in_many);
-        assert(rm.end!="pile_frame_enclosed"); // 3个普通物资在框内 -> 不CARRY
-    }
-    { // pile_cut_scan：不干净时不再自转一周，而是相机降到5°、转着找前方没有物块的方向，站稳确认后前进一小段，再看框；仍不干净则原路退回切向后退。
-        TaskTuning sc=base();sc.pile_cut_capture=true;sc.pile_cut_spin=true;sc.pile_cut_scan=true;sc.pile_cut_extra_m=0.f; // this block tests the scan flow at the plain planned travel; with +0.1 m the default PILE budget runs out
-        const std::vector<Blk> in_ok{{{.0f,.20f},true},{{.06f,.22f},true}};
-        const std::vector<Blk> in_bad{{{.0f,.20f},true},{{.06f,.22f},false}};
-        for(const float dir:{1.f,-1.f}){ // 左切向左转，右切向右转：自由方向在转向一侧约1.5 rad处
-            const auto& scene=dir>0?pile_left_bad:pile_right_bad;
-            const std::function<bool(float,int)> window=[dir](float phi,int){return !(dir*phi>1.3f&&dir*phi<1.9f);};
-            const auto r=run(sc,scene,3,.5f,2400,nullptr,&in_bad,nullptr,false,&window);
-            assert(r.ended&&r.end=="pile_split_done");
-            for(const char*k:{"pile_cut_scan","pile_scan_hold","pile_scan_advance","pile_scan_return","pile_cut_back"})
-                if(!r.reasons.count(k)){std::cerr<<"missing scan reason "<<k<<"\n";assert(false);}
-            assert(!r.reasons.count("pile_cut_spin"));
-            assert(r.scan_pitch==sc.far_pitch_cdeg); // 5°
-            assert(dir*r.scan_phi>1.3f&&dir*r.scan_phi<2.1f&&r.scan_dist>.12f&&r.scan_dist<.32f); // 停在自由窗口内，前进约0.2 m
-            assert(std::fabs(float(std::remainder(r.phi_back-r.cut_yaw,2.0*CV_PI)))<.2f); // 退回切向后才后退
-            const auto ok=run(sc,scene,3,.5f,2400,nullptr,&in_ok,nullptr,false,&window); // 预看干净 -> 根本不扫描
-            assert(ok.end=="pile_frame_enclosed"&&!ok.reasons.count("pile_cut_scan"));
-        }
-        { // 一圈都没有自由方向：转满约一周，回到切向，不前进，照旧看框/后退
-            const std::function<bool(float,int)> blocked=[](float,int){return true;};
-            const auto r=run(sc,pile_left_bad,3,.5f,3000,nullptr,&in_bad,nullptr,false,&blocked);
-            assert(r.ended&&r.end=="pile_split_done"&&!r.reasons.count("pile_scan_advance")&&r.reasons.count("pile_cut_back"));
-            assert(r.scan_turn>5.5f&&r.scan_turn<7.2f);
-        }
-        { // 只闪现一帧自由：站定确认时又被挡 -> 继续转，不前进
-            const std::function<bool(float,int)> flicker=[](float,int n){return n!=40;};
-            const auto r=run(sc,pile_left_bad,3,.5f,3000,nullptr,&in_bad,nullptr,false,&flicker);
-            assert(r.ended&&!r.reasons.count("pile_scan_advance")&&r.reasons.count("pile_scan_hold"));
-        }
-        { // 开关关闭 -> 仍是原来的整圈自转
-            TaskTuning off=sc;off.pile_cut_scan=false;
-            const auto r=run(off,pile_left_bad,3,.5f,2400,nullptr,&in_bad);
-            assert(r.reasons.count("pile_cut_spin")&&!r.reasons.count("pile_cut_scan"));
-        }
-    }
-    { // pile_back_m：PILE 所有后退都是固定距离；真实地面行程(motionRatio=4.7)下，切入预算按计划行程放大，不会被8 s截断。
-        TaskTuning h=base();h.pile_back_m=.10f;
-        const auto full=run(base(),pile_left_bad,3,.5f);
-        const auto half=run(h,pile_left_bad,3,.5f);
-        assert(base().pile_back_m==.25f&&full.ended&&half.ended&&half.y_end>full.y_end+.04f); // 少退，结束位置更靠前
-        TaskTuning slow=base();slow.pile_cut_speed=.10f;slow.pile_budget_us=120000000; // slow floor travel (the Sim does not model motionRatio): 0.6 m at 0.1 m/s = 6 s planned
-        const auto rr=run(slow,pile_left_bad,3,.5f,6000);
-        assert(rr.dyn_budget>9e6f&&rr.dyn_budget<slow.pile_cut_budget_max_us); // above the fixed 8 s, scaled with the plan
-        assert(full.dyn_budget==float(base().pile_cut_budget_us)); // ratio 1: the planned drive fits the floor budget
     }
     { // 非普通物资藏在框中间，转一个物块视角还夹着它：默认放弃切；pile_cut_max_steps=3 时多转几个物块视角，先把框里清成同一类型再切。
         const std::vector<Blk> deep_bad{{{0.f,.75f},false},{{.08f,.75f},true},{{.16f,.75f},true},{{.24f,.75f},true}};
@@ -1150,49 +1012,6 @@ void pileTests() {
         const auto w=run(wide,deep_bad,3,.5f);
         assert(w.entered&&w.ended&&w.end=="pile_split_done"&&w.reasons.count("pile_cut_drive"));
         assert(w.cut_yaw<-.18f); // 向右转了不止一个物块视角(单步约7.6度=.13 rad)
-    }
-    { // 保留的普通物资只压在框边线上(3步转角后横向约13.9 cm)时，边缘臂会把它推开，框里空切：加 pile_cut_margin_m 后这种切被拒绝，不空切。
-        const std::vector<Blk> edge{{{0.f,.75f},false},{{.05f,.75f},true}};
-        TaskTuning wide=base();wide.pile_cut_max_steps=3;
-        const auto loose=run(wide,edge,3,.5f);
-        assert(loose.entered&&loose.ended&&loose.reasons.count("pile_cut_drive"));
-        wide.pile_cut_margin_m=.03f;
-        const auto safe=run(wide,edge,3,.5f);
-        assert(safe.entered&&safe.ended&&safe.end=="pile_cut_no_gain"&&!safe.reasons.count("pile_cut_drive"));
-    }
-    { // 切入前一次性检查(phase 14)：对准切入方向后用一帧图像里每个框的两个底角判断走廊(整进/整出/压线)；默认关闭。
-        using PB=PushObservation::PrecutBox;
-        TaskTuning on=base();on.pile_precut=true;
-        const auto off=run(base(),pile_left_bad,3,.5f);
-        assert(off.end=="pile_split_done"&&!off.reasons.count("pile_precut")&&off.cut_m_seen>0);
-        const std::vector<Blk> apart{{{-.13f,.75f},false},{{-.05f,.75f},true},{{.05f,.75f},true},{{.10f,.75f},true}}; // 非普通物资离走廊边线有一个物块的空隙
-        const auto ok=run(on,apart,3,.5f);
-        assert(ok.entered&&ok.ended&&ok.end=="pile_split_done"&&ok.reasons.count("pile_precut")&&ok.reasons.count("pile_cut_drive")); // 干净：不改角度直接切
-        const std::vector<PB> lane{{-.025f,.025f,.28f,1.f,true,false},{.04f,.09f,.30f,1.f,true,false},{-.25f,-.20f,.28f,1.f,false,false}};
-        const auto cl=run(on,pile_left_bad,3,.5f,2400,nullptr,nullptr,&lane);
-        assert(cl.ended&&cl.reasons.count("pile_cut_drive")&&std::abs(cl.drive_yaw-cl.cut_yaw)<1e-4f); // 走廊干净：不改角度
-        // 非普通物资压在走廊左线上：本方向不干净，向右再转一个物块视角后干净 -> 一次重新对准后切入。
-        const std::vector<PB> edge{{-.025f,.025f,.28f,1.f,true,false},{-.175f,-.125f,.28f,1.f,false,false}};
-        const auto re=run(on,pile_left_bad,3,.5f,2400,nullptr,nullptr,&edge);
-        assert(re.ended&&re.reasons.count("pile_cut_drive")&&re.drive_yaw<re.cut_yaw-.03f); // 相对实际朝向再转一个物块视角(对准容差内实际朝向可能落后原目标角)
-        // 哪个方向都挤着一个非普通物资：不动，不空切。
-        const std::vector<PB> mid{{-.025f,.025f,.28f,1.f,false,false},{.03f,.08f,.28f,1.f,true,false}};
-        const auto no=run(on,pile_left_bad,3,.5f,2400,nullptr,nullptr,&mid);
-        assert(no.entered&&no.ended&&no.end=="pile_precut_no_cut"&&!no.reasons.count("pile_cut_drive"));
-        // 没有新鲜图像：超时后沿用原来的开环切入。
-        const auto to=run(on,pile_left_bad,3,.5f,2400,nullptr,nullptr,&edge,true);
-        assert(to.ended&&to.reasons.count("pile_cut_drive")&&to.end=="pile_split_done"&&std::abs(to.drive_yaw-to.cut_yaw)<1e-4f&&std::abs(to.cut_m_seen-off.cut_m_seen)<1e-4f);
-        // 切入深度：按最近普通物资的框底行重算；像素尺寸与投影距离不一致、或框贴图像边缘时保留原深度。
-        const float want=off.cut_m_seen-.08f;
-        const float yb=(want-on.pile_cut_extra_m-.35f+.171f)-.02f; // the travel the code plans is y-derived + pile_cut_extra_m
-        const auto mk=[&](float ratio,bool clip){return std::vector<PB>{{-.025f,.025f,yb,ratio,true,clip}};};
-        const auto m1=mk(1.f,false),m2=mk(1.6f,false),m3=mk(1.f,true);
-        const auto d1=run(on,pile_left_bad,3,.5f,2400,nullptr,nullptr,&m1);
-        assert(std::abs(d1.cut_m_seen-want)<.005f);
-        const auto d2=run(on,pile_left_bad,3,.5f,2400,nullptr,nullptr,&m2);
-        assert(std::abs(d2.cut_m_seen-off.cut_m_seen)<1e-4f);
-        const auto d3=run(on,pile_left_bad,3,.5f,2400,nullptr,nullptr,&m3);
-        assert(std::abs(d3.cut_m_seen-off.cut_m_seen)<1e-4f);
     }
     { // 被锁定的普通物资紧贴(4 cm)一个非普通物资：不能把它当成重复物资丢掉，否则簇里只剩非普通物资，误判无增益。
         const std::vector<Blk> touch{{{-.065f,.75f},false},{{.067f,.75f},false}};
@@ -1217,41 +1036,6 @@ void pileTests() {
         const std::vector<Blk> tight{{{-.03f,.75f},true},{{0.f,.75f},true},{{.03f,.75f},true},{{.01f,.78f},true}};
         const auto r=run(base(),tight,3,.5f);
         assert(r.entered&&r.ended&&r.end=="pile_cut_no_gain");
-    }
-    { // 修复1：两侧转一个物块视角都把全部物资筛出框外(只剩空地)：不能选这种"夹空气"的切，直接 no_gain，不开 pile_cut_drive。
-        const std::vector<Blk> air{{{-.10f,.75f},false},{{.22f,.75f},true}};
-        const auto r=run(base(),air,3,.5f);
-        assert(r.entered&&r.ended&&r.end=="pile_cut_no_gain"&&!r.reasons.count("pile_cut_drive"));
-    }
-    { // pile_cut_require_clean：最优切也夹着非普通物资(叠在一起分不开)时放弃这堆，不硬切；默认关闭时照旧硬切。
-        const std::vector<Blk> stacked{{{-.12f,.75f},false},{{-.05f,.75f},false},{{.02f,.75f},true},{{.06f,.75f},true},{{.10f,.75f},true}};
-        const auto old=run(base(),stacked,3,.5f);
-        assert(old.entered&&old.reasons.count("pile_cut_drive"));
-        TaskTuning cl=base();cl.pile_cut_require_clean=true;
-        const auto r=run(cl,stacked,3,.5f);
-        assert(r.entered&&r.ended&&r.end=="pile_cut_unclean"&&!r.reasons.count("pile_cut_drive"));
-        const auto ok=run(cl,pile_left_bad,3,.5f); // 能切干净的堆照切
-        assert(ok.end=="pile_split_done"&&ok.reasons.count("pile_cut_drive"));
-    }
-    { // 剩余比赛时间：低于 pile_min_remaining_us 不进 PILE；切入(计划行程+后退)加 pile_cut_reserve_us 放不下就放弃，不开 pile_cut_drive。
-        TaskTuning t=base();t.pile_min_remaining_us=45000000;
-        match_rem=30000000;assert(!run(t,pile_left_bad,3,.5f,600).entered);
-        match_rem=60000000;assert(run(t,pile_left_bad,3,.5f).entered);
-        match_rem=UINT64_MAX;assert(run(t,pile_left_bad,3,.5f).entered); // 剩余时间未知(无限制)不拦
-        TaskTuning c=base();c.pile_cut_reserve_us=15000000;
-        match_rem=60000000;assert(run(c,pile_left_bad,3,.5f).reasons.count("pile_cut_drive"));
-        match_rem=12000000;
-        const auto n=run(c,pile_left_bad,3,.5f);
-        assert(n.entered&&n.ended&&n.end=="pile_no_time"&&!n.reasons.count("pile_cut_drive"));
-        match_rem=UINT64_MAX;
-    }
-    { // 修复2：切完退回观察位后重新测量(pile_verify)，框里干净才报 pile_split_done；一轮切后仍有普通物资超量但无非普通物资，也算分开。
-        const auto r=run(base(),pile_left_bad,3,.5f);
-        assert(r.reasons.count("pile_verify")&&r.cuts>=1&&r.end=="pile_split_done");
-        TaskTuning one=base();one.pile_cut_rounds=1;
-        const std::vector<Blk> mixed{{{-.10f,.75f},false},{{.0f,.75f},true},{{.04f,.75f},true},{{.08f,.75f},true}};
-        const auto m=run(one,mixed,3,.5f);
-        assert(m.entered&&m.ended&&m.cuts==1&&m.reasons.count("pile_verify")); // 只允许一轮：切完必定进入复核
     }
     { // PILE chain: pushed-out cluster deeper than one layer -> face, rush in, big-angle turn, back off, re-measure (capped), then the cut; one layer -> straight to the cut.
         const auto chain=[&](std::vector<cv::Point2f> rel,bool on,int max_rounds,float fov=0.f){
@@ -1301,47 +1085,6 @@ void pileTests() {
             if(on)assert(s.task.pile_phase_==7);
         }
     }
-    { // pile_window: the counted corridor flickers by a block per frame; 5 hits within the last 10 ticks start PILE, strict consecutive frames (window = confirm) never complete on a flickering corridor.
-        const auto go=[&](int window,int hit_every,int hits_per){
-            TaskTuning t=base();t.pile_window=window;Sim s(t);s.all_ordinary=false;s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
-            for(int i=0;i<120;++i){s.in.target_valid=true;s.in.distance_m=.5f;s.in.corridor=inv((i%hit_every)<hits_per?3:2);s.tick();
-                if(s.out.state==PushState::PILE)return s.out.reason;}
-            return std::string();
-        };
-        assert(go(10,3,2)=="pile_many_in_frame");  // 2 of every 3 ticks counted >= 3
-        assert(go(5,3,2).empty());                 // old behaviour: one miss resets the count
-        assert(go(10,3,1).empty());                // 1 of 3 ticks is below 5 hits in 10
-        assert(go(10,1,1)=="pile_many_in_frame");  // steady corridor still starts PILE
-    }
-    { // A TOO_MANY_SUPPLIES / INJURED_BEFORE_FIRST pre-check veto on a cluster starts PILE once the PILE cool-down is over; inside the cool-down, dangerous, small corridors, spent runs and the switch keep the old veto.
-        const auto go=[&](Inventory c,bool on,int runs,bool cooling,bool dang=true){
-            TaskTuning t;t.pile_clear=true;t.pile_on_veto=on;t.pile_veto_dangerous=dang;Sim s(t);s.all_ordinary=false;s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
-            s.task.pile_runs_=runs;if(cooling)s.task.pile_cool_until_us_=s.in.now_us+60000000ULL;s.task.frame_raised_=1; // frame open: the plain APPROACH trigger is off, only the veto path can start PILE
-            for(int i=0;i<80;++i){s.in.target_valid=true;s.in.distance_m=.3f;s.in.corridor=c;s.tick();
-                if(s.out.state==PushState::PILE||(s.out.state==PushState::SCAN&&s.out.reason.rfind("corridor_precheck_",0)==0))return s.out.reason;}
-            return std::string("none");
-        };
-        assert(go(inv(3),true,0,false)=="pile_veto_too_many_supplies");
-        assert(go(inv(3),true,0,true)=="corridor_precheck_too_many_supplies");        // inside the PILE cool-down: no PILE, so other states are not starved
-        assert(go(inv(2,0,1),true,0,false)=="pile_veto_injured");
-        assert(go(inv(3),false,0,false)=="corridor_precheck_too_many_supplies");
-        assert(go(inv(3,0,0,1),true,0,false)=="pile_veto_dangerous");               // a cluster with a dangerous block: split it in PILE
-        assert(go(inv(3,0,0,1),true,0,false,false)=="corridor_precheck_dangerous");  // pile_veto_dangerous off keeps the old veto
-        assert(go(inv(3),true,2,false)=="corridor_precheck_too_many_supplies");        // pile_max_runs spent
-    }
-    { // The same vetoes in RUSH (a third block shows up late, or the corridor is hidden) hand over to PILE instead of CAPTURE_FAIL + blind retreat.
-        const auto go=[&](Inventory c,bool occl_free,bool on,bool dang=true){
-            TaskTuning t;t.pile_clear=true;t.pile_on_veto=on;t.pile_veto_dangerous=dang;Sim s(t);s.toRush();
-            s.in.distance_m=.30f;s.in.corridor=c;s.in.corridor_occlusion_free=occl_free;s.tick();
-            return std::make_pair(s.out.state,s.out.reason);
-        };
-        assert(go(inv(3),true,true)==std::make_pair(PushState::PILE,std::string("pile_veto_too_many_supplies")));
-        assert(go(inv(2),false,true)==std::make_pair(PushState::PILE,std::string("pile_veto_occluded")));
-        assert(go(inv(1),false,true)==std::make_pair(PushState::CAPTURE_FAIL,std::string("rush_corridor_occluded")));
-        assert(go(inv(3),true,false)==std::make_pair(PushState::CAPTURE_FAIL,std::string("rush_corridor_too_many_supplies")));
-        assert(go(inv(2,0,0,1),true,true)==std::make_pair(PushState::PILE,std::string("pile_veto_dangerous")));
-        assert(go(inv(2,0,0,1),true,true,false)==std::make_pair(PushState::CAPTURE_FAIL,std::string("rush_corridor_dangerous")));
-    }
 }
 int main(int argc, char **argv) {
     if (argc == 3 && std::string(argv[1]) == "--write-fixture") { writeFixture(argv[2]); return 0; }
@@ -1383,102 +1126,6 @@ int main(int argc, char **argv) {
         assert(std::abs(s.py+s.tune.hold_center_y_m-s.tune.assume_push_depth_m)<.06f);
         assert(s.until(PushState::SAFE_STOP,2000) && s.out.reason=="demo_next_trip_unverified");
       }
-    }
-    { // CARRY lane guard: loose blocks ahead are steered around, not pushed in front of the frame toward the safe zone.
-      struct LR { float min_clear=9; bool blocked=false, done=false, bend=false; int ticks=0; };
-      // Blocks are fixed in the zone frame; the camera (5deg) only sees 0.30..1.2 m ahead, the nearer ground is its blind zone.
-      const auto lane=[&](bool guard,bool assume,const std::vector<cv::Point3f>&spec,float hold_us_s=1.5f){
-        LR r;TaskTuning t;t.assume_all_safe=assume;t.demo_carry_once=assume;t.assume_motion_ratio=1.f;t.carry_lane_guard=guard;t.carry_lane_hold_us=uint64_t(hold_us_s*1e6f);
-        Sim s(t);s.py=-1.1f;
-        if(assume){s.tune.require_multi_view=true;s.task=PushTask(s.tune);s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;s.toRush();s.in.target_valid=false;assert(s.until(PushState::CARRY,300));}
-        else s.toCarry();
-        std::vector<cv::Point2f> blocks;for(const auto&b:spec)blocks.push_back({b.x,b.z>0?s.py+b.y:b.y}); // z>0: y is the distance ahead of the carry start
-        for(int i=0;i<1200;++i){
-            const float c=std::cos(-s.phi),sn=std::sin(-s.phi);
-            s.in.clutter_body.clear();
-            for(const auto&b:blocks){
-                const float dx=b.x-s.px,dy=b.y-s.py;const cv::Point2f cb{c*dx-sn*dy,sn*dx+c*dy};
-                if(cb.y>=.30f&&cb.y<=1.2f&&std::abs(cb.x)<=.8f)s.in.clutter_body.push_back(cb);
-            }
-            s.in.clutter_ts_us=s.in.now_us+50000;
-            s.tick();++r.ticks;
-            for(const auto&b:blocks){ // clearance to the frame footprint (x +-0.14, y 0..front)
-                const float dx=b.x-s.px,dy=b.y-s.py;const cv::Point2f cb{c*dx-sn*dy,sn*dx+c*dy};
-                if(cb.y>-.1f&&cb.y<.40f&&b.y<-.05f)r.min_clear=std::min(r.min_clear,std::max(std::abs(cb.x)-.14f,std::max(cb.y-s.tune.sweep_frame_front_m,-.14f)));
-            }
-            if(s.out.reason=="carry_lane_blocked")r.blocked=true;
-            if(s.out.state==(assume?PushState::RAISE_RELEASE:PushState::GATE)){r.done=true;break;}
-            if(s.out.state!=PushState::CARRY)break;
-        }
-        return r;
-      };
-      for(int assume=0;assume<2;++assume){
-        const float hx=-.15f;
-        const std::vector<cv::Point3f> one{{hx,.50f,1}};
-        const LR off=lane(false,assume,one);
-        assert(off.done&&off.min_clear<0.f); // without the guard the frame runs into the block
-        const LR on=lane(true,assume,one);
-        assert(on.done&&on.min_clear>.0f&&!on.blocked); // detours around it and still arrives
-        const LR none=lane(true,assume,{});
-        assert(none.done&&!none.blocked);
-        // A block past the goal line / inside the zone is the destination, not an obstacle.
-        const LR inzone=lane(true,assume,{{hx,assume?.10f:-.10f,0}});
-        assert(inzone.done&&!inzone.blocked&&inzone.ticks<=none.ticks+3);
-      }
-      { // a wall across the whole lane: stop first, then give up after the hold time instead of deadlocking
-        std::vector<cv::Point3f> wall;for(float x=-.95f;x<=.65f;x+=.12f)wall.push_back({x,.50f,1});
-        const LR w=lane(true,false,wall,1.0f);
-        assert(w.blocked&&w.ticks<1200); // stops, gives up after the hold time, and the carry still ends (arrival or the carry budget), never a deadlock
-        const LR w2=lane(true,false,wall,1.0f);
-        assert(w2.ticks==w.ticks);
-      }
-    }
-    { // CARRY lane view: zone located -> 20deg check of the lane ahead of the frame, bypass at that view, then 5deg back toward the zone.
-      struct VR { float min_clear=9; bool done=false, blocked=false, still_ok=true, bent=false, realigned=false; int first20=-1, last5_after=-1, ticks=0; float yaw_done=0; };
-      const auto view=[&](bool use_view,const std::vector<cv::Point3f>&spec){
-        VR r;TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;t.carry_lane_guard=true;t.carry_lane_view=use_view;
-        Sim s(t);s.py=-1.1f;s.tune.require_multi_view=true;s.task=PushTask(s.tune);s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;s.toRush();s.in.target_valid=false;assert(s.until(PushState::CARRY,300));
-        std::vector<cv::Point2f> blocks;for(const auto&b:spec)blocks.push_back({b.x,s.py+b.y});
-        for(int i=0;i<1200;++i){
-            const float c=std::cos(-s.phi),sn=std::sin(-s.phi);
-            const bool mid=s.pitch>=1500; // the 20deg view sees the ground right in front of the frame, the 5deg view only 0.30..1.2 m
-            const float lo=mid?.10f:.30f,hi=mid?.55f:1.2f;
-            s.in.clutter_body.clear();
-            for(const auto&b:blocks){
-                const float dx=b.x-s.px,dy=b.y-s.py;const cv::Point2f cb{c*dx-sn*dy,sn*dx+c*dy};
-                if(cb.y>=lo&&cb.y<=hi&&std::abs(cb.x)<=.8f)s.in.clutter_body.push_back(cb);
-            }
-            s.in.clutter_ts_us=s.in.now_us+50000;
-            s.tick();++r.ticks;
-            for(const auto&b:blocks){
-                const float dx=b.x-s.px,dy=b.y-s.py;const cv::Point2f cb{c*dx-sn*dy,sn*dx+c*dy};
-                if(cb.y>-.1f&&cb.y<.40f)r.min_clear=std::min(r.min_clear,std::max(std::abs(cb.x)-.14f,std::max(cb.y-s.tune.sweep_frame_front_m,-.14f)));
-            }
-            const std::string why=s.out.reason;
-            if(why=="carry_lane_blocked")r.blocked=true;
-            if(why=="carry_lane_realign"||why=="carry_lane_square")r.realigned=true;
-            if(why=="carry_lane_pitch_wait"||why=="carry_lane_look")r.still_ok=r.still_ok&&s.out.motion.vx_mps==0&&s.out.motion.wz_rps==0;
-            if(s.out.state==PushState::CARRY){
-                if(s.out.motion.camera_pitch_cdeg==2000&&r.first20<0)r.first20=i;
-                if(r.first20>=0&&s.out.motion.camera_pitch_cdeg==s.tune.far_pitch_cdeg)r.last5_after=i;
-            }
-            if(s.out.state==PushState::RAISE_RELEASE){r.done=true;r.yaw_done=s.phi;break;}
-            if(s.out.state!=PushState::CARRY)break;
-        }
-        return r;
-      };
-      const std::vector<cv::Point3f> one{{-.15f,.50f,1}};
-      const VR off=view(false,one);
-      assert(off.done&&off.first20<0&&off.min_clear>.0f); // view off: the plain guard, camera stays at 5deg
-      const VR clear=view(true,{});
-      assert(clear.done&&clear.first20>=0&&clear.last5_after<0&&clear.still_ok&&!clear.blocked); // nothing ahead: checked at 20deg and stays there
-      const VR det=view(true,one);
-      assert(det.done&&!det.blocked&&det.still_ok&&det.min_clear>.0f); // bypassed without touching the block
-      assert(det.first20>=0&&det.last5_after>det.first20); // 20deg first, 5deg again after the bypass
-      assert(det.realigned&&std::abs(det.yaw_done)<.2f); // squared up to the zone after the bypass, not released skewed
-      assert(!clear.realigned); // no detour, nothing to square up
-      const VR two=view(true,{{-.15f,.50f,1},{-.15f,.74f,1}});
-      assert(two.done&&!two.blocked&&two.still_ok&&two.min_clear>.0f); // a second block met on the way back is bypassed too
     }
     { // Blocked by the zone rim near the front edge: release by stall instead of ramming until timeout.
         TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
@@ -1900,7 +1547,7 @@ int main(int argc, char **argv) {
         Sim s(t);s.live_camera_guard=true;s.pitch=500;s.pitch_still=3;s.out.motion.camera_pitch_cdeg=500;
         s.zone_visible=false;s.in.target_valid=false;
         bool scanned=false;
-        for(int i=0;i<30;++i){s.tick();assert(s.out.motion.vx_mps==0);scanned|=s.out.motion.wz_rps<0;}
+        for(int i=0;i<30;++i){s.tick();assert(s.out.motion.vx_mps==0);scanned|=s.out.motion.wz_rps>0;}
         assert(scanned&&s.out.state==PushState::SCAN);
         s.in.target_valid=true;s.in.distance_m=.8f;
         bool approached=false;
@@ -2774,12 +2421,12 @@ int main(int argc, char **argv) {
             if(out.state==PushState::SCAN)break;
         }
         assert(forward_frames==150 && out.startup_commanded_us==15000000);
-        in.now_us+=100000;out=task.update(in);assert(out.motion.vx_mps==0&&out.motion.wz_rps==-3.f);
+        in.now_us+=100000;out=task.update(in);assert(out.motion.vx_mps==0&&out.motion.wz_rps==3.f);
         assert(out.reason=="searching_target");
         in.path_safe=false;in.now_us+=100000;out=task.update(in);
         assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 && out.reason=="scan_path_blocked");
         in.path_safe=true;in.now_us+=100000;out=task.update(in);
-        assert(out.motion.wz_rps==-3.f);
+        assert(out.motion.wz_rps==3.f);
 
     }
     { // CLI speed input rejects out-of-contract values and trailing garbage.
@@ -3207,7 +2854,7 @@ int main(int argc, char **argv) {
         PushOutput out;
         for(int i=0;i<400;++i){in.now_us+=100000;out=task.update(in);if(out.state==PushState::SCAN)break;}
         assert(out.state==PushState::SCAN);
-        in.now_us+=100000;out=task.update(in);assert(out.motion.wz_rps<0&&out.motion.vx_mps==0);
+        in.now_us+=100000;out=task.update(in);assert(out.motion.wz_rps>0&&out.motion.vx_mps==0);
         in.imu_spin_stall_us=1600000;
         int back=0,fwd=0;
         for(int i=0;i<40;++i){
@@ -3217,10 +2864,10 @@ int main(int argc, char **argv) {
             in.imu_spin_stall_us=0; // 动作期间 MotionWatch 的计数被清零
         }
         assert(back>=7&&back<=9&&fwd>=7&&fwd<=9);
-        in.now_us+=100000;out=task.update(in);assert(out.motion.vx_mps==0&&out.motion.wz_rps<0&&out.reason=="searching_target");
+        in.now_us+=100000;out=task.update(in);assert(out.motion.vx_mps==0&&out.motion.wz_rps>0&&out.reason=="searching_target");
         TaskTuning off=t;off.spin_unstick=false;PushTask task2(off);PushObservation i2=in;i2.now_us=0;i2.imu_spin_stall_us=0;
         for(int i=0;i<400;++i){i2.now_us+=100000;out=task2.update(i2);if(out.state==PushState::SCAN)break;}
-        i2.imu_spin_stall_us=9000000;i2.now_us+=100000;out=task2.update(i2);assert(out.motion.vx_mps==0&&out.motion.wz_rps<0);
+        i2.imu_spin_stall_us=9000000;i2.now_us+=100000;out=task2.update(i2);assert(out.motion.vx_mps==0&&out.motion.wz_rps>0);
     }
     { // MotionWatch: commanded but vibration-free for >=1.5 s is flagged; real vibration or no command is not.
         MotionWatch w;std::array<float,3> still{0,0,9.8f},zero{0,0,0};
@@ -3334,38 +2981,6 @@ int main(int argc, char **argv) {
             s.in.zone_sight_valid=true;s.in.zone_sight_enemy=true;s.in.zone_sight_bearing=std::remainder(zyaw-s.phi,2*float(CV_PI));s.tick();
             s.in.zone_sight_valid=false;s.in.zone_sight_enemy=false;
             for(int i=0;i<5;++i){s.tick();assert(s.out.reason!="carry_drive_to_remembered_zone"&&s.out.reason!="carry_drive_to_sighted_zone");}
-        }
-        { // Only the far zone corners in view: stop, tilt to the 20deg view, and carry on once the near corners show up.
-            Sim s(t);s.toCarry();s.zone_visible=false;
-            for(int i=0;i<40&&s.out.reason!="searching_own_zone";++i)s.tick();assert(s.out.reason=="searching_own_zone");
-            for(int i=0;i<10;++i){s.tick();assert(s.out.motion.camera_pitch_cdeg==s.tune.far_pitch_cdeg);}
-            s.in.zone_far_pts=true;
-            bool tilted=false;
-            for(int i=0;i<60&&!tilted;++i){s.tick();tilted=s.out.reason=="zone_far_only_tilt";}
-            assert(tilted);
-            bool looking=false;
-            for(int i=0;i<60&&!looking;++i){s.tick();assert(s.out.state==PushState::CARRY);assert(s.out.motion.camera_pitch_cdeg==2000);looking=s.out.reason=="zone_near_look";}
-            assert(looking&&s.out.motion.vx_mps==0&&s.out.motion.wz_rps==0);
-            s.in.zone_near_pts=true;s.tick();
-            assert(s.out.reason!="zone_near_look"&&s.out.motion.camera_pitch_cdeg==2000);
-            for(int i=0;i<20;++i){s.tick();assert(s.out.state==PushState::CARRY&&s.out.motion.camera_pitch_cdeg==2000&&s.out.reason!="zone_near_look");}
-        }
-        { // The near corners never show up: the look times out, the camera goes back to the far view and the search resumes.
-            Sim s(t);s.toCarry();s.zone_visible=false;
-            for(int i=0;i<40&&s.out.reason!="searching_own_zone";++i)s.tick();assert(s.out.reason=="searching_own_zone");
-            s.in.zone_far_pts=true;
-            bool looked=false,back=false;
-            for(int i=0;i<400&&!back;++i){
-                s.tick();assert(s.out.state==PushState::CARRY);
-                looked=looked||s.out.reason=="zone_near_look";
-                back=looked&&s.out.reason=="searching_own_zone"&&s.out.motion.camera_pitch_cdeg==s.tune.far_pitch_cdeg;
-            }
-            assert(looked&&back);
-            for(int i=0;i<30;++i){s.tick();assert(s.out.reason!="zone_near_look"&&s.out.reason!="zone_far_only_tilt");} // cool-down
-        }
-        { // Near corners alone (or all four) never trigger the look.
-            Sim s(t);s.toCarry();s.zone_visible=false;s.in.zone_near_pts=true;s.in.zone_far_pts=true;
-            for(int i=0;i<80;++i){s.tick();assert(s.out.reason!="zone_far_only_tilt"&&s.out.reason!="zone_near_look");}
         }
         { // Strict capture is untouched: without multi-view evidence the capture is not credited.
             Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);s.multi_evidence=false;

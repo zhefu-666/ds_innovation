@@ -76,7 +76,7 @@ rescue::PushObservation readObservation(const cv::FileNode &n) {
     if(!n["multi_view_verdict"].empty()) n["multi_view_verdict"]>>in.multi_view_verdict;
     flag("gripper_done", in.gripper_done);
     flag("zone_valid", in.zone_valid); flag("zone_own", in.zone_own); flag("enemy_zone_seen", in.enemy_zone_seen);
-    flag("zone_sight_valid",in.zone_sight_valid);flag("zone_far_pts",in.zone_far_pts);flag("zone_near_pts",in.zone_near_pts);flag("zone_sight_enemy",in.zone_sight_enemy);if(!n["zone_sight_bearing"].empty())n["zone_sight_bearing"]>>in.zone_sight_bearing;
+    flag("zone_sight_valid",in.zone_sight_valid);flag("zone_sight_enemy",in.zone_sight_enemy);if(!n["zone_sight_bearing"].empty())n["zone_sight_bearing"]>>in.zone_sight_bearing;
     flag("carry_plan_valid",in.carry_plan_valid);flag("drop_plan_valid",in.drop_plan_valid);
     if(!n["navigation_timestamp_us"].empty())in.navigation_timestamp_us=rescue::readExactTime(n["navigation_timestamp_us"]);
     const auto point=[&](const char* key,cv::Point2f& p){const auto v=n[key];if(!v.empty()) {
@@ -356,24 +356,12 @@ int main(int argc, char **argv) {
         tuning.disperse_turn_rad=1.4f+30.f*float(CV_PI)/180.f; // 2026-10-12: turn cap 1.4 rad + 30 deg (was 1.0 rad originally)
         tuning.disperse_turn_push_m=.2f; // then push straight on 0.2 m along the new heading
         tuning.disperse_turn_frame_check=true; // 2026-10-13: view ahead thin is not enough: camera drops to its lowest angle and the turn goes on until <=1 block sits in the frame zone (0.30 m ahead, +-0.14 m)
-        tuning.row_split_pile=true; // 2026-10-13: a row block touching an injured/dangerous/core piece is not skipped: PILE separates it, then SCAN re-locks
         tuning.row_select=true; // 2026-10-12: a left-right row of blocks in front -> lock the middle block (clean frame footprint) by its box-bottom ground point, not the largest box
         tuning.disperse_single_turn=true; // 2026-10-12: rush in, then ONE in-place turn (camera lifted to the 20deg stage first) toward the side with fewer blocks in view; replaces the 3 alternating swings
         tuning.sweep_view_cap_mid=true;tuning.sweep_far_judge=true;tuning.swing_avoid_outside=false;tuning.dense_no_lock=true;tuning.approach_dense_burst_swing=true;
         tuning.lock_max_visible=2;tuning.lock_multi_group_min=2;tuning.lock_multi_radius_m=.60f;tuning.dense_multi_ignore_gap=true; // 2026-10-12: lock only while <=2 targets are in view, otherwise open-frame sweep (ignores the 20 s gap; total/time budgets still apply)
         tuning.pile_clear=true; // 2026-10-12: many blocks in the frame corridor -> advance 0.5 m with the open frame, back off, turn one block's angle and cut in, keeping ordinary supplies in the frame
-        tuning.pile_cool_us=5000000; tuning.pile_trigger_max_m=1.0f; tuning.pile_confirm=3; tuning.pile_max_runs=6; tuning.pile_cut_margin_m=.03f; // 2026-10-13: wider PILE entry (shorter cool-down, farther trigger, 3 hits of the last 10 ticks, a third run); the pre-check/RUSH vetoes of a cluster (incl. dangerous) route into PILE too
         tuning.pile_cut_max_steps=3; // PILE cut keeps the enclosed set one type first: if one block-width of turn still leaves a non-ordinary block in the frame, try 2 and 3 block-widths
-        tuning.pile_cut_require_clean=true; tuning.pile_min_remaining_us=45000000; tuning.pile_cut_reserve_us=15000000; // 2026-10-13 run 054823: a stacked green-on-injured pile was cut anyway (left 2 other blocks in the frame) with 28 s left; give such piles up, and do not start PILE / a cut that cannot finish with a delivery after it
-        tuning.pile_cut_rounds=4; // PILE cut: up to 4 cut rounds per PILE run (default 2)
-        tuning.pile_cut_spin=true; // PILE cut: once the drive-in is done, spin one full revolution in place (cut's turn direction), then back out
-        tuning.pile_cut_capture=true; tuning.pile_budget_us=80000000; // PILE cut: look into the frame at 40deg after the drive-in; only ordinary supplies inside -> close and carry; every PILE back-out is pile_back_m; the drive-in budget scales with the planned travel
-        tuning.pile_cut_bias_rad=.1f; // PILE cut: every cut-in came up a little short of the angle, so aim 0.1 rad (~5.7deg, the faceYaw tolerance) further into the cut direction
-        tuning.pile_look_close_frac=1.f; // PILE cut: close and carry only after the cut-in is finished (no early close during the drive), and only with 1..2 ordinary blocks in the frame
-        tuning.carry_lane_guard=true; // 2026-10-13: bend the carry heading around loose blocks ahead of the frame instead of pushing them toward the safe zone
-        tuning.carry_lane_view=true; // 2026-10-13: zone located -> check the lane ahead at 20deg, bypass what blocks it, then 5deg back toward the zone
-        tuning.pile_cut_scan=true; // 2026-10-13: replaces the full-revolution cut spin: camera at 5deg, turn to a lane with no block, advance a short way
-        tuning.pile_precut=true; // 2026-10-13: one-shot check before every cut-in: standing aligned, judge the lane [-0.14,0.14] m with the corner points of every detection box of one fresh image (ordinary whole in, other classes whole out); re-aim one block-width once or abort with pile_precut_no_cut; the travel is re-derived from the nearest ordinary block's box-bottom row (kept if its pixel size disagrees with the projection or the box is clipped)
         tuning.pile_chain=true; // 2026-10-12: after a swung disperse sweep keep tracking the pushed-out cluster: while it is deeper than one layer, face it, rush in, big-angle turn and back off again (max 3 rounds), then PILE cuts the last layer
         tuning.occlusion_hold_us=2500000;tuning.occlusion_near_m=.8f;tuning.relock_window_us=4000000;tuning.relock_gate_frac=.10f; // frame-occluded lock: wait for the new id, re-lock the one nearest where it vanished
         // 2026-10-12: pre-sweep view 20deg, swing judged at 5deg, side cap removed (both sides full disperse_turn_rad), groups split rather than locked
@@ -441,8 +429,8 @@ int main(int argc, char **argv) {
                   << " swing_avoid_outside=" << tuning.swing_avoid_outside << " dense_no_lock=" << tuning.dense_no_lock << " approach_dense_burst_swing=" << tuning.approach_dense_burst_swing
                   << " lock_max_visible=" << tuning.lock_max_visible << " lock_multi_group_min=" << tuning.lock_multi_group_min << " lock_multi_radius_m=" << tuning.lock_multi_radius_m
                   << " dense_multi_ignore_gap=" << tuning.dense_multi_ignore_gap << " occlusion_hold_us=" << tuning.occlusion_hold_us << " relock_window_us=" << tuning.relock_window_us << " relock_gate_frac=" << tuning.relock_gate_frac
-                  << " carry_lane_guard=" << tuning.carry_lane_guard << " carry_lane_view=" << tuning.carry_lane_view << " pile_cut_scan=" << tuning.pile_cut_scan << " pile_precut=" << tuning.pile_precut << " pile_clear=" << tuning.pile_clear << " pile_corridor_min=" << tuning.pile_corridor_min << " pile_trigger_max_m=" << tuning.pile_trigger_max_m
-                  << " pile_advance_m=" << tuning.pile_advance_m << " pile_block_half_m=" << tuning.pile_block_half_m << " pile_back_m=" << tuning.pile_back_m
+                  << " pile_clear=" << tuning.pile_clear << " pile_corridor_min=" << tuning.pile_corridor_min << " pile_trigger_max_m=" << tuning.pile_trigger_max_m
+                  << " pile_advance_m=" << tuning.pile_advance_m << " pile_block_half_m=" << tuning.pile_block_half_m << " pile_view_back_m=" << tuning.pile_view_back_m
                  
                   << " rush_align_deadband_rad=" << tuning.rush_align_deadband_rad
                   << " rush_align_wz=" << tuning.rush_align_wz << " rush_near_speed=" << tuning.rush_near_speed
@@ -513,7 +501,7 @@ int main(int argc, char **argv) {
         SensorFusion fusion({config.sensor_timeout_ms, config.tof_stop_distance_m, config.imu_tilt_limit_deg});
         std::unique_ptr<UARTController> feedback;
         std::unique_ptr<GeometryPipeline> geometry;
-        CameraCalibration vref_calibration;bool vref_ready=false;uint64_t precut_diag_us=0;
+        CameraCalibration vref_calibration;bool vref_ready=false;
         ZoneGeometry zone_geometry;
         if (!config.calibration_file.empty()) {
             CameraCalibration calibration;
@@ -645,13 +633,11 @@ int main(int argc, char **argv) {
             // Close-range injured score below the target threshold: obstacle evidence only, and only with an orange blob (no mat/background ghosts).
             detections.erase(std::remove_if(detections.begin(),detections.end(),[&](const SegDetection&d){
                 return d.label=="injured_person"&&d.confidence<config.confidence&&d.silhouette_hw<0;}),detections.end());
-            SensorState frame_imu=frame_sensors.imu;
-            if(imu)frame_imu=sensorStateFromImu(imu->snapshotAt(timestamp));
             if(geometry) {
                 GeometryFrame geometry_frame;geometry_frame.frame_id=frame_sequence;
                 geometry_frame.capture_us=timestamp;geometry_frame.now_us=observed_at;geometry_frame.image_size=frame.size();
                 geometry_frame.sensors=frame_sensors;
-                geometry_frame.sensors.imu=frame_imu;
+                if(imu)geometry_frame.sensors.imu=sensorStateFromImu(imu->snapshotAt(timestamp));
                 KeypointFrame points;points.frame_id=frame_sequence;points.capture_us=timestamp;
                 points.image_size=frame.size();points.zone_label=config.team+"_safe_zone";
                 // Stage 3 supplies measured same-frame points. Missing input is invalid,
@@ -719,7 +705,7 @@ int main(int argc, char **argv) {
                 <<" raw="<<selection.raw<<" smooth="<<selection.smoothed<<" locked="<<selection.locked<<" reason="<<selection.reason
                 <<(selection.row.empty()?std::string():" ROW["+selection.row+"]")<<"\n";
             input.pixel_ratio_raw=selection.raw;input.pixel_ratio_smoothed=selection.smoothed;
-            input.pixel_mode=selection.mode;input.pixel_reason=selection.reason;input.pixel_locked=selection.locked;input.target_split=selection.row_split;
+            input.pixel_mode=selection.mode;input.pixel_reason=selection.reason;input.pixel_locked=selection.locked;
             if(selection.locked&&selection.id>=0&&vref_ready&&vref_calibration.cameraMatrix().type()==CV_64F&&vref_calibration.cameraMatrix().rows==3)
                 for(const auto&d:detections)if(d.track_id==selection.id){
                     const cv::Mat&K=vref_calibration.cameraMatrix();
@@ -733,12 +719,6 @@ int main(int argc, char **argv) {
                 }
             input.run = false; // MatchControl supplies the final authorization below.
             if(geometry)geometry->apply(input,geometry_result,expected_stop,config.team,imuNowUs());
-            if(vision_result.pose_ran)for(const auto&h:vision_result.halves){
-                if(!h.valid)continue;
-                const float th=config.pose_keypoint_confidence;
-                input.zone_far_pts|=h.confidence[0]>=th&&h.confidence[2]>=th;
-                input.zone_near_pts|=h.confidence[1]>=th&&h.confidence[3]>=th;
-            }
             input.enemy_zone_seen=vision_result.pose_ran&&zone_color.verified&&!zone_color.assumed&&zone_color.color!=config.team;
             if(vref_ready&&vision_result.pose_ran&&!zone_points.empty()&&vref_calibration.cameraMatrix().type()==CV_64F&&vref_calibration.cameraMatrix().rows==3){
                 cv::Point2f c(0,0);for(const auto&k:zone_points)c+=k.pixel;c*=1.f/float(zone_points.size());
@@ -757,47 +737,6 @@ int main(int argc, char **argv) {
                 if(d.track_id!=selection.id&&d.ground_position_valid&&d.confidence>=obstacleConfidence(d)&&
                    std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y)){input.clutter_body.push_back(d.body_xy_m);if(d.label=="ordinary_supply")input.clutter_ordinary.push_back(d.body_xy_m);}
             if(!input.clutter_body.empty())input.clutter_ts_us=observed_at;
-            for(const auto&d:detections)
-                if(d.ground_position_valid&&d.confidence>=obstacleConfidence(d)&&std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y)){input.look_body.push_back(d.body_xy_m);if(d.label=="ordinary_supply")input.look_ordinary.push_back(d.body_xy_m);}
-            input.look_ts_us=observed_at;
-            for(const auto&d:detections){
-                if(d.ground_position_valid||d.confidence<obstacleConfidence(d)||d.box.width<=0||d.box.height<=0)continue;
-                if(float(d.box.y+d.box.height)<float(frame.rows-tuning.look_edge_px))continue;
-                if(float(d.box.x+d.box.width)<=tuning.look_edge_x_lo*float(frame.cols)||float(d.box.x)>=tuning.look_edge_x_hi*float(frame.cols))continue;
-                (d.label=="ordinary_supply"?input.look_edge_ordinary:input.look_edge_other)++;
-            }
-            const bool pc_k_ok=vref_ready&&vref_calibration.cameraMatrix().type()==CV_64F&&vref_calibration.cameraMatrix().rows==3;
-            int pc_det=0,pc_gpv=0,pc_pass=0,pc_fail_l=0,pc_fail_r=0,pc_bad=0;bool pc_have_T=false;
-            if(pc_k_ok&&frame_sensors.actuator.valid){
-                const double fx=vref_calibration.cameraMatrix().at<double>(0,0);
-                const int16_t pc=frame_sensors.actuator.camera_pitch_cdeg;
-                cv::Matx34d T;const bool have_T=vref_calibration.cameraFromGround(pc,frame_imu,T);pc_have_T=have_T;
-                for(const auto&d:detections){
-                    ++pc_det;if(d.ground_position_valid)++pc_gpv;
-                    if(!d.ground_position_valid||d.confidence<obstacleConfidence(d)||!std::isfinite(d.body_xy_m.x)||!std::isfinite(d.body_xy_m.y)||d.box.width<=0)continue;
-                    ++pc_pass;
-                    const float bottom=float(d.box.y+d.box.height);
-                    cv::Point2f gl,gr;
-                    const bool ok_l=vref_calibration.pixelToGround({float(d.box.x),bottom},pc,gl,&frame_imu);
-                    const bool ok_r=vref_calibration.pixelToGround({float(d.box.x+d.box.width),bottom},pc,gr,&frame_imu);
-                    if(!ok_l)++pc_fail_l;
-                    if(!ok_r)++pc_fail_r;
-                    if(!ok_l||!ok_r)continue;
-                    PushObservation::PrecutBox pb;
-                    pb.xl=std::min(gl.x,gr.x);pb.xr=std::max(gl.x,gr.x);pb.y=.5f*(gl.y+gr.y);
-                    pb.ordinary=d.label=="ordinary_supply";pb.clipped=bottom>=float(frame.rows)-4.f||d.box.x<=2||d.box.x+d.box.width>=float(frame.cols)-2.f;
-                    if(have_T){ // a 40 mm block (mid-size between face and diagonal) subtends fx*0.048/width pixels at its depth
-                        const cv::Vec3d cp=T*cv::Vec4d(d.body_xy_m.x,d.body_xy_m.y,.02,1.);
-                        if(cp[2]>.05)pb.size_ratio=float((fx*.048/d.box.width)/cp[2]);
-                    }
-                    if(pb.y>0&&std::isfinite(pb.xl)&&std::isfinite(pb.xr))input.precut_boxes.push_back(pb);else ++pc_bad;
-                }
-            }
-            if(previous.state==PushState::PILE&&observed_at>=precut_diag_us+300000){ // 300 ms rate limit: why precut_boxes is (or is not) filled while PILE
-                precut_diag_us=observed_at;
-                std::cout<<"[PRECUT_DIAG] boxes="<<input.precut_boxes.size()<<" k_ok="<<pc_k_ok<<" actuator_valid="<<frame_sensors.actuator.valid<<" pitch_cdeg="<<frame_sensors.actuator.camera_pitch_cdeg
-                         <<" have_T="<<pc_have_T<<" det="<<pc_det<<" ground_valid="<<pc_gpv<<" conf_ok="<<pc_pass<<" px2g_fail_l="<<pc_fail_l<<" px2g_fail_r="<<pc_fail_r<<" bad_xy="<<pc_bad<<"\n";
-            }
             {
                 for(const auto&d:detections)
                     if(d.ground_position_valid&&d.confidence>=config.confidence&&std::isfinite(d.body_xy_m.x)&&std::isfinite(d.body_xy_m.y)&&
@@ -964,7 +903,7 @@ int main(int argc, char **argv) {
                     if(started)vision_match_saved=true;
                 }
             }
-            input.run=match_status.permit; input.match_remaining_us=(!config.no_match_time_limit&&match_status.state==MatchState::RUNNING)?match_status.remaining_us:UINT64_MAX;
+            input.run=match_status.permit;
             input.safety_ok=match_status.permit && preflight_reason.empty();
             navigator.update(input,previous);
             auto out = task.update(input);
@@ -981,7 +920,7 @@ int main(int argc, char **argv) {
                 static const std::set<std::string> key_states={"PREPARE","RUSH","LOWER_FRAME","VERIFY_CAPTURE","CARRY",
                     "RAISE_RELEASE","VERIFY_DELIVERY","CAPTURE_FAIL","LOST_HOLD","ABORT_DROP","SAFE_STOP"};
                 static const std::set<std::string> key_reasons={"target_id_mismatch","target_missing","lost_target_search",
-                    "sweep_upright_out","pile_cut_align","pile_precut","pile_precut_no_cut","pile_cut_scan","pile_scan_hold","pile_scan_advance","pile_scan_return","pile_verify","pile_frame_already_ok","pile_cluster_clear","pile_cut_no_gain","pile_split_done","pile_split_unresolved","pile_cut_look","pile_frame_enclosed","pile_capture"};
+                    "sweep_upright_out"};
                 const bool first_lock=!vision_first_lock_saved&&st=="APPROACH"&&out.target_id>=0;
                 bool key_reason=false;
                 if(reason_changed&&key_reasons.count(out.reason)){

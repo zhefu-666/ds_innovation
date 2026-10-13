@@ -8,6 +8,7 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr float kFixedPitchTiltLimitDeg = 2.0f;  // 无补偿：只容许地面起伏级别的倾斜
 constexpr float kPitchModelTiltLimitDeg = 8.0f;  // 有IMU补偿：小角度近似和车体高度不变假设的适用范围
+constexpr float kBlockMidHeightM = 0.02f;        // 40 mm 方块的半高：框中心像素投影到这个水平面
 
 cv::Matx33d rotX(double a) {
     const double c = std::cos(a), s = std::sin(a);
@@ -275,6 +276,10 @@ bool CameraCalibration::detectionToBody(SegDetection &detection, int16_t cdeg, c
     detection.ground_point_px = pixel;
     detection.body_xy_m = ground;
     detection.ground_position_valid = true;
+    cv::Point2f centre;
+    detection.body_center_valid = pixelToPlane(cv::Point2f(detection.box.x + detection.box.width * 0.5f, detection.box.y + detection.box.height * 0.5f),
+                                               cdeg, kBlockMidHeightM, centre, &sensor) && std::isfinite(centre.x) && std::isfinite(centre.y);
+    if (detection.body_center_valid) detection.body_center_xy_m = centre;
     return true;
 }
 
