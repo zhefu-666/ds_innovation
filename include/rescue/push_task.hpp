@@ -142,7 +142,7 @@ struct TaskTuning {
     int16_t assume_view_pitch_cdeg=2000; // 假设模式：松开/后退/推入/核验阶段保持能同时看到区域角点与货物的俯仰角
     float assume_cargo_in_y_m=.05f, assume_cargo_done_y_m=.09f, assume_cargo_x_tol_m=.10f, assume_overshoot_m=.12f, assume_stuck_move_m=.015f; // 货物近端距区前沿：判进区/推到位
     uint64_t assume_stuck_us=2000000; int assume_repush_max=2; uint64_t approach_rebind_window_us=4000000;
-    float assume_repush_back_m=.10f, assume_repush_speed_gain=.25f, assume_lateral_back_gain=3.f, assume_lateral_back_max_m=.25f, assume_goal_depth_m=.12f, assume_push_angle_max_rad=.45f, assume_push_dx_deadband_m=.03f; // 卡住重推：加长助跑/提速/按块位置斜推
+    float assume_repush_back_m=.10f, assume_repush_speed_gain=.25f, assume_lateral_back_gain=3.f, assume_lateral_back_max_m=.08f, assume_goal_depth_m=.12f, assume_push_angle_max_rad=.45f, assume_push_dx_deadband_m=.03f; // 卡住重推：加长助跑/提速/按块位置斜推
     float assume_release_gap_m=-.04f, assume_push_depth_m=.16f, assume_ratio_max=14.f, assume_lookahead_m=.35f, assume_stall_near_m=.06f, assume_stall_progress_m=.01f; uint64_t assume_stall_us=1500000; // 视觉闭环：松开时块距区前沿；推入目标深度
     // 假设模式：翻框(松开)前须确认货物真进了安全区；未确认则继续下压，直到硬上限。默认关闭。
     bool assume_enter_confirm=false; float assume_enter_true_y_m=.07f, assume_enter_hold_y_m=.03f, assume_enter_max_hold_y_m=.30f; uint64_t assume_enter_extra_us=8000000;
@@ -157,7 +157,7 @@ struct TaskTuning {
     bool rush_pulse_turn=false; float rush_pulse_wz=.55f, rush_pulse_max_rad=.20f, rush_pulse_done_frac=.85f;
     uint64_t rush_pulse_budget_us=2500000, rush_pulse_settle_us=500000; int rush_pulse_max=4;
     bool assume_probe=true; uint64_t assume_probe_first_us=1200000, assume_probe_len_us=900000, assume_probe_gap_us=1500000; // 直推时周期性小偏航探测，让IMU能看出堵转
-    uint64_t assume_verify_fix_wait_us=7000000, assume_verify_far_after_us=1500000; float assume_inside_min_hold_y_m=.06f;
+    uint64_t assume_verify_fix_wait_us=7000000, assume_verify_far_after_us=1500000; float assume_inside_min_hold_y_m=.06f, assume_blocked_deep_hold_y_m=.10f; // 视觉定不了货物(被遮/截断)时，IMU堵转且框已深入此深度→视为推到位，不重推
     // 假设模式：后退后、前推前先用视觉把方框对准货物（原地转向），推进时按货物方位纯追踪，斜推角收小；货物丢失后保持丢失前航向。默认关闭。
     bool assume_align_push=false; float assume_align_tol_rad=.06f, assume_align_wz=.30f, assume_slant_max_rad=.45f; uint64_t assume_align_budget_us=3000000;
     uint64_t attempt_budget_us=0; // enabled by schema 2, never reset by target reselection
@@ -178,7 +178,9 @@ struct TaskTuning {
     // Approach steering: below this bearing drive straight, so min_turn_wz never turns an aligned approach.
     float heading_deadband_rad = .05f;
     float scan_wz = .25f, turn_wz = .3f, max_wz = .4f, rotate_in_place_rad = .45f;
+    float inplace_turn_boost = 1.f; // multiplies in-place turn rate in approach-type states, after the max_wz clamp
     float startup_advance_speed = .1f;
+    float startup_hold_gain = 1.5f, startup_hold_deadband_rad = .035f; // IMU yaw hold while START_ADVANCE crosses bumps
     uint64_t startup_advance_us = 10000000; // 0.1 m/s for 10 s; phase bound, not measured distance
     float rush_start_m = .35f, rush_heading_rad = .06f, rush_extra_m = .15f, rush_abort_heading_rad = .35f;
     float grasp_trigger_y_m = .20f, hold_center_y_m = .12f, injured_hold_center_y_m = .14f, mouth_y_m = .21f;
@@ -255,9 +257,11 @@ private:
     int16_t multi_view_pitch_=kCameraPitchInvalid;
     int16_t pitch_cmd_ = t_.far_pitch_cdeg;
     uint64_t rebind_since_us_ = 0;
+    int approach_last_id_ = -1; float approach_last_heading_ = 0.f, approach_last_distance_ = 0.f;
     bool approach_rebind_ = false; // 分级下压后允许改绑跟踪器新ID一次
     int16_t approach_pitch_ = kCameraPitchInvalid; // APPROACH分级下压：远处保持当前角，贴近时 5°→20°→40°
     uint64_t startup_commanded_us_ = 0;
+    float startup_yaw0_ = 0; bool startup_yaw0_set_ = false;
     uint64_t zone_search_started_us_ = 0;
     float carry_best_y_ = 0; uint64_t carry_progress_us_ = 0;
     uint64_t last_us_ = 0, phase_us_ = 0, gripper_us_ = 0, carry_us_ = 0, pitch_wait_us_ = 0, hold_seen_us_ = 0;

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "measured": 1,
+  "note": "Red verified on field frames (red fraction 0.87-0.91). Blue mat is dark navy (median HSV 120/112/47 on the 2026-10-11 15:20 frame), so value_min is 30. Red/blue shares are taken among red+blue pixels only; the sampled polygon is widened expand_x and pushed expand_near toward the camera.",
+  "saturation_min": 80,
+  "value_min": 30,
+  "min_pixels": 200,
+  "min_fraction": 0.6,
+  "max_other_fraction": 0.1,
+  "min_coloured_fraction": 0.05,
+  "expand_x": 0.2,
+  "expand_near": 0.5
+}

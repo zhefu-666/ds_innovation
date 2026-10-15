@@ -4,11 +4,11 @@
 
 ## 查看
 
-- Foxglove：Open connection → Foxglove WebSocket → `ws://192.168.34.7:8765`。
+- Foxglove：Open connection → Foxglove WebSocket → `ws://192.168.175.7:8765`。
 - Image 面板：`/camera/image`，画面已经绘制检测框和类别，无需另设叠加层。
 - Raw Messages：`/detections`、`/fsm/state`、`/decision/live`、`/runtime/config`。
 - Plot：`/system/health.loop_fps`、`/system/health.inference_ms`、`/system/health.frame_age_s`。
-- 浏览器：`http://192.168.34.7:8080/`，显示图像、检测列表、状态和运行参数。
+- 浏览器：`http://192.168.175.7:8080/`，显示图像、检测列表、状态和运行参数。
 
 安全区 pose 模型的 `zone_left`（类别 0）表示物资安全区半区，`zone_right`（类别 1）表示伤员安全区半区。左右以安全区入口面向区内的坐标系为准，不等于图像中的左右；模型类别不表示红蓝归属，仍需独立颜色证据。普通/核心物资投放左半区，伤员单独投放右半区。
 
@@ -22,7 +22,7 @@
 这不是实测颜色，`zone_identity_verified` 仍为 false；`--hardware` 不采用该默认值。
 在 Foxglove 的 Raw Messages 面板选择 `/decision/live`；Plot 可选择
 `/decision/live.computed_vx_mps`、`/decision/live.target_distance_m`。
-HTTP `http://192.168.34.7:8080/status` 也包含同一帧的 `decision` 字段。
+HTTP `http://192.168.175.7:8080/status` 也包含同一帧的 `decision` 字段。
 
 `/cmd/motion` 是任务计算值，`hardware_output_enabled=0`，不是已发送命令或实际车速。IMU 和 ToF 未接入，健康状态明确为 false。`/fsm/state` 的 WAIT_START 是默认未开启任务运行请求的真实状态；不会为展示而伪造状态变化。
 

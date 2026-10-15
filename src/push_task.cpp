@@ -47,6 +47,7 @@ void PushTask::enter(PushState s, uint64_t now, const char *why) {
     // 有20°中间角时，APPROACH沿用当前相机角（远处不提前下压），由接近距离分级切换；否则保持直接用TRACK角。
     if (s == PushState::APPROACH) approach_pitch_ = midPitch() ? pitch_cmd_ : t_.track_pitch_cdeg;
     approach_rebind_ = false;
+    approach_last_id_ = -1;
     if (s != PushState::LOST_HOLD) corridor_retreat_ = false;
     if (why && *why) reason_ = why;
 }
@@ -268,7 +269,7 @@ PushOutput PushTask::update(const PushObservation &in) {
     };
     if (in.reset) {
         attempt_started_=0;bounded_approach_=bounded_retreat_=0;
-        clearTrip(); rejected_.clear(); total_ = 0; first_ = t_.assume_injured_trip; fault_ = false;clear_attempts_=0;near_failures_=0;lost_round_=0;startup_commanded_us_=0;
+        clearTrip(); rejected_.clear(); total_ = 0; first_ = t_.assume_injured_trip; fault_ = false;clear_attempts_=0;near_failures_=0;lost_round_=0;startup_commanded_us_=0;startup_yaw0_set_=false;
         odo_ = ratio_est_ = 0; vref_used_ = false; zone_.reset(); ratio_snap_ = imu_seen_ = false; vref_fix_us_ = vref_seen_us_ = 0;
         frame_raised_ = 0; gripper_us_ = now; stopped_from_ = PushState::WAIT_START;
         pitch_cmd_ = t_.far_pitch_cdeg; pitch_wait_us_ = now;
@@ -363,7 +364,11 @@ PushOutput PushTask::update(const PushObservation &in) {
     const auto drive = [&](float vx, float wz) {
         const bool turn_blocked=in.directional_clearance_valid && wz!=0 &&
             !(vx==0?in.turn_safe:(vx>0 && in.arc_safe));
-        if (turn_blocked) {reason_="turn_sweep_blocked";return;}
+        if (turn_blocked) {
+            // A blocked arc keeps going straight when the straight corridor is verified clear.
+            if (!(vx>0 && forward_ok)) {reason_="turn_sweep_blocked";return;}
+            wz=0;reason_="turn_sweep_blocked_straight";
+        }
         if ((vx > 0 && !forward_ok) || (vx < 0 && !in.retreat_safe) || (vx == 0 && wz != 0 && !scan_ok))
         {
             if (state_ != PushState::SCAN && state_ != PushState::START_ADVANCE)
@@ -375,6 +380,9 @@ PushOutput PushTask::update(const PushObservation &in) {
         // Preserve zero and direction; never let the floor exceed the configured cap.
         if(wz!=0) wz=std::copysign(std::max(std::abs(wz),std::min(t_.min_turn_wz,t_.max_wz)),wz);
         motion.wz_rps = std::clamp(wz, -t_.max_wz, t_.max_wz);
+        if (vx == 0 && wz != 0 && t_.inplace_turn_boost > 1.f &&
+            (state_ == PushState::APPROACH || state_ == PushState::MID_APPROACH || state_ == PushState::CUE_APPROACH || state_ == PushState::SELECT_CARGO))
+            motion.wz_rps *= t_.inplace_turn_boost;
     };
     // Steer to a body-frame bearing; turn in place when the error is large.
     const auto steer = [&](float speed, float heading) {
@@ -431,14 +439,22 @@ PushOutput PushTask::update(const PushObservation &in) {
     };
     switch (state_) {
     case PushState::START_ADVANCE:
-        commandFrame(0, now);
+        commandFrame(1, now); // frame stays open to cross the bumpy section
         if (startup_commanded_us_ >= t_.startup_advance_us) {
             enter(PushState::SCAN, now, "startup_advance_complete");
             break;
         }
         if(elapsed > t_.startup_advance_us+5000000) {fail("startup_forward_blocked");break;}
-        reason_=forward_ok?"startup_forward":"startup_path_blocked";
-        drive(t_.startup_advance_speed, 0);
+        {
+            float hold_wz=0;
+            if (in.heading_valid) {
+                if (!startup_yaw0_set_) {startup_yaw0_=in.heading_rad;startup_yaw0_set_=true;}
+                const float err=wrapAngle(in.heading_rad-startup_yaw0_); // body yaw grows on left turns
+                if (std::abs(err)>t_.startup_hold_deadband_rad) hold_wz=-t_.startup_hold_gain*err;
+            }
+            reason_=!forward_ok?"startup_path_blocked":hold_wz!=0?"startup_forward_hold":"startup_forward";
+            drive(t_.startup_advance_speed, hold_wz);
+        }
         break;
     case PushState::SCAN: {
         commandFrame(0, now);
@@ -708,6 +724,13 @@ PushOutput PushTask::update(const PushObservation &in) {
             }
             // 分级下压后相机转动/重新选目标期间图像无效、跟踪器要重新确认：窗口内停车等待，不算丢目标。
             if(approach_rebind_) {misses_=0;break;}
+            // 跟踪器对同一货物重新分配ID：同标签、方位与距离接近上次跟踪值的合法候选，直接改绑而不是进入丢失搜索。
+            if(approach_last_id_==target_id_ && target_id_>=0 && in.target_valid && in.target_id!=target_id_ && in.label==label_ &&
+               candidate(in,now) && std::abs(wrapAngle(in.heading_error-approach_last_heading_))<=.3f &&
+               std::abs(in.distance_m-approach_last_distance_)<=.35f) {
+                target_id_=capture_target_id_=in.target_id;misses_=0;approach_last_id_=target_id_;
+                reason_="approach_id_rebound_same_object";break;
+            }
             if(lostTarget()) {
                 if(t_.enable_lost_search){searchLost();break;}
                 if(t_.track_pitch_cdeg!=t_.far_pitch_cdeg) {
@@ -718,6 +741,7 @@ PushOutput PushTask::update(const PushObservation &in) {
             break;
         }
         misses_ = 0;
+        approach_last_id_ = target_id_; approach_last_heading_ = in.heading_error; approach_last_distance_ = in.distance_m;
         if (elapsed > t_.approach_budget_us) { blacklist(now); clearTrip(); enter(PushState::SCAN, now, "approach_timeout"); break; }
         // Tilt down to TRACK when close (hysteresis keeps it from toggling), stopped while it moves.
         if (in.distance_m <= t_.track_near_m) track_close_ = true;
@@ -1079,9 +1103,18 @@ PushOutput PushTask::update(const PushObservation &in) {
             // A box clipped by the image bottom puts the contact too deep, and an off-half block is not the delivery: neither counts as inside.
             const bool cinside = cvis && cargo_fix_ && !cargo_clipped_ && cargo_rear_y_ >= t_.assume_cargo_done_y_m
                 && std::abs(cargo_rear_x_ - halfX()) <= t_.assume_cargo_x_tol_m && hy0 >= t_.assume_inside_min_hold_y_m;
-            const bool stuck = !cinside && (in.imu_blocked_us >= t_.assume_imu_block_us || (cvis && cargo_ref_us_ && now - cargo_ref_us_ >= t_.assume_stuck_us));
             const float hy = zone_.valid(now) ? zone_.predicted(now).bodyToZone({0, holdCenter()}).y : 0.f;
+            const bool placed = cvis && cargo_fix_ && !cargo_clipped_;
+            // Vision cannot place the load (hidden / clipped by the frame) and the frame is already deep: a block there means the load reached the far end, not that it is stuck outside.
+            const bool blocked_deep = !cinside && !placed && in.imu_blocked_us >= t_.assume_imu_block_us
+                && zone_.valid(now) && hy >= t_.assume_blocked_deep_hold_y_m;
+            // In-place alignment turns leave the load static by design: not stuck, and the static timer restarts once the forward push begins.
+            const bool aligning = align_pending_;
+            if (aligning) cargo_ref_us_ = 0;
+            const bool stuck = !cinside && !blocked_deep && !aligning
+                && (in.imu_blocked_us >= t_.assume_imu_block_us || (cvis && !cargo_clipped_ && cargo_ref_us_ && now - cargo_ref_us_ >= t_.assume_stuck_us));
             if (cinside) { noteCargo("push_inside", {cargo_rear_x_, cargo_rear_y_}, true); done = true; }
+            else if (blocked_deep) { noteCargo("blocked_deep", {cargo_rear_x_, cargo_rear_y_}, cvis); done = true; }
             else if (stuck) {
                 if (repush_n_ < t_.assume_repush_max) {
                     ++repush_n_; noteCargo("stuck_repush", {cargo_rear_x_, cargo_rear_y_}, true);
@@ -1114,7 +1147,7 @@ PushOutput PushTask::update(const PushObservation &in) {
                 // Fresh block sighting overrides dead-reckoned depth: keep pushing until it is really inside.
                 done = done || hold.y >= t_.assume_push_depth_m + (cvis ? t_.assume_overshoot_m : 0.f);
                 // Do not raise the frame on a timeout / dead-reckoned depth unless the load is confirmed inside.
-                if (done && !cinside && !(stuck && !(repush_n_ < t_.assume_repush_max)) && t_.assume_enter_confirm) {
+                if (done && !cinside && !blocked_deep && !(stuck && !(repush_n_ < t_.assume_repush_max)) && t_.assume_enter_confirm) {
                     const bool real = cvis ? (!cargo_clipped_ && cargo_rear_y_ >= t_.assume_enter_true_y_m && std::abs(cargo_rear_x_ - halfX()) <= t_.assume_cargo_x_tol_m)
                                            : hold.y >= t_.assume_enter_hold_y_m;
                     if (!real && elapsed < t_.enter_budget_us + t_.assume_enter_extra_us && hold.y < t_.assume_enter_max_hold_y_m) {

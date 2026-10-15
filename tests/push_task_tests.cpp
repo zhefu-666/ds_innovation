@@ -622,6 +622,46 @@ int main(int argc, char **argv) {
         assert(ev.find("event=stuck_giveup")!=std::string::npos&&ev.find("event=stuck_repush")!=std::string::npos);
         assert(ev.find("event=push_inside")==std::string::npos);
     }
+    { // 视觉定不了货物(截断/看不到)时：IMU堵转且框已深入→视为推到位不重推；框还浅→仍重推；看得清且在区外→仍重推。
+      for(int k=0;k<4;++k){
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::ENTER,2000) && s.out.reason=="assumed_release_then_push");
+        const bool deep=k==0||k==3;   // 0:截断+深 1:截断+浅 2:看不到+浅 3:看不到+深
+        s.py_max=(deep?.13f:.04f)-s.tune.hold_center_y_m;
+        if(k<2){s.cargo_on=true;s.cargo_zone={s.px,.20f};s.cargo_clip=true;}
+        for(int i=0;i<400 && s.py<s.py_max-.005f && s.out.state==PushState::ENTER;++i)s.tick();
+        s.in.imu_blocked_us=1000000;
+        s.task.takeDropZoneEvent();
+        for(int i=0;i<60 && s.out.state==PushState::ENTER;++i)s.tick();
+        const std::string ev=s.task.takeDropZoneEvent();
+        if(k==1||k==2){assert(s.out.state==PushState::BACK_OUT && s.out.reason=="assumed_stuck_repush");}
+        else{
+            assert(s.out.reason!="assumed_stuck_repush");
+            assert(ev.find("event=stuck_repush")==std::string::npos);
+            assert(s.until(PushState::RAISE_RELEASE,300) && s.out.reason=="assumed_push_in_done");
+            assert(s.until(PushState::VERIFY_DELIVERY,2500));
+        }
+      }
+    }
+    { // 对准转向期间货物必然不动：不能被当成“卡住”触发重推（run58：对准转了2s+就重推）。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        t.assume_align_push=true;t.assume_align_tol_rad=1e-4f;t.assume_stuck_us=300000;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        assert(s.until(PushState::ENTER,2000) && s.out.reason=="assumed_release_then_push");
+        s.cargo_on=true;s.cargo_zone={s.px+.08f,.30f};
+        int aligned=0;
+        for(int i=0;i<200 && s.out.state==PushState::ENTER;++i){
+            s.tick();
+            if(s.out.reason=="assumed_push_align_turn"){++aligned;continue;}
+            if(aligned)break;
+        }
+        assert(aligned>=8 && s.out.reason!="assumed_stuck_repush");
+    }
     { // B：框被图像底边截断、或块偏离目标半区，都不能当作“已在区内”（跳过推入）。
       for(int k=0;k<2;++k){
         TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
@@ -835,6 +875,23 @@ int main(int argc, char **argv) {
             if(out.state==PushState::SCAN)break;
         }
         assert(out.state==PushState::SCAN&&forward_frames==100);
+    }
+    { // START_ADVANCE holds the IMU yaw seen at the start: a bump that turns the body right is steered back left.
+        TaskTuning t;t.startup_advance_us=10000000;PushTask task(t);PushObservation in;
+        in.run=in.safety_ok=in.path_safe=in.opponent_zone_clear=true;
+        in.camera_pitch_cdeg=500;in.camera_pitch_stable=true;in.heading_valid=true;in.heading_rad=3.1f; // near the +pi wrap
+        PushOutput out;
+        for(int i=0;i<3;++i){in.now_us+=100000;out=task.update(in);}
+        assert(out.state==PushState::START_ADVANCE&&out.motion.vx_mps>0&&out.motion.wz_rps==0&&out.reason=="startup_forward");
+        in.heading_rad=3.1f-.10f; // yaw dropped: body turned right
+        in.now_us+=100000;out=task.update(in);
+        assert(out.motion.vx_mps>0&&out.motion.wz_rps>0&&out.reason=="startup_forward_hold");
+        in.heading_rad=-3.1f+.0f; // wraps past +pi: still a small left-turn error of 0.083 rad
+        in.now_us+=100000;out=task.update(in);
+        assert(out.motion.wz_rps<0&&out.reason=="startup_forward_hold");
+        in.heading_rad=3.1f+.02f; // inside the deadband
+        in.now_us+=100000;out=task.update(in);assert(out.motion.wz_rps==0);
+        in.heading_valid=false;in.heading_rad=0;in.now_us+=100000;out=task.update(in);assert(out.motion.wz_rps==0&&out.motion.vx_mps>0);
     }
     for(const auto* label:{"ordinary_supply","injured_person","core_supply","dangerous_object"}) {
         TaskTuning t;t.enable_search_cues=true;Sim s(t);
@@ -1139,7 +1196,11 @@ int main(int argc, char **argv) {
     { // Forward permission alone cannot authorize an unsafe turn or curved approach.
         Sim s;s.in.distance_m=.8f;assert(s.until(PushState::APPROACH,30));
         s.in.directional_clearance_valid=true;s.in.turn_safe=false;s.in.arc_safe=false;
-        s.in.heading_error=.1f;s.tick();assert(stopped(s.out.motion)&&s.out.reason=="turn_sweep_blocked");
+        s.in.heading_error=.6f;s.tick();assert(stopped(s.out.motion)&&s.out.reason=="turn_sweep_blocked"); // in-place turn stays blocked
+        s.in.heading_error=.1f;s.tick(); // blocked arc with a verified straight corridor keeps going straight
+        assert(s.out.motion.vx_mps>0&&s.out.motion.wz_rps==0&&s.out.reason=="turn_sweep_blocked_straight");
+        s.in.path_safe=false;s.tick();assert(stopped(s.out.motion)); // no straight corridor: stop
+        s.in.path_safe=true;
         s.in.heading_error=0;s.tick();assert(s.out.motion.vx_mps>0);
     }
     { // Both signs escape the yaw deadband, zero and safety stops remain zero.
@@ -1564,11 +1625,16 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 5; ++i) assert(stopped(s.tick().motion));
         s.in.reset = true; s.tick(); assert(s.out.state == PushState::WAIT_START);
     }
-    { // Other detections do not authorize motion after the locked ID changes.
+    { // The tracker re-IDs the same cargo (same label, near the last bearing and range): rebind instead of searching.
         Sim s; s.in.distance_m = .8f; assert(s.until(PushState::APPROACH, 20));
         s.tick(); s.in.target_id = 8; s.tick();
+        assert(s.out.state == PushState::APPROACH && s.out.reason == "approach_id_rebound_same_object" && s.out.target_id == 8);
+    }
+    { // Other detections do not authorize motion after the locked ID changes.
+        Sim s; s.in.distance_m = .8f; assert(s.until(PushState::APPROACH, 20));
+        s.tick(); const float h0 = s.in.heading_error; s.in.target_id = 8; s.in.heading_error = h0 + .8f; s.tick();
         assert(stopped(s.out.motion) && s.out.reason == "target_id_mismatch");
-        s.in.target_id = 7; s.in.geometry_valid = false; s.tick();
+        s.in.target_id = 7; s.in.heading_error = h0; s.in.geometry_valid = false; s.tick();
         assert(stopped(s.out.motion) && s.out.reason == "target_geometry_invalid");
         s.in.geometry_valid = true; s.in.path_safe = false; s.tick();
         assert(stopped(s.out.motion) && s.out.reason == "forward_path_blocked");
