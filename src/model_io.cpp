@@ -34,9 +34,14 @@ std::vector<SegDetection> decodeModelOutput(const cv::Mat &output,const ModelIma
     if(output.type()!=CV_32F || output.dims!=3 || output.size[0]!=1 || output.size[1]!=attrs || !output.isContinuous())
         throw std::runtime_error("Expected float32 [1,4+classes,N] output with no objectness channel");
     if(!std::isfinite(config.confidence)||config.confidence<0||config.confidence>1||
+       !std::isfinite(config.injured_confidence)||config.injured_confidence<0||config.injured_confidence>1||
        !std::isfinite(config.nms)||config.nms<0||config.nms>1)
         throw std::runtime_error("Invalid detection thresholds");
     const int count=output.size[2];const float *raw=output.ptr<float>();
+    const auto classThreshold=[&](int c){
+        const auto &name=config.class_names[c];
+        return (name=="injured_person"||taskLabel(name)=="injured_person")?std::min(config.confidence,config.injured_confidence):config.confidence;
+    };
     std::vector<SegDetection> candidates,results;
     std::map<int,std::vector<int>> groups;
     for(int i=0;i<count;++i) {
@@ -44,7 +49,7 @@ std::vector<SegDetection> decodeModelOutput(const cv::Mat &output,const ModelIma
         if(!finite)continue;
         int cls=0;float score=raw[4*count+i];
         for(int c=1;c<attrs-4;++c)if(raw[(4+c)*count+i]>score){score=raw[(4+c)*count+i];cls=c;}
-        if(score<config.confidence || score>1)continue;
+        if(score<classThreshold(cls) || score>1)continue;
         float cx=raw[i],cy=raw[count+i],w=raw[2*count+i],h=raw[3*count+i];
         if(w<=0||h<=0)continue;
         // Contract: coordinates are model-input pixels, never guessed from magnitude.
@@ -61,7 +66,7 @@ std::vector<SegDetection> decodeModelOutput(const cv::Mat &output,const ModelIma
     for(const auto &group:groups) {
         std::vector<cv::Rect> boxes;std::vector<float> scores;std::vector<int> keep;
         for(int i:group.second){boxes.push_back(candidates[i].box);scores.push_back(candidates[i].confidence);}
-        cv::dnn::NMSBoxes(boxes,scores,config.confidence,config.nms,keep);
+        cv::dnn::NMSBoxes(boxes,scores,classThreshold(group.first),config.nms,keep);
         for(int i:keep)results.push_back(candidates[group.second[i]]);
     }
     std::sort(results.begin(),results.end(),[](const auto &a,const auto &b){return a.confidence>b.confidence;});

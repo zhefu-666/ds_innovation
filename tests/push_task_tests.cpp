@@ -1,3 +1,5 @@
+#include <array>
+#include <tuple>
 #include "rescue/transport_rules.hpp"
 #include "rescue/types.hpp"
 #include "rescue/zone_estimate.hpp"
@@ -34,6 +36,7 @@ Inventory inv(int ordinary, int core = 0, int injured = 0, int dangerous = 0, in
 // The previous command is integrated before every update; gripper feedback lags one frame.
 // The camera servo follows the commanded pitch at pitch_rate per frame and reads back stable
 // after three still frames; the closed frame is in view only at NEAR (like CaptureMonitor).
+static bool g_non_supply_sweep = false; // only the dedicated tests exercise the sweep of non-supply targets
 struct Sim {
     TaskTuning tune;
     PushTask task{tune};
@@ -41,13 +44,14 @@ struct Sim {
     PushOutput out;
     float px = -.15f, py = -.75f, phi = 0; // phi: robot heading vs zone +y, CCW positive
     bool zone_visible = true, zone_predicted = false, gripper_responds = true, servo_responds = true;
-    bool multi_evidence=true;
-    float py_max=1e9f; bool vref_visible=false, cargo_on=false, cargo_clip=false; float img_frac=std::nanf(""); cv::Point2f cargo_zone{-.15f,.12f};
+    bool multi_evidence=true, all_ordinary=true;
+    float py_max=1e9f; bool vref_visible=false, cargo_on=false, cargo_clip=false; float img_frac=std::nanf(""); cv::Point2f cargo_zone{-.15f,.12f}; bool cargo2_on=false; cv::Point2f cargo_zone2{-.15f,.30f};
     bool navigation_ready = true, drop_available = true, live_camera_guard = false;
     int pitch = 0, pitch_still = 0, pitch_rate = 400; // power-on: level
     Inventory load; // what is physically enclosed
+    std::vector<PushObservation::HeldObject> load_objects; // detections behind `load` (identity/confidence)
     std::set<PushState> visited;
-    static TaskTuning testTune(TaskTuning t) { t.startup_advance_us = 0; t.require_multi_view=false; return t; }
+    static TaskTuning testTune(TaskTuning t) { t.startup_advance_us = 0; t.require_multi_view=false; t.sweep_non_supply = g_non_supply_sweep; t.rush_stall_us = 0; /* sim targets do not close; stall tests re-enable it */ return t; }
     explicit Sim(TaskTuning t = {}) : tune(testTune(t)), task(tune) {
         in.run = in.safety_ok = in.target_valid = in.geometry_valid = true;
         in.target_region_valid = in.zone_identity_verified = true;
@@ -87,6 +91,7 @@ struct Sim {
         }
         in.cargo_body.clear(); in.cargo_img.clear(); in.cargo_ts_us=in.now_us;
         if(cargo_on){const float c=std::cos(-phi),sn=std::sin(-phi),dx=cargo_zone.x-px,dy=cargo_zone.y-py;const cv::Point2f cb{c*dx-sn*dy,sn*dx+c*dy};if(cb.y>0){in.cargo_body.push_back(cb);PushObservation::CargoImg ci;ci.bottom_px=400;ci.height_px=100;ci.clipped=cargo_clip;if(std::isfinite(img_frac)){ci.front_px=400+img_frac*100;ci.front_valid=true;}in.cargo_img.push_back(ci);}}
+        if(cargo2_on){const float c=std::cos(-phi),sn=std::sin(-phi),dx=cargo_zone2.x-px,dy=cargo_zone2.y-py;const cv::Point2f cb{c*dx-sn*dy,sn*dx+c*dy};if(cb.y>0){in.cargo_body.push_back(cb);PushObservation::CargoImg ci;ci.bottom_px=400;ci.height_px=100;ci.clipped=cargo_clip;if(std::isfinite(img_frac)){ci.front_px=400+img_frac*100;ci.front_valid=true;}in.cargo_img.push_back(ci);}}
         // Simulator supplies explicit validated direct-route/empty-zone evidence.
         in.carry_plan_valid=navigation_ready;in.drop_plan_valid=drop_available;in.navigation_timestamp_us=in.now_us;
         in.drop_centre_zone={task_injured?tune.injured_half_x_m:tune.supply_half_x_m,tune.deposit_y_m};
@@ -99,6 +104,7 @@ struct Sim {
         in.camera_pitch_cdeg = int16_t(pitch); in.camera_pitch_stable = pitch_still >= 3;
         in.hold_observable = in.camera_pitch_stable && std::abs(pitch - tune.near_pitch_cdeg) <= 100;
         in.held = in.hold_observable ? load : Inventory{};
+        in.held_objects = in.hold_observable ? load_objects : std::vector<PushObservation::HeldObject>{};
         in.captured = in.held_complete = in.held.total() > 0;
         in.gripper_closed_observed=gripper_responds && out.motion.gripper_offset==20;
         in.multi_view_finished=multi_evidence && out.state==PushState::VERIFY_CAPTURE && in.captured;
@@ -112,6 +118,7 @@ struct Sim {
             if(!(mapped || stationaryPitchWork(out,reason))) std::cerr<<"guard state="<<PushTask::name(out.state)<<" vx="<<out.motion.vx_mps<<" wz="<<out.motion.wz_rps<<" cmd="<<out.motion.camera_pitch_cdeg<<" actual="<<pitch<<" stable="<<in.camera_pitch_stable<<"\n";
             assert(mapped || stationaryPitchWork(out,reason));
         }
+        if(all_ordinary)in.clutter_ordinary=in.clutter_body;
         out = task.update(in);
         if(live_camera_guard) {
             inhibitUnmappedMotion(out.motion,mapped);
@@ -281,6 +288,22 @@ void captureTests() {
     auto hidden = box(7, "core_supply", {610, 310, 40, 40}, t); hidden.ground_position_valid = true; hidden.body_xy_m = {.02f, .35f};
     corridor.update(in, {a, hidden}, t);
     assert(in.corridor_complete && !in.corridor_occlusion_free && in.corridor == inv(1, 1));
+    // An overlapping box whose ground position is clearly beside the corridor is a neighbour, not occlusion.
+    auto neighbour = box(9, "core_supply", {610, 310, 40, 40}, t); neighbour.ground_position_valid = true; neighbour.body_xy_m = {.20f, .3f};
+    corridor.update(in, {a, neighbour}, t);
+    assert(in.corridor_complete && in.corridor_occlusion_free && in.corridor == inv(1));
+    // Two overlapping ordinary supplies in the corridor are a legal pair, not occlusion; a core behind one still is.
+    auto pair2 = box(10, "ordinary_supply", {615, 305, 40, 40}, t); pair2.ground_position_valid = true; pair2.body_xy_m = {.03f, .4f};
+    corridor.update(in, {a, pair2}, t);
+    assert(in.corridor_complete && in.corridor_occlusion_free && in.corridor == inv(2));
+    corridor.update(in, {a, pair2, hidden}, t);
+    assert(!in.corridor_occlusion_free);
+    // An ordinary block cut by the image bottom no longer spoils the corridor; a core cut by it does.
+    auto cut = box(11, "ordinary_supply", {600, 690, 40, 40}, t); cut.ground_position_valid = true; cut.body_xy_m = {0, .3f};
+    corridor.update(in, {cut}, t);
+    assert(in.corridor_occlusion_free && in.corridor == inv(1));
+    cut.label = "core_supply"; corridor.update(in, {cut}, t);
+    assert(!in.corridor_occlusion_free);
     auto floating = box(8, "ordinary_supply", {900, 300, 40, 40}, t);
     corridor.update(in, {a, floating}, t);
     assert(!in.corridor_complete && !in.corridor_occlusion_free);
@@ -362,6 +385,72 @@ void holdingOutsideMouthTests() {
         assert(!in.held_complete);
     }
 }
+// Field 2026-10-12 01:31: a dangerous block (across 9.5 cm) and an injured person (across -9.8 cm) sat just outside a 9 cm
+// centre-point corridor and were found only during RUSH. Values below are the logged body_xy_m of the two failures
+// (synthetic frames around logged coordinates, not a full log replay).
+void corridorFootprintTests() {
+    const auto make = [](int id, const char *label, float conf, float x, float y, uint64_t t, cv::Rect r) {
+        SegDetection d; d.track_id=id; d.label=label; d.confidence=conf; d.box=r; d.timestamp_us=t;
+        d.ground_contact_valid=d.ground_position_valid=true; d.body_xy_m={x,y}; return d;
+    };
+    const uint64_t t=2000000;
+    const auto observe = [&](CaptureConfig cfg, std::vector<SegDetection> boxes, float dist, float head, PushObservation& in) {
+        CaptureMonitor m(cfg);
+        in = {}; in.target_valid=in.geometry_valid=true; in.distance_m=dist; in.heading_error=head;
+        in.camera_pitch_cdeg=3500; in.camera_pitch_stable=true;
+        m.update(in, boxes, t);
+        return m.corridorEntries();
+    };
+    CaptureConfig field; field.corridor_half_width_m=.09f; // frame_20261008.assume.json: 0.15/2 + 0.015
+    CaptureConfig centre_only=field; centre_only.footprint_ordinary_m=centre_only.footprint_dangerous_m=centre_only.footprint_core_m=
+        centre_only.footprint_injured_m=centre_only.footprint_unknown_m=0.f;
+    const auto target1 = make(190,"ordinary_supply",.9f,-.0039f,.2659f,t,{600,400,40,40});
+    const auto danger = make(177,"dangerous_object",.85f,.0909f,.2821f,t,{700,380,40,40});
+    PushObservation in;
+    { // centre-point rule (old behaviour) misses the dangerous block, the footprint rule counts it
+        observe(centre_only,{target1,danger},.2659f,.0146f,in);
+        assert(in.corridor==inv(1));
+        assert(checkCorridor(in.corridor,in.corridor_complete,in.corridor_occlusion_free,"ordinary_supply",false)==RuleVerdict::OK);
+        const auto entries=observe(field,{target1,danger},.2659f,.0146f,in);
+        assert(in.corridor==inv(1,0,0,1));
+        assert(checkCorridor(in.corridor,in.corridor_complete,in.corridor_occlusion_free,"ordinary_supply",false)==RuleVerdict::DANGEROUS);
+        bool saw=false;
+        for(const auto&e:entries) if(e.track_id==177){ saw=true; assert(e.counted && e.footprint_only && std::string(e.reason)=="counted" && e.across_m>.09f); }
+        assert(saw);
+    }
+    { // injured person left of the target
+        const auto target2 = make(286,"ordinary_supply",.9f,-.0037f,.2647f,t,{600,400,40,40});
+        const auto injured = make(298,"injured_person",.785f,-.1019f,.2767f,t,{480,380,80,40});
+        observe(centre_only,{target2,injured},.2647f,.0132f,in); assert(in.corridor==inv(1));
+        observe(field,{target2,injured},.2647f,.0132f,in);
+        assert(in.corridor==inv(1,0,1));
+        assert(checkCorridor(in.corridor,in.corridor_complete,in.corridor_occlusion_free,"ordinary_supply",false)==RuleVerdict::INJURED_BEFORE_FIRST);
+    }
+    { // a legal pair of ordinary supplies, one only reached by its footprint, still passes
+        const auto pair2 = make(191,"ordinary_supply",.9f,.0999f,.2759f,t,{700,380,40,40});
+        observe(field,{target1,pair2},.2659f,.0146f,in);
+        assert(in.corridor==inv(2));
+        assert(checkCorridor(in.corridor,in.corridor_complete,in.corridor_occlusion_free,"ordinary_supply",true)==RuleVerdict::OK);
+    }
+    { // clearly outside, behind, stale or low-confidence neighbours are not counted (and say why)
+        const auto far_side = make(201,"dangerous_object",.9f,.20f,.28f,t,{900,380,40,40});
+        const auto behind = make(202,"dangerous_object",.9f,0.f,-.10f,t,{600,600,40,40});
+        const auto stale = make(203,"dangerous_object",.9f,.05f,.28f,t-400000,{650,380,40,40});
+        const auto noise = make(204,"dangerous_object",.05f,.05f,.28f,t,{650,380,40,40});
+        const auto entries=observe(field,{target1,far_side,behind,stale,noise},.2659f,.0146f,in);
+        assert(in.corridor==inv(1));
+        std::set<std::string> reasons;
+        for(const auto&e:entries){ assert(e.track_id!=203 && e.track_id!=204); if(e.track_id==201||e.track_id==202) reasons.insert(e.reason); }
+        assert(reasons.count("outside_lateral") && reasons.count("behind"));
+    }
+    { // a neighbour without ground position still makes the evidence incomplete
+        auto blind=make(205,"dangerous_object",.9f,.2f,.3f,t,{900,380,40,40}); blind.ground_position_valid=false;
+        const auto entries=observe(field,{target1,blind},.2659f,.0146f,in);
+        assert(!in.corridor_complete);
+        bool saw=false; for(const auto&e:entries) if(e.track_id==205){ saw=true; assert(!e.counted && std::string(e.reason)=="no_ground_position"); }
+        assert(saw);
+    }
+}
 // Release retreat when the zone is not visible at FAR (field 2026-10-05 07:52: retreat_unverified).
 void blindRetreatTests() {
     // Rush `ticks` frames from 0.3 m, then close on nothing; the zone stays out of view.
@@ -415,8 +504,648 @@ void blindRetreatTests() {
         assert(y0-s.py >= s.tune.abort_back_m-.01f);
     }
 }
+// Regressions for the 01:31 run: tiny-error weaving, moving distance bound,
+// blind continuation and sweep forward creep. Synthetic observations, no hardware.
+void precisionMotionTests() {
+    const auto tune = [] { TaskTuning t; t.field_rush=true; t.precise_rush=true;
+        t.min_turn_wz=.4f; t.rush_speed=.32f; return t; };
+    {
+        Sim s(tune()); s.in.distance_m=.30f; s.toRush();
+        const float bound=s.task.travel_limit_;
+        s.in.distance_m=.18f; s.in.heading_error=.01745f;
+        s.tick(); assert(s.out.state==PushState::RUSH && s.out.motion.vx_mps>0 && s.out.motion.vx_mps<=.16f);
+        assert(s.out.motion.wz_rps==0 && s.out.reason=="rush_straight_near");
+        for(int i=0;i<10;++i)s.tick();
+        assert(s.task.travel_limit_==bound); // a frozen distance cannot move the hard bound forward
+        s.in.heading_error=.10f; s.tick();
+        assert(s.out.reason=="rush_align_at_rest" && s.out.motion.vx_mps==0);
+        assert(s.out.motion.wz_rps>0 && s.out.motion.wz_rps<=.25f);
+        s.in.heading_error=-.10f; s.tick(); assert(s.out.motion.vx_mps==0 && s.out.motion.wz_rps<0 && s.out.motion.wz_rps>=-.25f);
+        s.in.directional_clearance_valid=true; s.in.turn_safe=false; s.tick(); assert(stopped(s.out.motion));
+    }
+    for(int mode=0;mode<4;++mode) {
+        Sim s(tune()); s.in.distance_m=.30f; s.toRush();
+        if(mode==0)s.task.travel_limit_=0; // distance bound
+        if(mode==2)s.in.target_valid=false; // lost target cannot authorize blind drive
+        if(mode==3){s.task.travel_limit_=0; s.hold(inv(1));} // positive held-region evidence still permits enclosure
+        if(mode==1){s.in.now_us+=s.tune.rush_budget_us; s.task.last_us_=s.in.now_us; s.task.phase_us_=s.in.now_us-s.tune.rush_budget_us-1;}
+        s.tick(); assert(s.out.state==PushState::RUSH && stopped(s.out.motion));
+        assert(s.out.reason== (mode==2?"rush_target_lost_reobserve":"rush_bound_reobserve"));
+        bool lowered=false;
+        for(int i=0;i<100 && s.out.state==PushState::RUSH;++i){s.tick(); assert(stopped(s.out.motion)); lowered|=s.out.state==PushState::LOWER_FRAME;}
+        if(mode==3)assert(lowered && s.out.reason=="rush_stall_in_frame_evidence");
+        else assert(!lowered && s.out.state==PushState::CAPTURE_FAIL);
+    }
+    {
+        Sim s(tune());s.in.distance_m=.30f;s.toRush();
+        s.in.distance_m=.14f;s.in.heading_error=.08f;s.tick();
+        assert(s.out.state==PushState::RUSH && s.out.motion.vx_mps==0); // close enough but not aligned: no drop
+        s.in.heading_error=0;s.tick();assert(s.out.state==PushState::LOWER_FRAME);
+    }
+    for(bool white : {true,false}) { // SCAN: a block seen for more than 3 frames at confidence >= .5 is driven at before its ground projection works
+        Sim s;s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.in.target_valid=true;s.in.geometry_valid=false;s.in.pixel_bearing_valid=true;s.in.pixel_bearing=.1f;s.in.pixel_confidence=white?.6f:.4f;
+        for(int i=0;i<3;++i){s.tick();assert(s.out.state==PushState::SCAN && s.out.motion.vx_mps==0);}
+        s.tick();
+        if(white){
+            assert(s.out.state==PushState::SCAN && s.out.reason=="visual_chase" && s.out.motion.vx_mps>0);
+            s.in.geometry_valid=true;assert(s.until(PushState::APPROACH,10)); // once projectable the normal lock takes over
+        } else {
+            assert(s.out.state==PushState::SCAN && s.out.motion.vx_mps==0 && s.out.reason=="searching_target"); // low confidence: keep spinning
+        }
+    }
+    { // SCAN: a pixel candidate stops the spin; the lock then collects the 4 frames and visual_chase starts
+        Sim s;s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.tick();assert(s.out.motion.wz_rps!=0 && s.out.reason=="searching_target"); // nothing in view: spinning
+        s.in.pixel_reason="confirming_three_frames";
+        s.tick();assert(s.out.state==PushState::SCAN && s.out.reason=="scan_sighting_hold" && stopped(s.out.motion));
+        for(int i=0;i<2;++i){s.tick();assert(s.out.reason=="scan_sighting_hold" && stopped(s.out.motion));}
+        s.in.pixel_reason="pixel_ratio_locked";s.in.target_valid=true;s.in.geometry_valid=false;s.in.pixel_bearing_valid=true;s.in.pixel_bearing=.1f;s.in.pixel_confidence=.6f;
+        for(int i=0;i<3;++i){s.tick();assert(s.out.reason=="scan_sighting_hold" && stopped(s.out.motion));}
+        s.tick();assert(s.out.reason=="visual_chase" && s.out.motion.vx_mps>0);
+    }
+    { // a candidate that never locks holds the spin for scan_hold_max_us only, then the scan resumes for the cool-down
+        Sim s;s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.in.pixel_reason="confirming_three_frames";
+        int held=0;for(int i=0;i<60;++i){s.tick();if(s.out.reason=="scan_sighting_hold")++held;else break;}
+        assert(held>=25 && held<=32 && s.out.motion.wz_rps!=0);
+        for(int i=0;i<20;++i){s.tick();assert(s.out.reason!="scan_sighting_hold" && s.out.motion.wz_rps!=0);}
+        for(int i=0;i<20;++i)s.tick();
+        s.tick();assert(s.out.reason=="scan_sighting_hold"); // cool-down over: the next sighting holds again
+    }
+    { // a candidate that disappears frees the spin after scan_hold_lost_us
+        Sim s;s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.in.pixel_reason="confirming_three_frames";s.tick();assert(s.out.reason=="scan_sighting_hold");
+        s.in.pixel_reason="no_legal_candidate";
+        int held=0;for(int i=0;i<30;++i){s.tick();if(s.out.reason=="scan_sighting_hold")++held;else break;}
+        assert(held>=6 && held<=10 && s.out.motion.wz_rps!=0);
+    }
+    for(int phase : {4,5,7}) {
+        TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.blind_scatter_passes=1;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=phase;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_chain_swung_=phase!=7;
+        s.task.sweep_start_us_=s.in.now_us;s.task.disperse_rush_m_=.5f;
+        s.in.clutter_body.clear();s.in.clutter_ts_us=0;
+        s.tick();assert(s.out.state==PushState::SCAN && stopped(s.out.motion));
+        assert(s.out.reason=="blind_scatter_observation_lost");
+        const auto spent=s.task.sweep_spent_us_;assert(spent>0);
+        s.in.target_valid=true;
+        for(int i=0;i<8;++i){s.tick();assert(stopped(s.out.motion)&&s.out.reason=="sweep_reobserve");}
+        assert(s.task.sweep_spent_us_==spent);
+        assert(s.until(PushState::APPROACH,50)); // observation pause is bounded, not a new deadlock
+    }
+    {
+        TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_swing");s.task.sweep_phase_=5;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_swings_=3;
+        s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};s.in.clutter_ts_us=s.in.now_us;
+        s.tick();assert(s.out.motion.vx_mps==0 && s.out.motion.wz_rps!=0); // pure swing, no hidden forward creep
+    }
+    // Single turn: camera to the 20deg stage first, then one in-place turn toward the side with fewer blocks in view.
+    for(int blocks_left : {1,0}) {
+        TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.disperse_single_turn=true;t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=4000;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_single_turn");s.task.sweep_phase_=5;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_phase_=1;s.task.disperse_sign_=blocks_left?1.f:-1.f;
+        const auto feed=[&]{ // blocks on the left (x<0) only when requested; right side empty
+            s.in.clutter_body.clear();
+            if(blocks_left) s.in.clutter_body={{-.2f,.5f},{-.25f,.6f},{-.15f,.45f}};
+            else s.in.clutter_body={{.2f,.5f},{.25f,.6f},{.15f,.45f},{.1f,.5f}};
+            s.in.clutter_ts_us=s.in.now_us;
+        };
+        feed();
+        const float phi0=s.phi;bool looked=false,turned=false;float dir_seen=0;
+        for(int i=0;i<400;++i){
+            feed();s.tick();
+            if(s.out.reason=="disperse_look"){assert(!turned&&stopped(s.out.motion));looked=true;}
+            if(s.out.reason=="disperse_turn"){assert(looked&&s.out.motion.vx_mps==0&&s.out.motion.camera_pitch_cdeg==s.tune.intermediate_pitch_cdeg);turned=true;dir_seen=s.out.motion.wz_rps;}
+            if(s.task.disperse_turn_phase_==0&&turned)break;
+        }
+        assert(looked&&turned&&s.task.disperse_turn_phase_==0);
+        assert(dir_seen*(blocks_left?-1.f:1.f)>0); // fewer blocks on the right: turn right; fewer on the left: turn left
+        const float done=std::abs(s.phi-phi0);
+        assert(done>=s.tune.disperse_turn_rad-s.tune.disperse_swing_tol_rad-.2f && done<=s.tune.disperse_turn_rad+.4f); // one turn, not three swings
+        assert(s.task.disperse_swing_n_==0);
+    }
+    {   // thin view: stops after the minimum turn instead of the full angle
+        TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.disperse_single_turn=true;t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=4000;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_single_turn_thin");s.task.sweep_phase_=5;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_phase_=1;s.task.disperse_sign_=1.f;
+        const float phi0=s.phi;
+        for(int i=0;i<400;++i){
+            s.in.clutter_body.clear();s.in.clutter_ts_us=s.in.now_us;s.tick();
+            if(s.task.disperse_turn_phase_==0&&s.out.reason!="disperse_look"&&std::abs(s.phi-phi0)>.1f)break;
+        }
+        assert(s.task.disperse_turn_phase_==0);
+        const float done=std::abs(s.phi-phi0);
+        assert(done>=s.tune.disperse_turn_min_rad-.1f && done<s.tune.disperse_turn_rad-.3f);
+    }
+    for(int zone_blocks : {0,3}) { // frame-zone check: thin view ahead is not enough, the low camera must also see <=1 block in the zone
+        TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.disperse_single_turn=true;t.disperse_turn_frame_check=true;t.disperse_turn_rad=1.8f;t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=4000;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_frame_zone");s.task.sweep_phase_=5;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_phase_=1;s.task.disperse_sign_=1.f;
+        const float phi0=s.phi;bool low_turn=false,low_look=false;
+        for(int i=0;i<600;++i){
+            s.in.clutter_body.clear();
+            if(s.task.disperse_turn_phase_==4&&zone_blocks) for(int k=0;k<zone_blocks;++k) s.in.clutter_body.push_back({.03f*float(k),.2f}); // only the low camera sees the zone
+            s.in.clutter_ts_us=s.in.now_us;s.tick();
+            if(s.out.reason=="disperse_frame_look"){assert(stopped(s.out.motion));low_look=true;}
+            if(s.out.reason=="disperse_turn_frame"){assert(s.out.motion.vx_mps==0&&s.out.motion.camera_pitch_cdeg==s.tune.track_pitch_cdeg);low_turn=true;}
+            if(s.task.disperse_turn_phase_==0&&low_look)break;
+        }
+        assert(s.task.disperse_turn_phase_==0&&low_look);
+        const float done=std::abs(s.phi-phi0);
+        if(zone_blocks==0){assert(!low_turn&&done<s.tune.disperse_turn_rad-.3f);} // zone clear at once: stops at the minimum turn
+        else {assert(low_turn&&done>=s.tune.disperse_turn_min_rad+s.tune.disperse_turn_frame_extra_rad-.1f&&done<s.tune.disperse_turn_min_rad+s.tune.disperse_turn_frame_extra_rad+.25f);} // zone stays crowded: only the extra allowance past the minimum turn, not the cap
+    }
+    {   // push-on after the turn: straight forward ~disperse_turn_push_m along the new heading, then the sweep ends
+        TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.disperse_single_turn=true;t.disperse_turn_push_m=.2f;t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=4000;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_single_turn_push");s.task.sweep_phase_=5;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_phase_=1;s.task.disperse_sign_=1.f;
+        bool pushed=false;float phi_push=0;
+        for(int i=0;i<600;++i){
+            s.in.clutter_body.clear();s.in.clutter_ts_us=s.in.now_us;s.tick();
+            if(s.out.reason=="disperse_turn_push"){
+                if(!pushed)phi_push=s.phi;
+                pushed=true;if(s.task.disperse_turn_phase_==3)assert(s.out.motion.vx_mps>0&&s.out.motion.wz_rps==0); // the last tick finishes the push and ends the sweep
+            }
+            if(pushed&&s.task.disperse_turn_phase_==0)break;
+        }
+        assert(pushed&&s.task.disperse_turn_phase_==0);
+        assert(std::abs(s.phi-phi_push)<.05f); // no turning while pushing
+    }
+}
+// Sweeps with the frame open: open acknowledged before the chassis moves, closed again before it moves on, cargo logic untouched.
+void sweepFrameOpenTests() {
+    for(int phase : {4,5}) { // SCATTER rush / swing
+        TaskTuning t;t.sweep_observation_guard=true;t.sweep_frame_open=true;t.disperse_swing_vx=0;t.blind_scatter_passes=1;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        assert(s.out.motion.gripper_offset==20);
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=phase;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;
+        s.task.disperse_rush_m_=.5f;s.task.disperse_swings_=2;
+        s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};
+        auto step=[&]{s.in.clutter_ts_us=s.in.now_us;s.tick();};
+        step();assert(stopped(s.out.motion)&&s.out.reason=="sweep_frame_open_wait"); // nothing moves until the open is acknowledged
+        assert(s.out.motion.gripper_offset==0);
+        s.gripper_responds=false;step();assert(stopped(s.out.motion));s.gripper_responds=true; // no ack yet: still waiting
+        step();assert(!stopped(s.out.motion)&&s.out.motion.gripper_offset==0);
+        assert(s.task.frame_raised_==0); // cargo logic still sees a closed frame
+        s.in.clutter_body.clear();s.in.clutter_ts_us=0;s.in.target_valid=false; // the sweep ends by observation loss
+        s.tick();assert(s.out.state==PushState::SCAN);
+        s.in.target_valid=true;
+        s.gripper_responds=false;s.tick();assert(stopped(s.out.motion)&&s.out.reason=="sweep_frame_close_wait"&&s.out.motion.gripper_offset==20);
+        s.gripper_responds=true;s.tick();assert(s.out.reason!="sweep_frame_close_wait");
+    }
+    { // a frame that never acknowledges the open: the sweep continues closed and stays closed afterwards
+        TaskTuning t;t.sweep_observation_guard=true;t.sweep_frame_open=true;t.disperse_swing_vx=0;t.gripper_timeout_us=500000;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=5;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swings_=2;
+        s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};
+        s.gripper_responds=false;
+        for(int i=0;i<40;++i){s.in.clutter_ts_us=s.in.now_us;s.tick();}
+        assert(s.task.sweep_open_disabled_&&s.out.motion.gripper_offset==20);
+        s.gripper_responds=true;s.in.clutter_ts_us=s.in.now_us;s.tick();
+        assert(s.out.motion.wz_rps!=0&&s.out.motion.gripper_offset==20);
+    }
+    { // flag off: the closed-frame sweep is unchanged
+        TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=5;
+        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swings_=2;
+        s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};s.in.clutter_ts_us=s.in.now_us;
+        s.tick();assert(s.out.motion.wz_rps!=0&&s.out.motion.gripper_offset==20);
+    }
+}
+// Default-open frame: open whenever nothing is held and the robot searches/approaches/sweeps; closed demands wait for the wire.
+void defaultOpenFrameTests() {
+    {
+        TaskTuning t;t.frame_open_default=true;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        assert(s.task.frame_raised_==0&&s.out.motion.gripper_offset==0); // SCAN keeps the wire open
+        s.task.enter(PushState::CLEAR_PILE,s.in.now_us,"test_closed_state"); // needs the closed wire: held until it is confirmed
+        s.gripper_responds=false;s.tick();assert(stopped(s.out.motion)&&s.out.reason=="sweep_frame_close_wait"&&s.out.motion.gripper_offset==20);
+        s.gripper_responds=true;s.tick();assert(s.out.reason!="sweep_frame_close_wait"&&s.out.motion.gripper_offset==20);
+    }
+    { // the logical close hidden by the open overlay is not a new MCU action; LOST_SEARCH may spin with the frame open
+        TaskTuning t;t.frame_open_default=true;
+        Sim s(t);s.in.target_valid=false;
+        uint64_t open_txn=0;bool seen_open=false;
+        for(int i=0;i<400&&s.out.state!=PushState::SCAN;++i){s.tick();if(s.out.motion.gripper_offset==0){open_txn=s.out.motion.frame_transaction;seen_open=true;}}
+        assert(seen_open&&s.out.state==PushState::SCAN);
+        for(int i=0;i<20;++i)s.tick();
+        assert(s.out.motion.gripper_offset==0&&s.out.motion.frame_transaction==open_txn);
+        s.task.enter(PushState::LOST_SEARCH,s.in.now_us,"test_lost");
+        for(int i=0;i<10;++i)s.tick();
+        assert(s.out.state==PushState::LOST_SEARCH&&s.out.motion.gripper_offset==0);
+    }
+    { // flag off: SCAN is closed as before
+        TaskTuning t;
+        Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+        assert(s.out.motion.gripper_offset==20);
+    }
+    { // a wider swing angle turns further (default 1.0 rad vs 1.4 rad)
+        float turned[2]={0,0};int k=0;
+        for(float rad : {1.0f,1.4f}) {
+            TaskTuning t;t.disperse_swing_vx=0;t.disperse_turn_rad=rad;t.sweep_observation_guard=true;
+            Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+            s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=5;
+            s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swings_=2;
+            s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};
+            const float phi0=s.phi;float peak=0;
+            for(int i=0;i<400&&s.task.sweep_phase_==5;++i){s.in.clutter_ts_us=s.in.now_us;s.tick();peak=std::max(peak,std::fabs(s.phi-phi0));}
+            turned[k++]=peak;
+        }
+        assert(turned[1]>turned[0]+.25f);
+    }
+}
+// Requested demo capture timing with real corridor rules still enabled.
+void demoCaptureMotionTests() {
+    const auto tune=[] { TaskTuning t; t.field_rush=true;t.demo_capture_motion=true;t.precise_rush=false;t.rush_stall_us=0;
+        t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=t.near_pitch_cdeg=4000;
+        t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;t.rush_speed=.32f;
+        t.max_wz=.8f;t.min_turn_wz=.4f;t.inplace_turn_boost=2.f;t.rush_budget_us=12000000;return t; };
+    const auto prepare=[](Sim& s) {
+        s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+        s.in.distance_m=.36f;for(int i=0;i<30;++i)s.tick();
+        assert(s.out.state==PushState::APPROACH && s.out.motion.camera_pitch_cdeg==2000);
+        s.in.distance_m=.32f;assert(s.until(PushState::PREPARE,20));
+        assert(s.out.motion.gripper_offset==0 && s.out.motion.camera_pitch_cdeg==2000);
+    };
+    {
+        Sim s(tune());prepare(s);s.toRush();assert(!s.tune.assume_all_safe);
+        s.in.distance_m=.18f;s.in.heading_error=.02f;s.tick();
+        assert(s.out.state==PushState::RUSH&&s.out.motion.vx_mps==.32f&&std::abs(s.out.motion.wz_rps)<=.25f);
+        assert(s.out.motion.camera_pitch_cdeg==2000);
+        for(int i=0;i<50;++i){s.tick();assert(s.out.state==PushState::RUSH&&s.out.motion.vx_mps==.32f);}
+        s.in.target_valid=false;s.in.corridor={};s.in.corridor_complete=false;
+        bool drove=false;for(int i=0;i<100&&s.out.state==PushState::RUSH;++i){s.tick();
+            if(s.out.state==PushState::RUSH){assert(s.out.reason=="assumed_blind_rush"&&s.out.motion.wz_rps==0);drove|=s.out.motion.vx_mps==.32f;}}
+        assert(drove&&s.out.state==PushState::LOWER_FRAME&&s.out.reason=="assumed_enclosure_target_below_view");
+        assert(s.out.motion.camera_pitch_cdeg==4000);
+    }
+    { // 0.25 rad/s does not move the chassis: pure in-place turns in demo APPROACH use the 0.4 floor and escalate to max_wz after 1 s.
+        Sim s(tune());s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+        s.in.distance_m=.30f;s.in.heading_error=.15f;
+        float first=0,last=0;bool turned=false;
+        for(int i=0;i<80;++i){s.tick();
+            if(s.out.state==PushState::APPROACH&&s.out.motion.vx_mps==0&&s.out.motion.wz_rps!=0){
+                if(!turned){first=std::abs(s.out.motion.wz_rps);turned=true;}last=std::abs(s.out.motion.wz_rps);}}
+        assert(turned&&first>=.4f-1e-4f&&last>first&&last<=.8f+1e-4f);
+    }
+    { // Recognized danger wins over the blind completion and the bound on the same tick.
+        Sim s(tune());prepare(s);s.toRush();s.in.target_valid=false;s.in.corridor=inv(1,0,0,1);s.task.travel_limit_=0;
+        s.tick();assert(s.out.state==PushState::CAPTURE_FAIL&&s.out.reason=="rush_corridor_dangerous"&&stopped(s.out.motion));
+    }
+    { // Opening earlier does not bypass PREPARE's inventory check.
+        Sim s(tune());prepare(s);s.in.corridor=inv(1,0,1);
+        assert(s.until(PushState::LOST_HOLD,80));assert(!s.visited.count(PushState::RUSH));
+    }
+    { // Time budget still bounds a continuously visible stalled target, as in demo.
+        auto t=tune();t.rush_budget_us=500000;Sim s(t);prepare(s);s.toRush();
+        assert(s.until(PushState::LOWER_FRAME,40));assert(s.out.reason=="assumed_enclosure_rush_bound");
+    }
+    { // Normal visual enclosure threshold still closes without waiting for the fallback.
+        Sim s(tune());prepare(s);s.toRush();s.in.distance_m=.14f;s.tick();
+        assert(s.out.state==PushState::LOWER_FRAME&&s.out.reason=="frame_enclosure_position");
+    }
+}
+void sweepViewTests() {
+    const auto base=[]{ TaskTuning t;t.enable_search_cues=false;t.blind_scatter_min=3;t.blind_scatter_first_turn_rad=0.f;t.blind_scatter_passes=1;
+        t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;return t; };
+    struct R{int max_pitch=0,rush_pitch=-1,swing_pitch=-1,align_pitch=-1;float max_swing=0;bool done=false,lost=false;};
+    const auto run=[&](TaskTuning t,std::vector<cv::Point2f> body_pts){
+        Sim s(t);s.in.target_valid=false;s.in.distance_m=.9f;
+        const float x0=s.px,y0=s.py;std::vector<cv::Point2f> world;
+        for(const auto&b:body_pts)world.push_back({x0+b.x,y0+b.y});
+        R r;float phi_rush=0;bool rushed=false;
+        for(int i=0;i<2400&&!r.done;++i){
+            s.in.clutter_body.clear();const float c=std::cos(s.phi),sn=std::sin(s.phi);
+            for(const auto&w:world){const float dx=w.x-s.px,dy=w.y-s.py;s.in.clutter_body.push_back({dx*c+dy*sn,-dx*sn+dy*c});}
+            s.in.clutter_ts_us=s.in.now_us;s.tick();
+            if(s.out.state==PushState::SCATTER){
+                r.max_pitch=std::max(r.max_pitch,int(s.out.motion.camera_pitch_cdeg));
+                if(s.out.reason=="blind_scatter_align")r.align_pitch=s.out.motion.camera_pitch_cdeg;
+                if(s.out.reason=="disperse_rush"){r.rush_pitch=s.out.motion.camera_pitch_cdeg;if(!rushed){rushed=true;phi_rush=s.phi;}}
+                if(s.out.reason=="disperse_swing")r.swing_pitch=s.out.motion.camera_pitch_cdeg;
+                if(rushed)r.max_swing=std::max(r.max_swing,s.phi-phi_rush);
+            }
+            if(s.out.reason=="blind_scatter_done")r.done=true;
+            if(s.out.reason=="blind_scatter_observation_lost")r.lost=true;
+        }
+        return r;
+    };
+    const std::vector<cv::Point2f> group{{.20f,.50f},{.32f,.56f},{.26f,.44f}};
+    { // 扫动前视角封顶20°；扫动动作本身（冲入/摆扫）改用5°远景判断。
+        TaskTuning off=base();
+        TaskTuning cap=base();cap.sweep_view_cap_mid=true;
+        TaskTuning far=cap;far.sweep_far_judge=true;
+        const auto a=run(off,group),b=run(cap,group),c=run(far,group);
+        assert(a.done&&b.done&&c.done);
+        assert(b.max_pitch<=2000);
+        assert(c.max_pitch<=2000&&c.align_pitch==2000);
+        assert(c.rush_pitch==500&&c.swing_pitch==500);
+        assert(!c.lost);
+    }
+    { // 摆扫方向避开框外物块：框外块在前方偏左时，向左的摆角被封顶，先摆向空闲的一侧。
+        const cv::Point2f gc{.26f,.50f};const float len=std::hypot(gc.x,gc.y);
+        const cv::Point2f u{gc.x/len,gc.y/len},xa{u.y,-u.x};
+        const float e=len-.171f+.20f;
+        const cv::Point2f blk{u.x*(e+.30f)-xa.x*.20f,u.y*(e+.30f)-xa.y*.20f};
+        auto pts=group;pts.push_back(blk);
+        TaskTuning on=base();on.sweep_view_cap_mid=true;on.sweep_far_judge=true;
+        TaskTuning plan=on;plan.swing_avoid_outside=true;
+        const auto free=run(on,pts),guarded=run(plan,pts);
+        assert(free.done&&guarded.done);
+        assert(free.max_swing>.85f);
+        assert(guarded.max_swing<.75f&&free.max_swing-guarded.max_swing>.2f);
+    }
+    { // 摆角上限只属于本次SCATTER扫动：离开SCATTER后不能残留到后面的APPROACH/MID扫动里。
+        TaskTuning t=base();Sim s(t);
+        s.task.enter(PushState::SCATTER,s.in.now_us,"test");
+        s.task.swing_plan_active_=true;s.task.swing_plan_pending_=true;s.task.swing_cap_neg_=.3f;s.task.swing_cap_pos_=.2f;
+        s.task.enter(PushState::APPROACH,s.in.now_us,"test");
+        assert(!s.task.swing_plan_active_&&!s.task.swing_plan_pending_&&s.task.swing_cap_neg_>=99.f&&s.task.swing_cap_pos_>=99.f);
+    }
+    { // 有很多目标时不锁定：锁定目标附近成团则进入拆分(SCATTER)而不是APPROACH；关闭开关则照常锁定。
+        for(int on=0;on<2;++on){
+            TaskTuning t=base();t.sweep_view_cap_mid=true;t.dense_no_lock=on;
+            Sim s(t);s.in.target_valid=true;s.in.distance_m=.45f;
+            bool split=false,approach=false;
+            for(int i=0;i<400;++i){
+                s.in.clutter_body={{.12f,.50f},{-.10f,.52f}};s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(s.out.state==PushState::SCATTER&&s.out.reason.rfind("dense_group",0)==0)split=true;
+                if(s.out.reason.rfind("dense_group",0)==0||s.out.state==PushState::SCATTER)split=split||s.out.state==PushState::SCATTER;
+                if(s.out.state==PushState::APPROACH)approach=true;
+                if(split||approach)break;
+            }
+            if(on){assert(split&&!approach);}else{assert(!split&&approach);}
+        }
+    }
+    { // 只有目标少时才锁定：视野里目标数超过lock_max_visible且成对靠近时开框清扫，不论是否成"紧团"；2个以内照常锁定；冷却期内可选择无视20 s间隔。
+        const auto run=[&](int max_visible,bool ignore_gap,bool gap_active,std::vector<cv::Point2f> others){
+            TaskTuning t=base();t.sweep_view_cap_mid=true;t.dense_no_lock=true;t.lock_max_visible=max_visible;t.dense_multi_ignore_gap=ignore_gap;
+            Sim s(t);s.in.target_valid=true;s.in.distance_m=.45f;
+            if(gap_active)s.task.sweep_gap_until_us_=s.in.now_us+20000000;
+            std::string why;bool approach=false,split=false;
+            for(int i=0;i<400;++i){
+                s.in.clutter_body=others;s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(s.out.state==PushState::SCATTER){split=true;why=s.out.reason;}
+                if(s.out.state==PushState::APPROACH)approach=true;
+                if(split||approach)break;
+            }
+            return std::make_pair(split,approach);
+        };
+        const std::vector<cv::Point2f> three{{.30f,.50f},{-.30f,.52f}},two{{.30f,.50f}};
+        auto r=run(0,false,false,three);assert(!r.first&&r.second);   // 关闭：松散三个照常锁定
+        r=run(2,false,false,three);assert(r.first&&!r.second);        // 3个可见 > 2：清扫而不锁定
+        r=run(2,false,false,two);assert(!r.first&&r.second);          // 2个可见：照常锁定
+        r=run(2,false,true,three);assert(!r.first&&r.second);        // 冷却期内且不无视间隔：回落到锁定
+        r=run(2,true,true,three);assert(r.first&&!r.second);         // 无视间隔：冷却期内仍清扫
+    }
+    { // 锁定后近处被车框遮挡丢失：原地等待新ID，不立刻进入丢失搜索；新ID出现在原位置附近则改绑；超时仍走原来的丢失流程。
+        const auto run=[&](uint64_t hold,bool newid){
+            TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.occlusion_hold_us=hold;
+            Sim s(t);s.in.distance_m=.6f;assert(s.until(PushState::APPROACH,80));
+            for(int i=0;i<10;++i)s.tick();
+            s.task.approach_rebind_=false; // isolate the occlusion hold from the pitch-change rebind window
+            s.in.target_valid=false;bool waited=false,rebound=false;int left=-1;
+            for(int i=0;i<220;++i){
+                if(newid&&i==20){s.in.target_valid=true;s.in.target_id=99;s.in.distance_m=.58f;}
+                s.tick();
+                if(s.out.reason=="target_occluded_wait")waited=true;
+                if(s.out.reason=="approach_id_rebound_same_object")rebound=true;
+                if(left<0&&s.out.state!=PushState::APPROACH)left=i;
+            }
+            return std::make_tuple(waited,rebound,left);
+        };
+        auto [w0,b0,l0]=run(0,false);assert(!w0&&l0>=0&&l0<120);
+        auto [w1,b1,l1]=run(2500000,false);assert(w1&&l1>=l0+35);
+        auto [w2,b2,l2]=run(2500000,true);assert(w2&&b2&&(l2<0||l2>l0+35));
+    }
+    { // APPROACH里的密集扫动：开关打开后摆扫角速度与首发爆发一致(first_burst_swing_wz)，关闭则为disperse_wz；摆幅两侧同为disperse_turn_rad。
+        const auto run=[&](bool burst){
+            TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;
+            t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;t.disperse_swing_vx=0;t.disperse_turn_rad=1.4f;t.first_burst_swing_wz=5.f;t.disperse_wz=3.2f;
+            t.approach_dense_burst_swing=burst;
+            Sim s(t);s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+            s.in.distance_m=.25f;float swing_wz=0,lo=0,hi=0;const float phi0=s.phi;bool swung=false;
+            for(int i=0;i<600;++i){
+                s.in.clutter_body.clear();
+                for(int k=0;k<4;++k)s.in.clutter_body.push_back({-.12f+.08f*k,.25f+((k%2)?.06f:-.06f)});
+                s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(s.out.state==PushState::APPROACH&&s.out.reason=="disperse_swing"){swung=true;swing_wz=std::max(swing_wz,std::fabs(s.out.motion.wz_rps));}
+                lo=std::min(lo,s.phi-phi0);hi=std::max(hi,s.phi-phi0);
+                if(s.out.reason=="disperse_done")break;
+            }
+            assert(swung);
+            return std::array<float,3>{swing_wz,lo,hi};
+        };
+        const auto off=run(false),on=run(true);
+        assert(on[0]>off[0]+.5f);
+        assert(std::fabs(on[1])>1.0f&&on[2]>1.0f);
+    }
+}
+void pileTests() {
+    const auto base=[]{ TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;
+        t.assume_motion_ratio=1.f;t.pile_clear=true;t.pile_block_half_m=.03f; // the block layouts below are sized for the 7.6 deg step of a .03 half-width
+        return t; };
+    struct Blk{cv::Point2f p;bool ordinary;};
+    struct R{bool entered=false,ended=false;std::string end;std::set<std::string> reasons;float advanced=0,cut_yaw=0,phi_cut=0,y_measure=0,y_end=0;};
+    bool use_centre=false;cv::Point2f centre_off{0,0}; // when set, the box-centre projections differ from the ground-contact points by this body-frame offset
+    std::function<void(Sim&)> look_hook; // overrides the frame-zone view while PILE waits in the capture look (the sim does not push blocks)
+    const auto run=[&](TaskTuning t,std::vector<Blk> world_rel,int corridor,float dist,int ticks=2400,const Blk*tgt=nullptr){
+        Sim s(t);s.all_ordinary=false;s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+        const float x0=s.px,y0=s.py;R r;PushState prev=s.out.state;
+        for(int i=0;i<ticks&&!r.ended;++i){
+            s.in.clutter_body.clear();s.in.clutter_ordinary.clear();s.in.clutter_center.clear();const float c=std::cos(s.phi),sn=std::sin(s.phi);
+            for(const auto&b:world_rel){const float dx=x0+b.p.x-s.px,dy=y0+b.p.y-s.py;const cv::Point2f q{dx*c+dy*sn,-dx*sn+dy*c};
+                s.in.clutter_body.push_back(q);s.in.clutter_center.push_back(use_centre?q+centre_off:q);if(b.ordinary)s.in.clutter_ordinary.push_back(q);}
+            s.in.clutter_ts_us=s.in.now_us;s.in.look_body=s.in.clutter_body;s.in.look_ordinary=s.in.clutter_ordinary;s.in.look_ts_us=s.in.now_us;
+            if(look_hook&&s.out.state==PushState::PILE&&s.task.pile_phase_==12)look_hook(s);
+            if(tgt&&(s.out.state==PushState::PILE||r.entered)){ // locked target kept valid inside PILE, at a fixed world spot
+                const float dx=x0+tgt->p.x-s.px,dy=y0+tgt->p.y-s.py;const cv::Point2f q{dx*c+dy*sn,-dx*sn+dy*c};
+                s.in.target_valid=true;s.in.distance_m=std::hypot(q.x,q.y);s.in.heading_error=std::atan2(-q.x,q.y);s.in.label="ordinary_supply";}
+            else if(s.out.state==PushState::PILE||r.entered){s.in.target_valid=false;}
+            else{s.in.target_valid=true;s.in.distance_m=dist;s.in.corridor=inv(corridor);}
+            s.tick();
+            if(s.out.state==PushState::PILE){
+                r.entered=true;r.reasons.insert(s.out.reason);
+                if(s.out.reason=="pile_advance")r.advanced=s.py-y0;
+                if(s.out.reason=="pile_measure"&&r.y_measure==0)r.y_measure=s.py;
+                if(s.out.reason=="pile_cut_align"||s.out.reason=="pile_cut_drive"){r.cut_yaw=s.task.pile_cut_yaw_;r.phi_cut=s.phi;}
+            }
+            if(prev==PushState::PILE&&s.out.state!=PushState::PILE&&s.out.state!=PushState::LOWER_FRAME){r.ended=true;r.end=s.out.reason;r.y_end=s.py;}
+            if(s.out.state==PushState::CARRY||s.out.state==PushState::VERIFY_CAPTURE){r.ended=true;r.end=std::string(s.out.state==PushState::CARRY?"CARRY:":"VERIFY:")+s.out.reason;r.reasons.insert(r.end);}
+            prev=s.out.state;
+        }
+        return r;
+    };
+    { // 切入前推之后相机降到最低：框内只有1个普通物块 -> 直接 CARRY（跳过 VERIFY_CAPTURE）；否则退回。
+        const std::vector<Blk> cap_world{{{-.12f,.75f},false},{{-.05f,.75f},true},{{.05f,.75f},true},{{.10f,.75f},true}};
+        auto t=base();t.pile_cut_capture=true;t.near_pitch_cdeg=4000;t.track_pitch_cdeg=3000;
+        const auto zone=[&](std::vector<cv::Point2f> pts,int n_ord,int edge_ord=0,int edge_other=0){
+            look_hook=[=](Sim&s){s.in.look_body=pts;s.in.look_ordinary.assign(pts.begin(),pts.begin()+n_ord);s.in.look_edge_ordinary=edge_ord;s.in.look_edge_other=edge_other;s.in.look_ts_us=s.in.now_us;}; };
+        zone({{0.f,.2f}},1);
+        auto r=run(t,cap_world,3,.5f);
+        assert(r.end=="CARRY:pile_capture");assert(r.reasons.count("pile_capture_look"));
+        zone({{-.05f,.2f},{.05f,.2f}},2);r=run(t,cap_world,3,.5f);assert(r.end=="pile_split_done"); // 2 ordinary: no longer enough to carry directly
+        zone({{-.05f,.2f},{.05f,.2f},{0.f,.25f}},3);r=run(t,cap_world,3,.5f);assert(r.end=="pile_split_done"); // 3 blocks
+        zone({{-.05f,.2f},{.05f,.2f}},1);r=run(t,cap_world,3,.5f);assert(r.end=="pile_split_done"); // one is not ordinary
+        zone({{-.05f,.2f}},1,0,1);r=run(t,cap_world,3,.5f);assert(r.end=="pile_split_done"); // hidden non-ordinary at the bottom edge
+        zone({},0,1,0);r=run(t,cap_world,3,.5f);assert(r.end=="CARRY:pile_capture"); // the single ordinary block sits at the bottom edge
+        zone({{-.05f,.2f},{.05f,.2f}},2,1,0);r=run(t,cap_world,3,.5f);assert(r.end=="pile_split_done"); // 2 + 1 at the edge
+        zone({},0);r=run(t,cap_world,3,.5f);assert(r.end=="pile_split_done"); // nothing seen
+        look_hook=nullptr;
+        auto off=base();r=run(off,cap_world,3,.5f);assert(r.end=="pile_split_done"&&!r.reasons.count("pile_capture_look")); // feature off
+    }
+    // 3个普通物资在框内(超过2个会被走廊规则拒绝) + 1个非普通物资在左侧框内。
+    const std::vector<Blk> pile_left_bad{{{-.12f,.75f},false},{{-.05f,.75f},true},{{.05f,.75f},true},{{.10f,.75f},true}};
+    std::vector<Blk> pile_right_bad;for(const auto&b:pile_left_bad)pile_right_bad.push_back({{-b.p.x,b.p.y},b.ordinary});
+    { // 框口走廊>=3：开着框直进0.5 m -> 后退看 -> 量块角度 -> 向非普通物资一侧的反方向...的最优侧转一个物块视角 -> 切入 -> 后退 -> 回搜索。
+        const auto r=run(base(),pile_left_bad,3,.5f);
+        assert(r.entered&&r.ended);
+        for(const char*k:{"pile_advance","pile_view_back","pile_measure","pile_cut_align","pile_cut_drive","pile_cut_back"})
+            if(!r.reasons.count(k)){std::cerr<<"missing pile reason "<<k<<"\n";assert(false);}
+        assert(r.end=="pile_split_done");
+        assert(r.advanced>.47f&&r.advanced<.55f);
+        assert(std::abs(r.y_end-r.y_measure)<.08f); // 切入后只退回观察位，不再多退一段
+        // 把左边那个非普通物资筛掉、普通物资全留在框里：向右转一个物块视角(约7.6度)，镜像场景向左。
+        const float turn=r.cut_yaw-0.f;
+        assert(turn<-.09f&&turn>-.2f);
+        const auto m=run(base(),pile_right_bad,3,.5f);
+        assert(m.end=="pile_split_done"&&m.cut_yaw>.09f&&m.cut_yaw<.2f);
+    }
+    { // 非普通物资藏在框中间，转一个物块视角还夹着它：默认放弃切；pile_cut_max_steps=3 时多转几个物块视角，先把框里清成同一类型再切。
+        const std::vector<Blk> deep_bad{{{0.f,.75f},false},{{.08f,.75f},true},{{.16f,.75f},true},{{.24f,.75f},true}};
+        const auto narrow=run(base(),deep_bad,3,.5f); // 一步转向把框里的普通物资从2个减到1个(非普通仍在框内)：目标是只圈1个，所以算有增益，只转一个物块视角
+        assert(narrow.entered&&narrow.ended&&narrow.end=="pile_split_done"&&narrow.reasons.count("pile_cut_drive"));
+        assert(std::abs(narrow.cut_yaw)<.15f);
+        TaskTuning wide=base();wide.pile_cut_max_steps=3;
+        const auto w=run(wide,deep_bad,3,.5f);
+        assert(w.entered&&w.ended&&w.end=="pile_split_done"&&w.reasons.count("pile_cut_drive"));
+        assert(w.cut_yaw<-.18f); // 向右转了不止一个物块视角(单步约7.6度=.13 rad)
+    }
+    { // 被锁定的普通物资紧贴(4 cm)一个非普通物资：不能把它当成重复物资丢掉，否则簇里只剩非普通物资，误判无增益。
+        const std::vector<Blk> touch{{{-.065f,.75f},false},{{.067f,.75f},false}};
+        const Blk target{{-.107f,.75f},true};
+        TaskTuning wide=base();wide.pile_cut_max_steps=3;
+        const auto r=run(wide,touch,3,.5f,2400,&target);
+        assert(r.entered&&r.ended&&r.end=="pile_split_done"&&r.cut_yaw>.18f);
+    }
+    { // 块半宽余量：非普通物资中心在框条带外1 cm(.15 > .14)，但它的边已经进了条带：余量0时误判为框已干净，余量2 cm时要切。
+        const std::vector<Blk> edge{{{-.05f,.75f},true},{{.15f,.75f},false}};
+        TaskTuning no_margin=base();no_margin.pile_cut_margin_m=0.f;
+        const auto a=run(no_margin,edge,3,.5f);
+        assert(a.entered&&a.ended&&a.end=="pile_frame_already_ok");
+        const auto b=run(base(),edge,3,.5f);
+        assert(b.entered&&b.ended&&b.end=="pile_split_done"&&b.reasons.count("pile_cut_drive")&&b.cut_yaw>.09f); // 向左转，把它甩出条带
+    }
+    { // PILE 用框中心而不是接地点：同样的接地点，中心整体右移 5 cm 后非普通物资(.12 -> .17)落到条带(.14+.02)外，框已干净。
+        const std::vector<Blk> shifted{{{-.05f,.75f},true},{{.12f,.75f},false}};
+        const auto a=run(base(),shifted,3,.5f);
+        assert(a.entered&&a.ended&&a.end=="pile_split_done");
+        use_centre=true;centre_off={.05f,0.f};
+        const auto b=run(base(),shifted,3,.5f);
+        use_centre=false;
+        assert(b.entered&&b.ended&&b.end=="pile_frame_already_ok");
+    }
+    { // 块半宽 2 cm 是默认值：一个物块视角约 5 度，比 3 cm(约 7.6 度)转得少，同一布局仍切得开。
+        assert(TaskTuning().pile_block_half_m==.02f);
+        const std::vector<Blk> lay{{{-.14f,.75f},false},{{0.f,.75f},true},{{.08f,.75f},true}};
+        const auto wide=run(base(),lay,3,.5f);
+        TaskTuning real=base();real.pile_block_half_m=.02f;
+        const auto narrow=run(real,lay,3,.5f);
+        assert(wide.end=="pile_split_done"&&narrow.end=="pile_split_done");
+        assert(narrow.cut_yaw<-.06f&&narrow.cut_yaw>wide.cut_yaw+.02f);
+    }
+    { // 默认关闭；走廊<3；目标超出触发距离：都不进入。
+        TaskTuning off=base();off.pile_clear=false;
+        assert(!run(off,pile_left_bad,3,.5f,600).entered);
+        assert(!run(base(),pile_left_bad,2,.5f,600).entered);
+        assert(!run(base(),pile_left_bad,3,.9f,600).entered);
+    }
+    { // 直进之后框里只剩1个普通物资：不再多此一举地切，直接回搜索去锁定。
+        const std::vector<Blk> ok{{{-.30f,.75f},true},{{-.05f,.75f},true},{{.30f,.75f},true}};
+        const auto r=run(base(),ok,3,.5f);
+        assert(r.entered&&r.ended&&r.end=="pile_frame_already_ok");
+        assert(!r.reasons.count("pile_cut_drive"));
+        const std::vector<Blk> two{{{-.30f,.75f},true},{{-.05f,.75f},true},{{.10f,.75f},true}};
+        assert(run(base(),two,3,.5f).end!="pile_frame_already_ok"); // 框里2个普通物资已经不算干净，要切到只剩1个
+    }
+    { // 转一个物块视角也分不开(块都挤在框中间)：不切，也不乱动。
+        const std::vector<Blk> tight{{{-.03f,.75f},true},{{0.f,.75f},true},{{.03f,.75f},true},{{.01f,.78f},true}};
+        const auto r=run(base(),tight,3,.5f);
+        assert(r.entered&&r.ended&&r.end=="pile_cut_no_gain");
+    }
+    { // PILE chain: pushed-out cluster deeper than one layer -> face, rush in, big-angle turn, back off, re-measure (capped), then the cut; one layer -> straight to the cut.
+        const auto chain=[&](std::vector<cv::Point2f> rel,bool on,int max_rounds,float fov=0.f){
+            TaskTuning t=base();t.pile_chain=on;t.pile_chain_max=max_rounds;t.disperse_single_turn=true;t.disperse_turn_push_m=.2f;
+            Sim s(t);s.all_ordinary=false;s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+            const float x0=s.px,y0=s.py,phi0=s.phi;
+            s.task.enter(PushState::PILE,s.in.now_us,"test_pile_chain");
+            s.task.pile_yaw0_=s.phi;s.task.pile_phase_=7;s.task.pile_seen_=0;s.task.pile_push0_=-1.f;s.task.pile_chain_n_=0;s.task.pile_phase_us_=s.in.now_us;
+            std::set<std::string> reasons;std::string end;int rounds=0;bool left=false;
+            for(int i=0;i<6000&&!left;++i){
+                s.in.clutter_body.clear();s.in.clutter_ordinary.clear();const float c=std::cos(s.phi),sn=std::sin(s.phi);
+                for(const auto&b:rel){const float dx=x0+(b.x*std::cos(phi0)-b.y*std::sin(phi0))-s.px,dy=y0+(b.x*std::sin(phi0)+b.y*std::cos(phi0))-s.py;
+                    const cv::Point2f q{dx*c+dy*sn,-dx*sn+dy*c};if(fov>0.f&&std::fabs(std::atan2(-q.x,q.y))>fov)continue;s.in.clutter_body.push_back(q);s.in.clutter_ordinary.push_back(q);}
+                s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(s.out.state==PushState::PILE)reasons.insert(s.out.reason);else{left=true;end=s.out.reason;}
+                rounds=s.task.pile_chain_n_;
+            }
+            assert(left);
+            return std::make_tuple(reasons,end,rounds);
+        };
+        const std::vector<cv::Point2f> deep{{0.f,.50f},{.04f,.62f},{-.04f,.74f},{0.f,.86f}};
+        const std::vector<cv::Point2f> flat{{-.10f,.60f},{0.f,.60f},{.10f,.60f}};
+        {   const auto [rs,end,n]=chain(deep,true,2);
+            for(const char*k:{"pile_chain_face","disperse_rush","disperse_turn","pile_chain_back"})
+                if(!rs.count(k)){std::cerr<<"missing chain reason "<<k<<"\n";assert(false);}
+            assert(n==2); // blocks never move in the Sim, so the loop runs to its cap
+        }
+        {   const auto [rs,end,n]=chain(flat,true,3);
+            assert(!rs.count("pile_chain_face")&&!rs.count("disperse_rush")&&n==0); // one layer: no more sweeping
+        }
+        {   // the turn takes the cluster out of a narrow view: the car must look back (mid-turn, then pre-turn heading) instead of giving up.
+            const auto [rs,end,n]=chain(deep,true,1,.5f);
+            assert(rs.count("pile_chain_look")&&end!="pile_chain_cluster_clear");
+        }
+        {   const auto [rs,end,n]=chain(deep,true,0);
+            assert(!rs.count("pile_chain_face")&&n==0); // cap 0: measure and cut right away
+        }
+    }
+    { // A swung disperse sweep that ends in APPROACH hands over to PILE (phase 7) only when pile_chain is on.
+        for(bool on : {true,false}){
+            TaskTuning t=base();t.pile_chain=on;t.disperse_single_turn=true;t.disperse_turn_push_m=.2f;
+            Sim s(t);s.all_ordinary=false;s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+            s.task.sweepChainBegin(s.in.now_us);s.task.sweep_chain_swung_=true;s.task.sweep_phase_=5;s.task.disperse_turn_phase_=3;
+            s.task.sweep_start_us_=s.in.now_us;s.task.sweep_travel0_=s.task.travel_-1.f;
+            for(int i=0;i<60&&s.out.state==PushState::APPROACH;++i)s.tick();
+            assert((s.out.state==PushState::PILE)==on);
+            if(on)assert(s.task.pile_phase_==7);
+        }
+    }
+}
 int main(int argc, char **argv) {
     if (argc == 3 && std::string(argv[1]) == "--write-fixture") { writeFixture(argv[2]); return 0; }
+    sweepViewTests();
+    pileTests();
+    precisionMotionTests();
+    demoCaptureMotionTests();
+    sweepFrameOpenTests();
+    defaultOpenFrameTests();
     { // assume_injured_trip starts as if the first ordinary supply was delivered; the default is unchanged.
         for(int on=0;on<2;++on) {
             TaskTuning t;t.assume_injured_trip=on;PushTask task(t);PushObservation in;
@@ -553,6 +1282,27 @@ int main(int argc, char **argv) {
         s.cargo_zone={s.tune.supply_half_x_m,-.02f};
         assert(s.until(PushState::ENTER,200) && s.out.reason=="assumed_verify_repush");
         assert(s.task.takeDropZoneEvent().find("event=verify_outside_repush")!=std::string::npos);
+    }
+    { // 块近端刚越过前沿约2cm（日志实测1.4~3cm）→ 算进区，不再重推。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        s.cargo_on=true;s.cargo_zone={s.tune.supply_half_x_m,.12f};
+        assert(s.until(PushState::VERIFY_DELIVERY,2500));
+        s.cargo_zone={s.tune.supply_half_x_m,.02f};
+        assert(s.until(PushState::TURN_SCAN,200) && s.out.reason=="delivered_visual");
+    }
+    { // 最近的块在区外，但区内另有块 → 不重推，直接记送达。
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;t.assume_motion_ratio=1.f;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;s.vref_visible=true;
+        s.toRush();s.in.target_valid=false;
+        s.cargo_on=true;s.cargo_zone={s.tune.supply_half_x_m,.12f};
+        assert(s.until(PushState::VERIFY_DELIVERY,2500));
+        s.cargo_zone={s.tune.supply_half_x_m,-.02f};s.cargo2_on=true;
+        assert(s.until(PushState::TURN_SCAN,200) && s.out.reason=="delivered_visual");
+        assert(s.task.takeDropZoneEvent().find("event=verify_other_inside")!=std::string::npos);
     }
     { // 后退后前推前的视觉对准：货物偏在侧前方时先原地转向对准，再按方位追踪，框到达时货物须在框正前方。
       for(int align=0;align<2;++align){
@@ -739,6 +1489,23 @@ int main(int argc, char **argv) {
         assert(ev.find(inj?"target_x=0.150":"target_x=-0.150")!=std::string::npos);
       }
     }
+    { // 盲冲IMU偏航保持 + 落框前偏航门：盲冲中被推偏后先原地对正再落框；卡住不转则放弃本次（不拉黑）。
+      for(int stuck=0;stuck<2;++stuck){
+        TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;
+        Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
+        s.zone_visible=false;s.multi_evidence=false;s.in.distance_m=.30f;
+        s.toRush();s.in.target_valid=false;
+        s.phi+=.25f; // 盲区里被推偏约14°；stuck=0时盲冲中的IMU保持自行纠回，stuck=1时底盘不转（phi被钉住）
+        bool realign=false;const float phi0=s.phi;
+        for(int i=0;i<200&&s.out.state!=PushState::LOWER_FRAME&&s.out.state!=PushState::CAPTURE_FAIL;++i){
+            if(stuck){s.tick();s.phi=phi0;} else s.tick();
+            if(s.out.reason=="prelower_realign")realign=true;
+            if(s.out.reason=="assumed_blind_rush"&&s.out.motion.wz_rps!=0)assert(s.out.motion.wz_rps<0); // 偏左 -> 向右修正
+        }
+        if(stuck){assert(realign&&s.out.state==PushState::CAPTURE_FAIL&&s.out.reason=="prelower_heading_drift");}
+        if(!stuck) assert(s.out.state==PushState::LOWER_FRAME&&std::abs(s.phi-(phi0-.25f))<t.rush_lower_yaw_tol_rad+.02f);
+      }
+    }
     { // TEMP_ASSUMPTION assume_all_safe: no zone, no multi-view evidence, target lost below the view.
       TaskTuning t;t.assume_all_safe=true;t.demo_carry_once=true;
       Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);
@@ -832,7 +1599,7 @@ int main(int argc, char **argv) {
         Sim s(t);s.live_camera_guard=true;s.pitch=500;s.pitch_still=3;s.out.motion.camera_pitch_cdeg=500;
         s.zone_visible=false;s.in.target_valid=false;
         bool scanned=false;
-        for(int i=0;i<30;++i){s.tick();assert(s.out.motion.vx_mps==0);scanned|=s.out.motion.wz_rps>0;}
+        for(int i=0;i<30;++i){s.tick();assert(s.out.motion.vx_mps==0);scanned|=s.out.motion.wz_rps<0;}
         assert(scanned&&s.out.state==PushState::SCAN);
         s.in.target_valid=true;s.in.distance_m=.8f;
         bool approached=false;
@@ -849,7 +1616,7 @@ int main(int argc, char **argv) {
         bool searched=false;
         for(int i=0;i<550;++i) {
             s.tick();assert(s.out.state==PushState::CARRY&&s.out.motion.vx_mps==0&&s.out.motion.gripper_offset==20);
-            searched|=s.out.motion.wz_rps>0&&s.out.reason=="searching_own_zone";
+            searched|=s.out.motion.wz_rps<0&&s.out.reason=="searching_own_zone";
         }
         assert(searched); // >25s with no zone no longer aborts the requested first-trip search
         s.zone_visible=true;
@@ -999,6 +1766,328 @@ int main(int argc, char **argv) {
         for(int i=0;i<40&&s.out.state==PushState::PREPARE;++i)s.tick();
         assert(s.out.state!=PushState::SCAN&&s.out.capture_target_id==s.in.target_id);
     }
+    { // 密集成堆：冲入后高速摆扫分散，之后清掉黑名单并继续接近；稀疏则不触发；冷却期内不重复触发。
+        TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
+        struct D{bool rush=false,swing=false,done=false,prepared=false;float max_phi=0,max_wz=0;};
+        const auto run=[&](int n_clutter,bool disperse){
+            TaskTuning tt=t;tt.disperse=disperse;
+            Sim s(tt);s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+            s.in.distance_m=.25f;D d;
+            for(int i=0;i<400&&!d.prepared;++i){
+                s.in.clutter_body.clear();
+                for(int k=0;k<n_clutter;++k)s.in.clutter_body.push_back({-.12f+.08f*k,.25f+((k%2)?.06f:-.06f)});
+                s.in.clutter_ts_us=s.in.now_us;
+                s.tick();
+                d.max_phi=std::max(d.max_phi,std::abs(s.phi));d.max_wz=std::max(d.max_wz,std::abs(s.out.motion.wz_rps));
+                if(s.out.reason=="disperse_rush")d.rush=true;
+                if(s.out.reason=="disperse_swing")d.swing=true;
+                if(s.out.reason=="disperse_done")d.done=true;
+                if(s.out.state==PushState::PREPARE)d.prepared=true;
+                if(d.done&&s.out.state==PushState::APPROACH)s.in.distance_m=.19f;
+                if(s.out.state!=PushState::APPROACH&&s.out.state!=PushState::PREPARE&&s.out.state!=PushState::SCAN)break;
+            }
+            return d;
+        };
+        auto dense=run(4,true);
+        assert(dense.rush&&dense.swing&&dense.max_wz>=1.5f&&dense.max_phi>=.5f);
+        auto sparse=run(1,true);assert(!sparse.rush&&!sparse.swing);
+        auto off=run(4,false);assert(!off.rush&&!off.swing);
+
+        { // 打散后目标丢失：先在20°视角搜索（近处货物），关闭开关则仍从5°开始。
+          const auto after=[&](bool mid){
+              TaskTuning tm=t;tm.enable_lost_search=true;tm.post_clear_mid_view=mid;
+              Sim s(tm);s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+              s.in.distance_m=.25f;bool done=false;
+              for(int i=0;i<400&&!done;++i){
+                  s.in.clutter_body.clear();
+                  for(int k=0;k<4;++k)s.in.clutter_body.push_back({-.12f+.08f*k,.25f+((k%2)?.06f:-.06f)});
+                  s.in.clutter_ts_us=s.in.now_us;s.tick();
+                  if(s.out.reason=="disperse_done")done=true;
+              }
+              assert(done);
+              s.in.clutter_body.clear();s.in.target_valid=false;
+              for(int i=0;i<60&&s.out.state!=PushState::LOST_SEARCH;++i)s.tick();
+              assert(s.out.state==PushState::LOST_SEARCH);
+              return int(s.out.motion.camera_pitch_cdeg);
+          };
+          assert(after(true)==2000);assert(after(false)==500);
+        }
+    }
+    { // 看不到普通物资但前方有成团的其他物体：转向它、冲入并摆扫（两趟），然后回到搜索；单个也触发；太远/太偏/过期/开关关闭/已有目标都不触发。
+        TaskTuning t;t.enable_search_cues=false;t.blind_scatter_min=1;t.blind_scatter_first_turn_rad=0.f;t.blind_scatter_passes=2; // this block exercises the two-pass mechanics; the default is one pass
+        struct B{bool align=false,swing=false,done=false,budget=false,back=false;int starts=0,rushes=0,scans_after=0,pitch_after=-1;float min_phi=0,max_phi=0;};
+        const auto run=[&](std::vector<cv::Point2f> body_pts,bool on,bool fresh,bool ordinary,int max_n,int ticks,bool follow=false){
+            TaskTuning tt=t;tt.blind_scatter=on;tt.blind_scatter_max=max_n;
+            Sim s(tt);s.in.target_valid=ordinary;s.in.distance_m=.9f;
+            const float x0=s.px,y0=s.py;
+            std::vector<cv::Point2f> world;
+            for(const auto&b:body_pts)world.push_back({x0+b.x,y0+b.y});
+            B b;std::string prev;
+            for(int i=0;i<ticks;++i){
+                s.in.clutter_body.clear();
+                const float c=std::cos(s.phi),sn=std::sin(s.phi);
+                if(follow)s.in.clutter_body=body_pts;
+                else for(const auto&w:world){const float dx=w.x-s.px,dy=w.y-s.py;s.in.clutter_body.push_back({dx*c+dy*sn,-dx*sn+dy*c});}
+                if(fresh)s.in.clutter_ts_us=s.in.now_us;
+                s.tick();
+                b.min_phi=std::min(b.min_phi,s.phi);b.max_phi=std::max(b.max_phi,s.phi);
+                if(s.out.state==PushState::SCATTER){
+                    if(s.out.reason=="blind_scatter_align")b.align=true;
+                    if(s.out.reason=="disperse_swing")b.swing=true;
+                    if(s.out.reason=="disperse_rush"&&prev!="disperse_rush")++b.rushes;
+                    if(s.out.reason=="blind_scatter_back")b.back=true;
+                }
+                if(s.out.reason=="blind_scatter_start")++b.starts;
+                if(s.out.reason=="blind_scatter_done")b.done=true;
+                if(s.out.reason=="blind_scatter_timeout"||s.out.reason=="blind_scatter_align_timeout")b.budget=true;
+                prev=s.out.reason;
+                if(b.done&&s.out.state==PushState::SCAN&&++b.scans_after==1)b.pitch_after=s.out.motion.camera_pitch_cdeg;
+            }
+            return b;
+        };
+        const std::vector<cv::Point2f> group{{.20f,.50f},{.32f,.56f},{.26f,.44f}};
+        auto one=run(group,true,true,false,1,2400);
+        assert(one.starts==1&&one.align&&one.swing&&one.done&&!one.budget);
+        assert(std::max(-one.min_phi,one.max_phi)>=.35f);
+        assert(one.rushes>=2);
+        assert(one.scans_after>0);
+        assert(one.pitch_after==500); // 默认无20°档时保持5°
+        { TaskTuning tp=t;tp.track_pitch_cdeg=4000;tp.intermediate_pitch_cdeg=2000;
+          const auto pa=[&](bool mid){ TaskTuning tm=tp;tm.post_clear_mid_view=mid;tm.blind_scatter_max=1;
+              Sim s(tm);s.in.target_valid=false;s.in.distance_m=.9f;const float x0=s.px,y0=s.py;int pitch=-1;bool done=false;
+              const std::vector<cv::Point2f> world{{x0+.20f,y0+.50f},{x0+.32f,y0+.56f},{x0+.26f,y0+.44f}};
+              for(int i=0;i<2400&&pitch<0;++i){
+                  s.in.clutter_body.clear();const float c=std::cos(s.phi),sn=std::sin(s.phi);
+                  for(const auto&w:world){const float dx=w.x-s.px,dy=w.y-s.py;s.in.clutter_body.push_back({dx*c+dy*sn,-dx*sn+dy*c});}
+                  s.in.clutter_ts_us=s.in.now_us;s.tick();
+                  if(s.out.reason=="blind_scatter_done")done=true;
+                  if(done&&s.out.state==PushState::SCAN)pitch=s.out.motion.camera_pitch_cdeg;
+              }
+              return pitch; };
+          assert(pa(true)==2000);assert(pa(false)==500); }
+        auto again=run(group,true,true,false,3,6000,true);assert(again.starts>=2&&again.starts<=3);
+        auto lone=run({{.20f,.50f}},true,true,false,1,2400);assert(lone.starts==1&&lone.align&&lone.swing&&lone.done&&!lone.budget&&lone.rushes>=2);
+        auto wideL=run({{-.70f,1.05f}},true,true,false,1,2400);assert(wideL.starts==1&&wideL.done&&!wideL.budget&&std::max(-wideL.min_phi,wideL.max_phi)>=.35f);
+        auto far=run({{.0f,2.2f},{.1f,2.25f}},true,true,false,3,600);assert(far.starts==0);
+        auto side=run({{1.1f,.8f}},true,true,false,3,600,true);assert(side.starts==0);
+        auto stale=run(group,true,false,false,3,600);assert(stale.starts==0);
+        auto off=run(group,false,true,false,3,600);assert(off.starts==0);
+        auto have=run(group,true,true,true,3,200);assert(have.starts==0);
+        assert(one.back); // backs out after the swings
+        for(const float frac:{1.f,.35f}){ // 退出距离=前向行程*blind_scatter_back_frac：1.0回到起点附近；默认只退一部分，不把推开的物块甩远。
+          TaskTuning tb=t;tb.blind_scatter_back_budget_us=30000000;tb.blind_scatter_back_frac=frac;Sim s(tb);s.in.target_valid=false;s.in.distance_m=.9f;const float x0=s.px,y0=s.py;float sx=0,sy=0,max_d=0;bool back=false,started=false;
+          std::vector<cv::Point2f> world{{x0+.0f,y0+.60f},{x0+.06f,y0+.64f},{x0-.05f,y0+.56f}};
+          for(int i=0;i<2400;++i){
+              s.in.clutter_body.clear();const float c=std::cos(s.phi),sn=std::sin(s.phi);
+              for(const auto&w:world){const float dx=w.x-s.px,dy=w.y-s.py;s.in.clutter_body.push_back({dx*c+dy*sn,-dx*sn+dy*c});}
+              s.in.clutter_ts_us=s.in.now_us;s.tick();
+              if(s.out.reason=="blind_scatter_start"){started=true;sx=s.px;sy=s.py;}
+              if(started)max_d=std::max(max_d,std::hypot(s.px-sx,s.py-sy));
+              if(s.out.reason=="blind_scatter_back")back=true;
+              if(started&&s.out.reason=="blind_scatter_done")break;
+          }
+          assert(started&&back&&max_d>.3f);
+          const float left=std::hypot(s.px-sx,s.py-sy);
+          if(frac>=1.f)assert(left<.4f*max_d); else assert(left>.45f*max_d); }
+        { // 默认参数：单个/两个非目标物体不打散；成团(>=3)在转够一圈前也不打散；偏出±40°的团不打散。
+          TaskTuning td;td.enable_search_cues=false;
+          const auto starts=[&](std::vector<cv::Point2f> pts,float first_turn,int ticks){
+              TaskTuning tt=td;tt.blind_scatter_first_turn_rad=first_turn;Sim s(tt);s.in.target_valid=false;s.in.distance_m=.9f;int n=0;
+              for(int i=0;i<ticks;++i){s.in.clutter_body=pts;s.in.clutter_ts_us=s.in.now_us;s.tick();if(s.out.reason=="blind_scatter_start")++n;}
+              return n; };
+          assert(starts({{.20f,.50f}},0.f,300)==0);
+          assert(starts({{.20f,.50f},{.26f,.44f}},0.f,300)==0);
+          assert(starts(group,0.f,300)==1);
+          assert(starts(group,1000.f,300)==0);
+          assert(starts({{.95f*.8f,.40f},{.78f,.46f},{.74f,.36f}},0.f,300)==0);
+          const auto startsMix=[&](int n_ord){
+              Sim s(td);s.all_ordinary=false;s.in.target_valid=false;s.in.distance_m=.9f;int n=0;
+              for(int i=0;i<300;++i){s.in.clutter_body=group;s.in.clutter_ordinary.assign(group.begin(),group.begin()+n_ord);s.in.clutter_ts_us=s.in.now_us;s.tick();if(s.out.reason=="blind_scatter_start")++n;}
+              return n; };
+          assert(startsMix(0)==0); // injured / dangerous only: no sweep
+          assert(startsMix(1)==1); } // one ordinary inside the cluster is enough
+    }
+    { // 普通物资只有很少像素（远/小）：不追，较短时间后直接冲入打散；像素足够大则正常锁定；太远不触发；对准途中看到像素足够的才中止。
+        TaskTuning t;t.enable_search_cues=false;
+        const auto mk=[&](float ratio,float dist,Sim &s){s.in.target_valid=true;s.in.distance_m=dist;s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=ratio;};
+        const auto first=[&](Sim &s,const char *why,int ticks){for(int i=0;i<ticks;++i){s.tick();if(s.out.reason==why)return i;}return -1;};
+        { Sim s(t);mk(.002f,.9f,s);assert(first(s,"blind_scatter_start",400)>=0);
+          assert(first(s,"blind_scatter_done",3000)>=0); }
+        { Sim s(t);mk(.006f,.9f,s);assert(first(s,"blind_scatter_start",300)<0&&s.out.state==PushState::APPROACH); }
+        { Sim s(t);mk(.002f,1.8f,s);assert(first(s,"blind_scatter_start",300)<0); }
+        { TaskTuning tw=t;tw.weak_target_scatter=false;Sim s(tw);mk(.002f,.9f,s);assert(first(s,"blind_scatter_start",300)<0); }
+        { Sim s(t);mk(.002f,.9f,s);s.in.heading_error=.6f;assert(first(s,"blind_scatter_start",400)>=0);
+          s.tick();assert(s.out.state==PushState::SCATTER&&s.out.reason=="blind_scatter_align");
+          mk(.006f,.9f,s);assert(first(s,"blind_scatter_target_seen",200)>=0); }
+    }
+    { // 很远(>0.8 m)的锁定不可信：不论群还是单个锁定都直接前驱(不被远处的锁定打断)；<=0.8 m恢复原决策。
+        TaskTuning t;t.enable_search_cues=false;t.blind_scatter_max_y_m=.5f;t.blind_scatter_far_max_y_m=4.f;t.blind_scatter_half_x_m=2.5f;t.blind_scatter_first_turn_rad=0.f;t.sweep_confirm_wait_us=0; // legacy: the cluster decision is not held back by a confirming lock
+        struct R{bool group=false,far_start=false,approach=false,seen=false,chase=false;};
+        const auto run=[&](bool locked,float dist,std::vector<cv::Point2f> pts,int ticks){
+            Sim s(t);s.in.target_valid=locked;s.in.distance_m=dist;s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=.006f;R r;
+            for(int i=0;i<ticks;++i){s.in.clutter_body=pts;s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(s.out.reason=="blind_scatter_far_group")r.group=true;
+                if(s.out.reason=="blind_scatter_far_start")r.far_start=true;
+                if(s.out.reason=="blind_scatter_approach")r.approach=true;
+                if(s.out.reason=="blind_scatter_target_seen")r.seen=true;
+                if(s.out.state==PushState::APPROACH)r.chase=true;}
+            return r; };
+        const std::vector<cv::Point2f> grp{{.20f,2.30f},{-.25f,2.60f}};
+        { const R r=run(true,2.5f,grp,400);assert(r.group&&r.approach&&!r.seen); }
+        { const R r=run(true,2.5f,{},400);assert(r.group&&r.approach&&!r.seen); }
+        { const R r=run(true,.7f,{{.20f,.60f},{-.25f,.80f}},400);assert(!r.group&&!r.approach); }
+        { const R r=run(false,2.5f,{{0.f,2.5f},{.20f,2.30f},{-.25f,2.60f}},600);assert(r.far_start&&r.approach); }
+        { const R r=run(false,2.5f,{{0.f,2.5f},{1.5f,2.30f},{-1.2f,2.60f}},600);assert(!r.far_start&&!r.group); }
+    }
+    { // 单个远处锁定(世界固定，杂物视图过期)：直接前驱，锁定进入0.5 m窗口后交给正常APPROACH，不扫。
+        TaskTuning t;t.enable_search_cues=false;t.blind_scatter_max_y_m=.5f;t.blind_scatter_far_max_y_m=4.f;t.blind_scatter_half_x_m=2.5f;t.blind_scatter_first_turn_rad=0.f;t.sweep_confirm_wait_us=0;
+        Sim s(t);s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=.006f;
+        const float x0=s.px,y0=s.py;const cv::Point2f w{x0+.05f,y0+1.90f};
+        bool far=false,chase=false,near_group=false;
+        for(int i=0;i<3000&&!chase;++i){
+            const float c=std::cos(s.phi),sn=std::sin(s.phi);const float dx=w.x-s.px,dy=w.y-s.py;
+            const cv::Point2f lk{dx*c+dy*sn,-dx*sn+dy*c};s.in.clutter_body.clear();
+            s.in.target_valid=lk.y>.1f;s.in.distance_m=std::hypot(lk.x,lk.y);s.in.heading_error=std::atan2(-lk.x,lk.y);s.tick();
+            if(s.out.reason=="blind_scatter_far_group")far=true;
+            if(s.out.reason=="blind_scatter_near_group")near_group=true;
+            if(s.out.state==PushState::APPROACH)chase=true;
+        }
+        assert(far&&chase&&!near_group);
+    }
+    { // 前驱途中群里的普通物资锁定不打断：群进入0.5 m窗口后直接扫(near_group)，不回单目标追踪。
+        TaskTuning t;t.enable_search_cues=false;t.blind_scatter_max_y_m=.5f;t.blind_scatter_far_max_y_m=4.f;t.blind_scatter_half_x_m=2.5f;t.blind_scatter_first_turn_rad=0.f;t.sweep_confirm_wait_us=0;
+        Sim s(t);s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=.006f;
+        const float x0=s.px,y0=s.py;
+        const std::vector<cv::Point2f> world{{x0+.0f,y0+1.90f},{x0+.08f,y0+1.98f},{x0-.07f,y0+1.84f}};
+        bool far=false,near_group=false,seen=false,chase=false,done=false;
+        for(int i=0;i<3000&&!done;++i){
+            const float c=std::cos(s.phi),sn=std::sin(s.phi);s.in.clutter_body.clear();
+            for(const auto&w:world){const float dx=w.x-s.px,dy=w.y-s.py;s.in.clutter_body.push_back({dx*c+dy*sn,-dx*sn+dy*c});}
+            const cv::Point2f lk=s.in.clutter_body[0];s.in.target_valid=lk.y>.1f;s.in.distance_m=std::hypot(lk.x,lk.y);s.in.heading_error=std::atan2(-lk.x,lk.y);
+            s.in.clutter_ts_us=s.in.now_us;s.tick();
+            if(s.out.reason=="blind_scatter_far_group"||s.out.reason=="blind_scatter_far_start")far=true;
+            if(s.out.reason=="blind_scatter_near_group")near_group=true;
+            if(!near_group){if(s.out.reason=="blind_scatter_target_seen")seen=true;if(s.out.state==PushState::APPROACH)chase=true;}
+            if(near_group&&s.out.reason=="blind_scatter_done")done=true;
+        }
+        assert(far&&near_group&&!seen&&!chase&&done);
+    }
+    { // 开局首次远距离接近(整场一次)：首个远群前驱用高速、剩余0.35 m降回常态；随后首次近距打散用高转速摆框；之后的远驱/打散都是常态；总开关关闭则全程常态。
+        TaskTuning t;t.enable_search_cues=false;t.blind_scatter_max_y_m=.5f;t.blind_scatter_far_max_y_m=4.f;t.blind_scatter_half_x_m=2.5f;t.blind_scatter_first_turn_rad=0.f;
+        t.first_burst=true;t.first_burst_speed=1.f;t.first_burst_swing_wz=5.f;t.assume_motion_ratio=1.f;t.sweep_gap_us=0;t.sweep_escalate_max=0;t.blind_scatter_cooldown_us=0;
+        struct B{bool fast=false,slow=false,burst_swing=false,plain_swing=false,done=false,impact=false;float fast_vx=0,slow_vx=0,burst_wz=0,plain_wz=0,impact_min=10.f,impact_max=0.f;};
+        const auto runGroup=[&](Sim &s){
+            const float x0=s.px,y0=s.py;
+            const std::vector<cv::Point2f> world{{x0+.0f,y0+1.90f},{x0+.08f,y0+1.98f},{x0-.07f,y0+1.84f}};
+            B b;bool scattered=false;
+            for(int i=0;i<3000&&!b.done;++i){
+                const float c=std::cos(s.phi),sn=std::sin(s.phi);s.in.clutter_body.clear();
+                for(const auto&w:world){const float dx=w.x-s.px,dy=w.y-s.py;s.in.clutter_body.push_back({dx*c+dy*sn,-dx*sn+dy*c});}
+                const cv::Point2f lk=s.in.clutter_body[0];s.in.target_valid=lk.y>.1f;s.in.distance_m=std::hypot(lk.x,lk.y);s.in.heading_error=std::atan2(-lk.x,lk.y);
+                s.in.clutter_ts_us=s.in.now_us;s.tick();
+                const std::string &r=s.out.reason;
+                if(r=="first_burst_approach"){b.fast=true;b.fast_vx=std::max(b.fast_vx,s.out.motion.vx_mps);}
+                if(r=="first_burst_impact" && s.out.motion.vx_mps>0){b.impact=true;b.impact_min=std::min(b.impact_min,s.out.motion.vx_mps);b.impact_max=std::max(b.impact_max,s.out.motion.vx_mps);}
+                if(r=="blind_scatter_approach"){b.slow=true;b.slow_vx=std::max(b.slow_vx,s.out.motion.vx_mps);}
+                if(r=="first_burst_swing"){b.burst_swing=true;b.burst_wz=std::max(b.burst_wz,std::abs(s.out.motion.wz_rps));}
+                if(r=="disperse_swing"){b.plain_swing=true;b.plain_wz=std::max(b.plain_wz,std::abs(s.out.motion.wz_rps));}
+                if(s.out.state==PushState::SCATTER)scattered=true;
+                if(scattered&&r=="blind_scatter_done")b.done=true; // SCAN keeps the previous end reason until it overwrites it
+            }
+            return b; };
+        const auto newSim=[&](TaskTuning tt){Sim s(tt);s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=.006f;return s;};
+        { Sim s=newSim(t);
+          const B a=runGroup(s);
+          assert(a.done&&a.fast&&a.fast_vx==1.f&&a.slow&&a.slow_vx>0&&a.slow_vx<=.4f+1e-4f); // 先高速，后段降回常态
+          assert(a.burst_swing&&a.burst_wz==5.f&&!a.plain_swing); // 首次打散整段高转速
+          const B b=runGroup(s); // 第二个群：整场只一次
+          assert(b.done&&!b.fast&&!b.burst_swing&&b.plain_swing&&b.plain_wz==t.disperse_wz&&b.slow_vx<=.4f+1e-4f); }
+        { // Requested opening: keep full speed through near impact, only once; normal sweeps do not inherit it.
+          TaskTuning full=t;full.first_burst_full_impact=true;full.sweep_observation_guard=true;
+          Sim s=newSim(full);const B a=runGroup(s);
+          assert(a.done&&a.fast&&!a.slow&&a.impact&&a.impact_min==1.f&&a.impact_max==1.f&&a.burst_swing);
+          const B b=runGroup(s);assert(b.done&&!b.fast&&!b.impact&&!b.burst_swing&&b.plain_swing); }
+        { // Speed override must not undo a forward-clearance veto.
+          TaskTuning full=t;full.first_burst_full_impact=true;Sim s=newSim(full);
+          s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
+          s.task.enter(PushState::SCATTER,s.in.now_us,"test_impact");s.task.sweep_phase_=4;s.task.burst_swing_=true;
+          s.task.disperse_rush_m_=.5f;s.task.sweep_start_us_=s.in.now_us;s.in.path_safe=false;
+          s.tick();assert(stopped(s.out.motion)); }
+        { TaskTuning off=t;off.first_burst=false;Sim s=newSim(off);
+          const B a=runGroup(s);assert(a.done&&!a.fast&&!a.burst_swing&&a.plain_swing&&a.plain_wz==off.disperse_wz); }
+        { // 驱动距离不足first_burst_min_drive_m：不算首次远驱，不消耗；打散也用常态。
+          TaskTuning tm=t;tm.first_burst_min_drive_m=9.f;Sim s=newSim(tm);
+          const B a=runGroup(s);assert(a.done&&!a.fast&&!a.burst_swing&&a.plain_swing); }
+        { // 远处少像素锁定反复靠近(approach_max次)：只有第一次靠近是高速。
+          const auto mk=[&](float ratio,float dist,Sim &s){s.in.target_valid=true;s.in.distance_m=dist;s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=ratio;};
+          Sim s(t);mk(.002f,1.1f,s);int fast_stints=0,slow_stints=0;std::string prev;float max_slow=0;
+          for(int i=0;i<4000;++i){s.tick();const std::string &r=s.out.reason;
+              if(r=="first_burst_approach"&&prev!=r)++fast_stints;
+              if(r=="blind_scatter_approach"){max_slow=std::max(max_slow,s.out.motion.vx_mps);if(prev!=r&&fast_stints>=1)++slow_stints;}
+              prev=r;}
+          assert(fast_stints==1&&max_slow<=.4f+1e-4f); }
+        { // 普通锁定先出现(没有远群前驱)：不触发高速接近；之后的首个近距打散也是常态转速。
+          Sim s=newSim(t);s.in.target_valid=true;s.in.distance_m=.7f;bool burst=false;
+          for(int i=0;i<200;++i){s.tick();if(s.out.reason=="first_burst_approach"||s.out.reason=="first_burst_swing")burst=true;}
+          assert(!burst); }
+    }
+    { // 扫除台账：扫完后20 s间隔内不再扫；每扫完一次所需密度+1(上限+2)；每趟总次数有上限。
+        TaskTuning t;t.enable_search_cues=false;t.blind_scatter_first_turn_rad=0.f;t.blind_scatter_max=10;
+        const auto sweeps=[&](std::vector<cv::Point2f> pts,TaskTuning tt,int ticks,std::vector<int> *at=nullptr){
+            Sim s(tt);s.in.target_valid=false;s.in.distance_m=.9f;int n=0;
+            for(int i=0;i<ticks;++i){s.in.clutter_body=pts;s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(s.out.reason=="blind_scatter_start"){++n;if(at)at->push_back(i);}}
+            return n; };
+        const std::vector<cv::Point2f> g3{{.05f,.30f},{-.10f,.38f},{.12f,.42f}};
+        const std::vector<cv::Point2f> g5{{.05f,.30f},{-.10f,.38f},{.12f,.42f},{.00f,.35f},{.08f,.36f}};
+        { TaskTuning off=t;off.sweep_gap_us=0;off.sweep_escalate_max=0;off.sweep_total_max=100;off.sweep_time_budget_us=1ull<<60;
+          assert(sweeps(g3,off,6000)>=2); } // 无台账：同一堆被反复扫
+        assert(sweeps(g3,t,6000)==1); // 有台账：第二次要求4个，3个的堆不再扫
+        { std::vector<int> at;const int n=sweeps(g5,t,6000,&at);assert(n>=2);assert((at[1]-at[0])*100>=20000+0); } // 间隔>=20 s(含扫动本身)
+        { TaskTuning one=t;one.sweep_total_max=1;one.sweep_escalate_max=0;assert(sweeps(g5,one,6000)==1); }
+    }
+    { // 追踪丢失时群还在视野里：直接扫(lost_group_sweep)，不进LOST_SEARCH原地转圈；没有群则照常进LOST_SEARCH，转圈中看到群也立刻扫。
+        TaskTuning t;t.enable_search_cues=false;t.enable_lost_search=true;t.blind_scatter_max_y_m=.5f;t.blind_scatter_first_turn_rad=0.f;
+        const std::vector<cv::Point2f> grp{{.05f,.30f},{-.10f,.38f},{.12f,.42f}};
+        const auto toApproach=[&](Sim &s){s.in.target_valid=true;s.in.distance_m=.7f;s.in.clutter_body.clear();
+            for(int i=0;i<300;++i){s.tick();if(s.out.state==PushState::APPROACH)return true;}return false;};
+        { Sim s(t);assert(toApproach(s));s.in.target_valid=false;bool sweep=false,lost=false;
+          for(int i=0;i<80;++i){s.in.clutter_body=grp;s.in.clutter_ts_us=s.in.now_us;s.tick();
+              if(s.out.reason=="lost_group_sweep")sweep=true;if(s.out.state==PushState::LOST_SEARCH)lost=true;}
+          assert(sweep&&!lost); }
+        { Sim s(t);assert(toApproach(s));s.in.target_valid=false;bool lost=false;
+          for(int i=0;i<80;++i){s.in.clutter_body.clear();s.tick();if(s.out.state==PushState::LOST_SEARCH)lost=true;}
+          assert(lost);
+          bool sweep=false;
+          for(int i=0;i<40;++i){s.in.clutter_body=grp;s.in.clutter_ts_us=s.in.now_us;s.tick();if(s.out.reason=="lost_group_sweep")sweep=true;}
+          assert(sweep&&s.out.state==PushState::SCATTER); }
+    }
+    { // 远处(0.5~1.4 m)的少像素普通物资：先低速靠近，再从近距离触发冲入打散；不超过常态速度；靠近次数有上限。
+        TaskTuning t;t.enable_search_cues=false;t.blind_scatter_max_y_m=.5f;t.max_speed=.4f;t.approach_speed=.4f;
+        const auto mk=[&](float ratio,float dist,Sim &s){s.in.target_valid=true;s.in.distance_m=dist;s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=ratio;};
+        { Sim s(t);mk(.002f,1.1f,s);bool far_start=false,approach=false,approached=false,start=false;float max_vx=0;
+          for(int i=0;i<3000&&!approached;++i){s.tick();
+              if(s.out.reason=="blind_scatter_far_start")far_start=true;
+              if(s.out.reason=="blind_scatter_approach"){approach=true;max_vx=std::max(max_vx,s.out.motion.vx_mps);}
+              if(s.out.reason=="blind_scatter_start")start=true;
+              if(s.out.reason=="blind_scatter_approached")approached=true;}
+          assert(far_start&&approach&&approached&&!start&&max_vx>0&&max_vx<=.4f+1e-4f&&s.out.state==PushState::SCAN);
+          mk(.002f,.45f,s);
+          for(int i=0;i<400&&!start;++i){s.tick();if(s.out.reason=="blind_scatter_start")start=true;}
+          assert(start); }
+        { TaskTuning tn=t;tn.blind_scatter_approach_max=0;Sim s(tn);mk(.002f,1.1f,s);
+          for(int i=0;i<600;++i){s.tick();assert(s.out.reason!="blind_scatter_far_start"&&s.out.reason!="blind_scatter_approach");} }
+    }
+    { // 只有启动段允许超过常态max_speed；进入SCAN后恢复常态上限。
+        TaskTuning t;t.startup_advance_us=3000000;t.startup_advance_speed=1.f;t.max_speed=.4f;
+        PushTask task(t);PushObservation in;
+        in.run=in.safety_ok=in.path_safe=in.opponent_zone_clear=true;
+        in.camera_pitch_cdeg=500;in.camera_pitch_stable=true;
+        bool fast=false;
+        for(int i=0;i<200;++i){in.now_us+=100000;const auto out=task.update(in);
+            if(out.state==PushState::START_ADVANCE&&out.motion.vx_mps>0){assert(out.motion.vx_mps==1.f);fast=true;}
+            else assert(std::abs(out.motion.vx_mps)<=.4f+1e-4f);}
+        assert(fast); }
     { // 扫掠通道内有竖放伤员：低框原地转向扫开（IMU量角），转回后再进入PREPARE；不在通道内/过期/就是目标本身则不动。
         TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
         struct R{int outs=0,backs=0,turn_signs=0;bool prepared=false,left_approach_early=false;float first_wz=0,max_phi=0;};
@@ -1019,7 +2108,7 @@ int main(int argc, char **argv) {
             return r;
         };
         auto right=run(.10f,.19f,true,false,200);
-        assert(right.outs>0&&right.backs>0&&right.first_wz<0&&right.max_phi>=.55f&&right.max_phi<=.8f&&right.prepared&&!right.left_approach_early);
+        assert(right.outs>0&&right.backs>0&&right.first_wz<0&&right.max_phi>=.8f&&right.max_phi<=1.1f&&right.prepared&&!right.left_approach_early);
         assert(right.turn_signs<120); // returned to the original heading before PREPARE
         auto left=run(-.10f,.19f,true,false,200);
         assert(left.outs>0&&left.first_wz>0&&left.prepared);
@@ -1056,6 +2145,24 @@ int main(int argc, char **argv) {
         assert(s.until(PushState::APPROACH,80));
         s.in.distance_m=.33f;assert(s.until(PushState::PREPARE,120));
         for(int i=0;i<30&&s.out.state==PushState::PREPARE;++i){s.tick();assert(s.out.motion.camera_pitch_cdeg==2000);}
+    }
+    { // 真实模式：目标在0.33m（>intermediate_to_near）时不进PREPARE，先在20°下贴近，进入范围后才PREPARE。
+        TaskTuning t;t.enable_search_cues=false;t.track_pitch_cdeg=4000;t.near_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
+        Sim s(t);s.in.distance_m=.5f;
+        assert(s.until(PushState::APPROACH,80));
+        s.in.distance_m=.33f;
+        for(int i=0;i<40;++i){s.tick();assert(s.out.state==PushState::APPROACH);}
+        assert(s.out.reason=="approach_to_prepare_range"&&s.out.motion.vx_mps>0&&s.out.motion.camera_pitch_cdeg==2000);
+        s.in.distance_m=.25f;assert(s.until(PushState::PREPARE,120));
+    }
+    { // 距离卡在0.29 m（>0.27、<=0.32）不再前进：3 s后视为到位进PREPARE，不拖到approach_timeout。
+        TaskTuning t;t.enable_search_cues=false;t.track_pitch_cdeg=4000;t.near_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
+        Sim s(t);s.in.distance_m=.5f;
+        assert(s.until(PushState::APPROACH,80));
+        s.in.distance_m=.29f;
+        bool stalled=false;
+        for(int i=0;i<400&&!stalled;++i){s.tick();stalled=s.out.reason=="approach_range_stalled";}
+        assert(stalled&&s.out.state==PushState::PREPARE);
     }
     { // 5 -> 20 -> 40, reacquiring a new ID at each stable angle before advancing.
         TaskTuning t;t.enable_search_cues=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.2f;
@@ -1256,11 +2363,35 @@ int main(int argc, char **argv) {
             assert(s.until(PushState::MID_APPROACH,40));
         }
     }
+    { // Open-jaw corridor rejected by neighbours: small closed-frame swings first; the old reselect path only after the budget is used.
+        TaskTuning t;t.enable_search_cues=true;t.enable_lost_search=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;
+        Sim s(t);s.in.target_is_search_cue=true;s.in.distance_m=.39f;
+        assert(s.until(PushState::MID_REACQUIRE,80));s.in.target_is_search_cue=false;
+        assert(s.until(PushState::MID_APPROACH,40));
+        for(int round=0;round<2;++round) {
+            s.in.distance_m=.30f;s.in.corridor=inv(1,0,1);
+            for(int i=0;i<10&&s.out.reason!="mid_neighbour_clear";++i)s.tick();
+            assert(s.out.reason=="mid_neighbour_clear"&&s.out.motion.gripper_offset==20);
+            bool swung=false;float max_dyaw=0;const float yaw0=s.phi;
+            for(int i=0;i<400&&s.out.reason!="mid_neighbour_clear_done";++i) {
+                s.tick();assert(s.out.state!=PushState::SAFE_STOP&&s.out.motion.gripper_offset==20);
+                if(s.out.motion.wz_rps!=0)swung=true;
+                max_dyaw=std::max(max_dyaw,std::abs(s.phi-yaw0));
+            }
+            assert(s.out.reason=="mid_neighbour_clear_done"&&s.out.state==PushState::MID_REACQUIRE&&swung);
+            assert(max_dyaw>.3f&&max_dyaw<.8f);
+            s.in.corridor=inv(1);
+            assert(s.until(PushState::MID_APPROACH,40));
+        }
+        s.in.distance_m=.30f;s.in.corridor=inv(1,0,1);
+        for(int i=0;i<10&&s.out.reason!="mid_open_corridor_reselect";++i)s.tick();
+        assert(s.out.reason=="mid_open_corridor_reselect"&&s.out.state==PushState::MID_REACQUIRE);
+    }
     { // Lost closed-jaw target: zero translation, bounded turn, new-ID confirmation.
         TaskTuning t;t.enable_search_cues=true;t.enable_lost_search=true;
         Sim s(t);s.in.distance_m=.8f;assert(s.until(PushState::APPROACH,30));
         s.in.target_valid=false;assert(s.until(PushState::LOST_SEARCH,20));
-        s.tick();assert(s.out.motion.vx_mps==0&&s.out.motion.wz_rps==.4f);
+        s.tick();assert(s.out.motion.vx_mps==0&&s.out.motion.wz_rps==-.4f);
         s.in.directional_clearance_valid=true;s.in.turn_safe=false;s.tick();assert(stopped(s.out.motion));
         s.in.turn_safe=true;s.in.target_valid=true;s.in.target_id=99;
         assert(s.until(PushState::CUE_APPROACH,5));assert(stopped(s.out.motion)&&s.out.target_id==99);
@@ -1270,20 +2401,30 @@ int main(int argc, char **argv) {
         Sim s(t);s.in.distance_m=.8f;assert(s.until(PushState::APPROACH,30));
         for(int attempt=0;attempt<5;++attempt) {
             s.in.target_valid=false;assert(s.until(PushState::LOST_SEARCH,20));
-            s.tick();assert(s.out.motion.vx_mps==0&&s.out.motion.wz_rps==.4f);
+            s.tick();assert(s.out.motion.vx_mps==0&&s.out.motion.wz_rps==-.4f);
             s.in.target_valid=true;s.in.target_id=100+attempt;
             assert(s.until(PushState::CUE_APPROACH,5));
             assert(stopped(s.out.motion)&&s.out.target_id==100+attempt);
         }
     }
     { // Searching never becomes endless when no valid target is seen.
-        TaskTuning t;t.enable_lost_search=true;Sim s(t);s.in.distance_m=.8f;
+        TaskTuning t;t.enable_lost_search=true;t.lost_search_rescan=false;Sim s(t);s.in.distance_m=.8f;
         assert(s.until(PushState::APPROACH,30));s.in.target_valid=false;
         assert(s.until(PushState::LOST_SEARCH,20));assert(s.until(PushState::SAFE_STOP,430));
         assert(s.out.reason=="lost_search_exhausted"&&stopped(s.out.motion));
     }
+    { // 默认：两轮丢失搜索都没找到，不再整场停死，而是回到SCAN继续找，之后再看到目标仍能进入APPROACH。
+        TaskTuning t;t.enable_lost_search=true;t.enable_search_cues=false;t.blind_scatter=false;Sim s(t);s.in.distance_m=.8f;
+        assert(s.until(PushState::APPROACH,30));s.in.target_valid=false;
+        assert(s.until(PushState::LOST_SEARCH,20));
+        bool rescan=false;
+        for(int i=0;i<1200&&!rescan;++i){s.tick();rescan=s.out.reason=="lost_search_rescan";assert(s.out.state!=PushState::SAFE_STOP);}
+        assert(rescan&&s.out.state==PushState::SCAN);
+        s.in.target_valid=true;s.in.target_id=77;s.in.distance_m=.8f;
+        assert(s.until(PushState::APPROACH,40));
+    }
     { // FAR sweep finds nothing: stop, tilt to 20deg, sweep once more, then stop for good.
-        TaskTuning t;t.enable_lost_search=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;
+        TaskTuning t;t.enable_lost_search=true;t.lost_search_rescan=false;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;
         Sim s(t);s.in.distance_m=.8f;assert(s.until(PushState::APPROACH,80));s.in.target_valid=false;
         assert(s.until(PushState::LOST_SEARCH,20));
         bool far_turn=false;
@@ -1332,12 +2473,12 @@ int main(int argc, char **argv) {
             if(out.state==PushState::SCAN)break;
         }
         assert(forward_frames==150 && out.startup_commanded_us==15000000);
-        in.now_us+=100000;out=task.update(in);assert(out.motion.vx_mps==0&&out.motion.wz_rps==3.f);
+        in.now_us+=100000;out=task.update(in);assert(out.motion.vx_mps==0&&out.motion.wz_rps==-3.f);
         assert(out.reason=="searching_target");
         in.path_safe=false;in.now_us+=100000;out=task.update(in);
         assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 && out.reason=="scan_path_blocked");
         in.path_safe=true;in.now_us+=100000;out=task.update(in);
-        assert(out.motion.wz_rps==3.f);
+        assert(out.motion.wz_rps==-3.f);
 
     }
     { // CLI speed input rejects out-of-contract values and trailing garbage.
@@ -1357,6 +2498,7 @@ int main(int argc, char **argv) {
     captureTests();
     holding40StaticReviewTests();
     holdingOutsideMouthTests();
+    corridorFootprintTests();
     blindRetreatTests();
     { // Interim firmware presets (2026-10: only -25/0/+25 deg): FAR 0, TRACK = NEAR = 2500.
         TaskTuning t; t.far_pitch_cdeg = 0; t.track_pitch_cdeg = t.near_pitch_cdeg = 2500;
@@ -1443,8 +2585,8 @@ int main(int argc, char **argv) {
         Sim s; s.toRush(); s.hold(inv(1, 0, 0, 1));
         assert(s.until(PushState::ABORT_DROP, 40) && s.out.verdict == RuleVerdict::DANGEROUS);
     }
-    { // Blue in PREPARE must never start a capture rush.
-        Sim s; s.in.corridor = inv(1,0,0,1);
+    { // Blue in PREPARE must never start a capture rush (pre-check disabled here so PREPARE itself is exercised).
+        TaskTuning t; t.corridor_precheck=false; Sim s(t); s.in.corridor = inv(1,0,0,1);
         for (int i=0;i<80 && s.out.reason!="corridor_dangerous_back_off";++i) s.tick();
         assert(s.out.reason=="corridor_dangerous_back_off" && !s.visited.count(PushState::RUSH));
     }
@@ -1455,13 +2597,37 @@ int main(int argc, char **argv) {
         assert(s.out.motion.gripper_offset==0 && s.out.reason=="rush_corridor_dangerous");
         assert(!s.visited.count(PushState::LOWER_FRAME));
     }
+    { // Selection-stage pre-check: a fatal corridor vetoes the target before the frame opens; no RUSH, and a legal pair passes.
+        for (const auto &bad : {inv(1,0,0,1), inv(1,0,1), inv(1,1), inv(1,0,0,0,1), inv(4)}) {
+            Sim s; s.in.corridor = bad;
+            for (int i=0;i<60 && !(s.out.state==PushState::SCAN && s.out.reason.rfind("corridor_precheck_",0)==0);++i) s.tick();
+            if(!(s.out.reason.rfind("corridor_precheck_",0)==0 && s.out.state==PushState::SCAN)) std::cerr<<"precheck case reason="<<s.out.reason<<" state="<<PushTask::name(s.out.state)<<" ord="<<bad.ordinary<<" core="<<bad.core<<" inj="<<bad.injured<<"\n";
+            assert(s.out.reason.rfind("corridor_precheck_",0)==0 && s.out.state==PushState::SCAN);
+            assert(!s.visited.count(PushState::PREPARE) && !s.visited.count(PushState::RUSH));
+        }
+        Sim pair; pair.in.corridor = inv(2); pair.toRush(); // two ordinary supplies are a legal trip
+        Sim occluded; occluded.in.corridor_occlusion_free=false; // not a fatal verdict: left to PREPARE
+        for (int i=0;i<40 && occluded.out.state!=PushState::PREPARE;++i) occluded.tick();
+        assert(occluded.out.state==PushState::PREPARE || occluded.out.state==PushState::LOST_HOLD);
+    }
+    { // The pre-check cannot deadlock the search: after corridor_precheck_max vetoes PREPARE decides alone.
+        TaskTuning t; t.corridor_precheck_max=2; Sim s(t); s.in.corridor = inv(1,0,0,1);
+        for (int i=0;i<2000 && !s.visited.count(PushState::PREPARE);++i) s.tick();
+        assert(s.visited.count(PushState::PREPARE) && !s.visited.count(PushState::RUSH));
+        assert(s.out.reason!="corridor_precheck_dangerous" || s.out.state==PushState::SCAN);
+    }
+    { // Evidence that is not fatal for two frames then clears does not accumulate towards a veto.
+        Sim s; assert(s.until(PushState::APPROACH, 40));
+        s.in.corridor = inv(1,0,0,1); s.tick(); s.in.corridor = inv(1);
+        assert(s.until(PushState::RUSH, 80));
+    }
     { // Lost corridor evidence also prevents advancing or closing.
         Sim s; s.toRush(); s.in.corridor_complete=false; s.tick();
         assert(s.out.state==PushState::CAPTURE_FAIL && stopped(s.out.motion));
         assert(s.out.reason=="rush_corridor_incomplete" && s.out.motion.gripper_offset==0);
     }
-    { // Too many supplies in the corridor: the rush is not started.
-        Sim s; s.in.corridor = inv(4);
+    { // Too many supplies in the corridor: the rush is not started (PREPARE path, pre-check disabled).
+        TaskTuning t; t.corridor_precheck=false; Sim s(t); s.in.corridor = inv(4);
         for (int i = 0; i < 40 && s.out.reason != "corridor_too_many_supplies_back_off"; ++i) s.tick();
         assert(s.out.reason == "corridor_too_many_supplies_back_off" && !s.visited.count(PushState::RUSH));
     }
@@ -1630,6 +2796,13 @@ int main(int argc, char **argv) {
         s.tick(); s.in.target_id = 8; s.tick();
         assert(s.out.state == PushState::APPROACH && s.out.reason == "approach_id_rebound_same_object" && s.out.target_id == 8);
     }
+    { // The body turned .4 rad (e.g. a rush pulse) between the last tracked frame and the re-ID: the bearing shifts by
+      // the same amount, so the world bearing is unchanged and the new ID is still the same object.
+        Sim s; s.in.distance_m = .8f;
+        assert(s.until(PushState::APPROACH, 20));
+        s.tick(); s.in.target_id = 8; s.phi += .4f; s.in.heading_error -= .4f; s.tick();
+        assert(s.out.state == PushState::APPROACH && s.out.reason == "approach_id_rebound_same_object" && s.out.target_id == 8);
+    }
     { // Other detections do not authorize motion after the locked ID changes.
         Sim s; s.in.distance_m = .8f; assert(s.until(PushState::APPROACH, 20));
         s.tick(); const float h0 = s.in.heading_error; s.in.target_id = 8; s.in.heading_error = h0 + .8f; s.tick();
@@ -1711,6 +2884,43 @@ int main(int argc, char **argv) {
     assert(makeTargetAreas("red") == std::vector<std::string>{"red_safe_zone"});
     assert(makeTargetAreas("blue") == std::vector<std::string>{"blue_safe_zone"});
     assert(makeTargetBalls("red").size() == 3);
+    { // MotionWatch 在 ~9Hz 控制环下也能判静止；原地转向指令下陀螺≈0超过阈值计为转圈卡死，正常转动/停止指令立即清零。
+        MotionWatch w;std::array<float,3> still{0,0,9.8f},stalled{0,0,.004f},turning{0,0,.2f};
+        uint64_t t=1000000;
+        for(int i=0;i<40;++i,t+=105000)w.feed(t,"SCAN",0,.8f,true,true,still,stalled,stalled);
+        assert(w.suspect()&&w.spinStallUs()>=3000000);
+        assert(w.takeEvents().find("spin_stall_begin state=SCAN")!=std::string::npos);
+        w.feed(t,"SCAN",0,.8f,true,true,still,turning,turning);t+=105000;
+        assert(w.spinStallUs()==0&&w.takeEvents().find("spin_stall_end")!=std::string::npos);
+        MotionWatch f;
+        for(int i=0;i<40;++i,t+=105000)f.feed(t,"SCAN",0,.8f,true,true,still,turning,turning);
+        assert(f.spinStallUs()==0&&!f.suspect());
+        MotionWatch d; // 前进指令不算转圈卡死
+        for(int i=0;i<40;++i,t+=105000)d.feed(t,"APPROACH",.3f,.8f,true,true,still,stalled,stalled);
+        assert(d.spinStallUs()==0);
+    }
+    { // SCAN转圈卡死 -> 后退再前进各一段，然后恢复转圈。
+        TaskTuning t;t.scan_wz=t.turn_wz=t.max_wz=.4f;PushTask task(t);PushObservation in;
+        in.run=in.safety_ok=in.path_safe=in.opponent_zone_clear=in.retreat_safe=true;
+        in.camera_pitch_cdeg=500;in.camera_pitch_stable=true;
+        PushOutput out;
+        for(int i=0;i<400;++i){in.now_us+=100000;out=task.update(in);if(out.state==PushState::SCAN)break;}
+        assert(out.state==PushState::SCAN);
+        in.now_us+=100000;out=task.update(in);assert(out.motion.wz_rps<0&&out.motion.vx_mps==0);
+        in.imu_spin_stall_us=1600000;
+        int back=0,fwd=0;
+        for(int i=0;i<40;++i){
+            in.now_us+=100000;out=task.update(in);
+            if(out.reason=="spin_stall_back"){++back;assert(out.motion.vx_mps<0&&out.motion.wz_rps==0);}
+            if(out.reason=="spin_stall_forward"){++fwd;assert(out.motion.vx_mps>0&&out.motion.wz_rps==0);}
+            in.imu_spin_stall_us=0; // 动作期间 MotionWatch 的计数被清零
+        }
+        assert(back>=7&&back<=9&&fwd>=7&&fwd<=9);
+        in.now_us+=100000;out=task.update(in);assert(out.motion.vx_mps==0&&out.motion.wz_rps<0&&out.reason=="searching_target");
+        TaskTuning off=t;off.spin_unstick=false;PushTask task2(off);PushObservation i2=in;i2.now_us=0;i2.imu_spin_stall_us=0;
+        for(int i=0;i<400;++i){i2.now_us+=100000;out=task2.update(i2);if(out.state==PushState::SCAN)break;}
+        i2.imu_spin_stall_us=9000000;i2.now_us+=100000;out=task2.update(i2);assert(out.motion.vx_mps==0&&out.motion.wz_rps<0);
+    }
     { // MotionWatch: commanded but vibration-free for >=1.5 s is flagged; real vibration or no command is not.
         MotionWatch w;std::array<float,3> still{0,0,9.8f},zero{0,0,0};
         uint64_t t=1000000;
@@ -1754,11 +2964,75 @@ int main(int argc, char **argv) {
     }
     { // field_carry (main path): transport/release/push logic follows the demo, capture stays strict.
         TaskTuning t;t.field_carry=true;
-        { // The load vanishing from the NEAR view during the carry is not a LOST_HOLD, and a missing drop revalidation does not freeze the release.
+        { // The load vanishing from the NEAR view during the carry is not a LOST_HOLD; without a usable drop plan the trip keeps searching and never releases blind.
             Sim s(t);s.toCarry();s.tick();s.hold({});s.drop_available=false;
             bool lost=false;
-            for(int i=0;i<600&&s.out.state!=PushState::RAISE_RELEASE;++i){s.tick();lost=lost||s.out.state==PushState::LOST_HOLD;}
-            assert(!lost && s.out.state==PushState::RAISE_RELEASE);
+            for(int i=0;i<400&&s.out.state!=PushState::RAISE_RELEASE;++i){s.tick();lost=lost||s.out.state==PushState::LOST_HOLD;}
+            assert(!lost && s.out.state==PushState::CARRY && s.out.reason=="searching_own_zone");
+        }
+        { // No verified own zone (enemy colour / unseen): the load is held and the robot searches, never a blind release.
+            Sim s(t);s.toCarry();s.zone_visible=false;
+            for(int i=0;i<400;++i){ // 20 s, inside carry_budget_us
+                s.tick();
+                assert(s.out.state!=PushState::RAISE_RELEASE&&s.out.state!=PushState::ENTER);
+                assert(s.out.reason!="assumed_blind_carry"&&s.out.reason!="assumed_drop_point");
+            }
+            assert(s.out.state==PushState::CARRY&&s.out.reason=="searching_own_zone");
+        }
+        { // Enemy-colour zone seen while searching: turn about (IMU), drive a long leg away, then resume searching our zone.
+            Sim s(t);s.toCarry();s.zone_visible=false;
+            for(int i=0;i<200&&s.out.reason!="searching_own_zone";++i)s.tick();assert(s.out.reason=="searching_own_zone");
+            const float phi0=s.phi;
+            s.in.enemy_zone_seen=true;s.tick();s.tick(); // below the 3-frame debounce
+            s.in.enemy_zone_seen=false;s.tick();assert(s.out.reason=="searching_own_zone");
+            s.in.enemy_zone_seen=true;for(int i=0;i<3;++i)s.tick();
+            s.in.enemy_zone_seen=false;
+            assert(s.out.reason=="enemy_zone_turn_away");
+            bool turned=false,drove=false;float x0=0,y0=0;
+            for(int i=0;i<400&&s.out.reason!="searching_own_zone";++i){
+                s.tick();
+                if(s.out.reason=="enemy_zone_drive_away"){
+                    if(!drove){drove=true;x0=s.px;y0=s.py;turned=std::abs(s.phi-phi0)>=s.tune.enemy_evade_turn_rad;}
+                    assert(s.out.motion.vx_mps>0&&s.out.state==PushState::CARRY);
+                }
+                assert(s.out.state==PushState::CARRY);
+            }
+            assert(turned&&drove&&s.out.reason=="searching_own_zone");
+            assert(std::abs(std::hypot(s.px-x0,s.py-y0)-s.tune.enemy_evade_m*s.tune.assume_motion_ratio)<.08f);
+            // Cooldown: an immediate re-sighting does not restart the manoeuvre.
+            s.in.enemy_zone_seen=true;for(int i=0;i<4;++i){s.tick();assert(s.out.reason=="searching_own_zone");}
+        }
+        { // Without the enemy sighting nothing changes; with it disabled the sighting is ignored.
+            TaskTuning off=t;off.enemy_evade=false;
+            Sim s(off);s.toCarry();s.zone_visible=false;for(int i=0;i<200&&s.out.reason!="searching_own_zone";++i)s.tick();s.in.enemy_zone_seen=true;
+            for(int i=0;i<40;++i){s.tick();assert(s.out.reason=="searching_own_zone");}
+        }
+        { // Zone never found: after carry_search_turns turns the robot drives back along the start line, then spins again.
+            TaskTuning q=t;q.carry_search_turns=.5f;q.carry_leg_us=2000000;q.carry_search_respin_turns=.25f;
+            Sim s(q);s.toCarry();s.zone_visible=false;
+            bool drove=false,respun=false;
+            for(int i=0;i<1200&&!respun;++i){
+                s.tick();
+                assert(s.out.state==PushState::CARRY);
+                if(s.out.reason=="carry_drive_start_line"){drove=true;}
+                else if(drove&&s.out.reason=="searching_own_zone")respun=true;
+            }
+            assert(drove&&respun);
+        }
+        { // A far sighting (no geometry fix) ends the spin: face it and drive; the memory outlives the sighting; an enemy-colour sighting there erases it.
+            Sim s(t);s.toCarry();s.zone_visible=false;
+            for(int i=0;i<40&&s.out.reason!="searching_own_zone";++i)s.tick();assert(s.out.reason=="searching_own_zone");
+            const float zyaw=s.phi+.5f;s.in.zone_sight_valid=true;s.in.zone_sight_bearing=.5f;s.tick();s.in.zone_sight_valid=false;
+            bool sighted=false,drove=false;
+            for(int i=0;i<200;++i){
+                s.tick();assert(s.out.state==PushState::CARRY);
+                sighted=sighted||s.out.reason=="carry_drive_to_sighted_zone";
+                if(s.out.reason=="carry_drive_to_remembered_zone"&&s.out.motion.vx_mps>0)drove=true;
+            }
+            assert(sighted&&drove);
+            s.in.zone_sight_valid=true;s.in.zone_sight_enemy=true;s.in.zone_sight_bearing=std::remainder(zyaw-s.phi,2*float(CV_PI));s.tick();
+            s.in.zone_sight_valid=false;s.in.zone_sight_enemy=false;
+            for(int i=0;i<5;++i){s.tick();assert(s.out.reason!="carry_drive_to_remembered_zone"&&s.out.reason!="carry_drive_to_sighted_zone");}
         }
         { // Strict capture is untouched: without multi-view evidence the capture is not credited.
             Sim s(t);s.tune.require_multi_view=true;s.task=PushTask(s.tune);s.multi_evidence=false;
@@ -1772,16 +3046,16 @@ int main(int argc, char **argv) {
     }
     { // Other objects in the PREPARE corridor: more frames to confirm, then keep the frame up, reverse and search again.
         auto prepareTicks = [](int frames) {
-            TaskTuning t; t.corridor_confirm_frames = frames;
-            Sim s(t); s.in.corridor = inv(1,0,0,1);
+            TaskTuning t; t.corridor_precheck=false; t.corridor_confirm_frames = frames;
+            Sim s(t); s.in.corridor = inv(1,0,0,0,1);
             int n = 0;
             while (s.out.state != PushState::LOST_HOLD && n < 400) { s.tick(); ++n; }
             assert(s.out.state == PushState::LOST_HOLD && !s.visited.count(PushState::RUSH));
             return n;
         };
         assert(prepareTicks(6) - prepareTicks(3) == 3);
-        TaskTuning ft; ft.corridor_confirm_frames = 6;
-        Sim s(ft); s.in.corridor = inv(1,0,0,1);
+        TaskTuning ft; ft.corridor_precheck=false; ft.corridor_confirm_frames = 6;
+        Sim s(ft); s.in.corridor = inv(1,0,0,0,1);
         bool reversed = false, lowered = false;
         bool held = false;
         for (int i = 0; i < 600 && !(held && s.out.state == PushState::SCAN); ++i) {
@@ -1793,7 +3067,7 @@ int main(int argc, char **argv) {
         assert(s.task.rejectedTargets(s.in.now_us).empty()); // first block: search again, no blacklist
     }
     { // Blocked again and again: the target is blacklisted after corridor_retry_max back-offs.
-        Sim s; s.in.corridor = inv(1,0,0,1);
+        TaskTuning pt; pt.corridor_precheck=false; Sim s(pt); s.in.corridor = inv(1,0,0,0,1);
         int backoffs = 0; PushState prev = s.out.state;
         for (int i = 0; i < 4000 && s.task.rejectedTargets(s.in.now_us).empty(); ++i) {
             s.tick();
@@ -1802,9 +3076,15 @@ int main(int argc, char **argv) {
         }
         assert(!s.task.rejectedTargets(s.in.now_us).empty() && backoffs == s.tune.corridor_retry_max + 1);
     }
+    { // A fatal verdict (dangerous in the corridor) blacklists at once and remembers the world bearing.
+        TaskTuning pt; pt.corridor_precheck=false; Sim s(pt); s.in.corridor = inv(1,0,0,1);
+        for (int i = 0; i < 4000 && s.task.rejectedTargets(s.in.now_us).empty(); ++i) s.tick();
+        assert(!s.task.rejectedTargets(s.in.now_us).empty());
+        assert(s.task.rejectedBearings(s.in.now_us).size() == 1);
+    }
     { // Without zone geometry the back-off is blind: corridor_back_m x motion ratio of commanded reverse; unsafe rear skips it.
         for (bool rear_safe : {true, false}) {
-            TaskTuning bt; bt.back_speed = .32f; // field speed: the 0.8 commanded fits the retreat budget
+            TaskTuning bt; bt.corridor_precheck=false; bt.back_speed = .32f; // field speed: the 0.8 commanded fits the retreat budget
             Sim s(bt); s.in.corridor = inv(1,0,0,1); s.in.retreat_safe = rear_safe;
             assert(s.until(PushState::PREPARE, 80));
             s.zone_visible = false;
@@ -1835,7 +3115,7 @@ int main(int argc, char **argv) {
             else assert(relost && !s.visited.count(PushState::RUSH));
         }
         for (bool fr : {false, true}) {
-            TaskTuning ft; ft.field_rush = fr;
+            TaskTuning ft; ft.field_rush = fr; ft.rush_stall_us = 0; // legacy bound path, watchdog covered separately
             Sim s(ft); s.in.distance_m = .30f;
             s.toRush();
             bool failed = false;
@@ -1855,6 +3135,65 @@ int main(int argc, char **argv) {
             else assert(failed && s.out.reason == "rush_target_lost");
         }
     }
+    { // RUSH no-progress watchdog (Stage C). Synthetic frames: frozen/closing distance values, not a replay of the field log.
+        const auto run = [](const char *mode) {
+            TaskTuning ft; ft.field_rush = true;
+            Sim s(ft); s.tune.rush_stall_us = 2000000; s.task = PushTask(s.tune); s.in.distance_m = .30f; s.toRush();
+            if (std::string(mode) == "closing") s.in.distance_m = .45f;
+            if (std::string(mode) == "in_frame") s.hold(inv(1));
+            bool reobserve = false, lowered = false; float moved_in_reobserve = 0;
+            for (int i = 0; i < 400 && s.out.state == PushState::RUSH; ++i) {
+                if (std::string(mode) == "closing") s.in.distance_m -= .0015f;
+                if (std::string(mode) == "flicker" && i % 4 == 0) s.pitch_still = 0;
+                s.tick();
+                if (s.out.reason == "rush_stall_reobserve") { reobserve = true; moved_in_reobserve += std::abs(s.out.motion.vx_mps) + std::abs(s.out.motion.wz_rps); }
+                lowered = lowered || s.out.state == PushState::LOWER_FRAME;
+            }
+            struct R { PushState st; std::string reason; bool reobserve, lowered; float moved; } r{s.out.state, s.out.reason, reobserve, lowered, moved_in_reobserve};
+            return r;
+        };
+        { const auto r = run("frozen"); // valid stall: stop, re-observe, then recover; the bound must not be credited as enclosure
+          assert(r.reobserve && r.moved == 0 && !r.lowered && r.st == PushState::CAPTURE_FAIL && r.reason == "rush_no_progress"); }
+        { const auto r = run("in_frame"); // reliable in-frame evidence at the stall allows lowering
+          assert(r.st == PushState::LOWER_FRAME && r.reason == "rush_stall_in_frame_evidence"); }
+        { const auto r = run("closing"); // real closing (3 cm/s) never raises a stall
+          assert(!r.reobserve && r.reason != "rush_no_progress"); }
+        { const auto r = run("flicker"); // camera repeatedly unstable: no valid window, so no stall claim
+          assert(!r.reobserve && r.reason != "rush_no_progress"); }
+    }
+    { // VERIFY_CAPTURE false-class re-check (Stage D). Synthetic held-region frames; the field #313 frame itself is not replayed.
+        struct R { PushState st; std::string reason; int bad_frames_seen; bool carried; };
+        // pattern(k) -> bad objects present in verify frame k (core on a track id, with confidence)
+        const auto run = [](const std::function<std::vector<PushObservation::HeldObject>(int)> &pattern, bool recheck_on = true) {
+            TaskTuning ft; ft.field_rush = true; ft.verify_held_contents = true;
+            Sim s(ft); s.tune.require_multi_view = true; s.tune.held_recheck = recheck_on; s.task = PushTask(s.tune); s.multi_evidence = false;
+            s.toRush(); s.hold(inv(1));
+            int k = -1; bool carried = false; int bad_seen = 0;
+            for (int i = 0; i < 400 && s.out.state != PushState::ABORT_DROP && s.out.state != PushState::CAPTURE_FAIL && !carried; ++i) {
+                if (s.out.state == PushState::VERIFY_CAPTURE) {
+                    ++k; auto objs = pattern(k);
+                    s.load = inv(1); s.load_objects = {{7, "ordinary_supply", .9f}};
+                    for (const auto &o : objs) { s.load_objects.push_back(o); if (o.label == "core_supply") s.load.core++; if (o.label == "dangerous_object") s.load.dangerous++; }
+                    if (!objs.empty()) ++bad_seen;
+                }
+                s.tick(); carried = s.out.state == PushState::CARRY;
+            }
+            return R{s.out.state, s.out.reason, bad_seen, carried};
+        };
+        const auto core = [](int id, float c) { return PushObservation::HeldObject{id, "core_supply", c}; };
+        { const auto r = run([&](int k) { return k >= 2 && k < 4 ? std::vector<PushObservation::HeldObject>{core(99, .54f)} : std::vector<PushObservation::HeldObject>{}; }, false);
+          assert(r.st == PushState::ABORT_DROP && r.reason == "held_core_before_first"); } // old behaviour: two frames abort
+        { const auto r = run([&](int k) { return k >= 2 && k < 4 ? std::vector<PushObservation::HeldObject>{core(99, .54f)} : std::vector<PushObservation::HeldObject>{}; });
+          assert(r.carried && r.reason == "assumed_capture" && r.st == PushState::CARRY); } // brief weak class: re-check clears, flow continues
+        { const auto r = run([&](int k) { return k >= 2 ? std::vector<PushObservation::HeldObject>{core(99, .54f)} : std::vector<PushObservation::HeldObject>{}; });
+          assert(r.st == PushState::ABORT_DROP && r.reason == "held_core_before_first" && r.bad_frames_seen >= 4); } // stable same identity: confirmed illegal, existing drop
+        { const auto r = run([&](int k) { return k >= 2 ? std::vector<PushObservation::HeldObject>{core(90 + k, .54f)} : std::vector<PushObservation::HeldObject>{}; });
+          assert(!r.carried && r.st == PushState::CAPTURE_FAIL && r.reason == "held_illegal_unresolved"); } // identity keeps changing: uncertain is not a capture
+        { const auto r = run([&](int k) { return k >= 2 ? std::vector<PushObservation::HeldObject>{core(99, .90f)} : std::vector<PushObservation::HeldObject>{}; });
+          assert(r.st == PushState::ABORT_DROP && r.bad_frames_seen == 2); } // strong class keeps the prompt block
+        { const auto r = run([&](int k) { return k >= 2 ? std::vector<PushObservation::HeldObject>{{98, "dangerous_object", .5f}} : std::vector<PushObservation::HeldObject>{}; });
+          assert(r.st == PushState::ABORT_DROP && r.reason == "held_dangerous" && r.bad_frames_seen == 2); } // a dangerous object is never re-checked
+    }
     { // field_rush: unconfirmed multi-view credits the capture; a measured inventory conflict stays fatal.
         TaskTuning ft; ft.field_rush = true;
         { Sim s(ft); s.tune.require_multi_view = true; s.task = PushTask(s.tune); s.multi_evidence = false;
@@ -1863,8 +3202,241 @@ int main(int argc, char **argv) {
         { Sim s(ft); s.tune.require_multi_view = true; s.task = PushTask(s.tune);
           s.toRush(); s.hold(inv(2));
           bool credited = false;
-          for (int i = 0; i < 300 && s.out.state != PushState::SAFE_STOP; ++i) { s.tick(); credited = credited || s.out.reason == "assumed_capture"; }
-          assert(!credited && s.out.state == PushState::SAFE_STOP && s.out.reason == "multi_view_inventory_conflict"); }
+          for (int i = 0; i < 300 && s.out.state != PushState::ABORT_DROP; ++i) { s.tick(); credited = credited || s.out.reason == "assumed_capture"; }
+          assert(!credited && s.out.state == PushState::ABORT_DROP && s.out.reason.rfind("multi_grab_", 0) == 0); }
+    }
+    { // field_rush: after the frame opens the tracker re-IDs the target and the 40deg view clips it (region/geometry invalid): rebind by position, not by validity.
+        TaskTuning ft; ft.field_rush = true; ft.corridor_confirm_frames = 3;
+        Sim s(ft); bool done = false;
+        for (int i = 0; i < 200 && !done; ++i) {
+            s.tick();
+            if (s.out.state == PushState::PREPARE && s.out.reason == "open_confirmed_return_to_tracking_pitch") {
+                s.in.target_id = 9; s.in.target_region_valid = false; s.in.geometry_valid = false;
+                for (int k = 0; k < 40 && s.out.reason != "prepare_id_rebound_after_open"; ++k) s.tick();
+                assert(s.out.reason == "prepare_id_rebound_after_open" && s.out.target_id == 9); done = true;
+            }
+        }
+        assert(done);
+    }
+    { // Frame contents seen in VERIFY_CAPTURE: the target must be inside, a dangerous object never, an injured person only after a delivery and alone.
+        const auto run = [](bool first, const Inventory &held, PushState want, const char *prefix) {
+            TaskTuning ft; ft.field_rush = true; ft.verify_held_contents = true; ft.assume_injured_trip = first;
+            Sim s(ft); s.tune.require_multi_view = true; s.task = PushTask(s.tune); s.multi_evidence = false;
+            s.toRush(); s.hold(held);
+            for (int i = 0; i < 400 && s.out.state != want; ++i) s.tick();
+            assert(s.out.state == want && s.out.reason.rfind(prefix, 0) == 0);
+        };
+        Inventory with_danger = inv(1); with_danger.dangerous = 1;
+        Inventory with_injured = inv(1); with_injured.injured = 1;
+        run(false, inv(1), PushState::CARRY, "assumed_capture");
+        run(false, with_danger, PushState::ABORT_DROP, "held_");
+        run(true, with_danger, PushState::ABORT_DROP, "held_");
+        run(false, with_injured, PushState::ABORT_DROP, "held_");
+        run(true, with_injured, PushState::ABORT_DROP, "held_");
+        Inventory only_injured; only_injured.injured = 1;
+        run(true, only_injured, PushState::CAPTURE_FAIL, "capture_target_not_in_frame");
+        run(true, Inventory{}, PushState::CAPTURE_FAIL, "capture_target_not_in_frame");
+    }
+    { // 走廊邻居清理：走廊判定不合法且目标前方走廊内有任意类别邻居 -> 低框原地扫开再回正；开关关闭/走廊合法/邻居在目标后方或带外/数据过期则不动。
+        const auto run=[&](bool on,Inventory corridor,float ux,float uy,bool fresh){
+            TaskTuning t;t.enable_search_cues=false;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
+            t.clear_neighbours=on;
+            Sim s(t);s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+            s.in.distance_m=.19f;s.in.corridor=corridor;
+            int outs=0,backs=0;float first_wz=0;bool left_sweep=false;
+            for(int i=0;i<200;++i){
+                s.in.clutter_body={{ux,uy}};if(fresh)s.in.clutter_ts_us=s.in.now_us;
+                if(backs>0)s.in.corridor=inv(1);
+                s.tick();
+                if(s.out.state!=PushState::APPROACH){left_sweep=true;break;}
+                if(s.out.reason=="sweep_neighbour_out"&&s.out.motion.wz_rps!=0){++outs;if(!first_wz)first_wz=s.out.motion.wz_rps;assert(s.out.motion.vx_mps==0);}
+                if(s.out.reason=="sweep_upright_back"&&s.out.motion.wz_rps!=0)++backs;
+            }
+            struct R{int outs,backs;float wz;bool left;};
+            return R{outs,backs,first_wz,left_sweep};
+        };
+        auto many=run(true,inv(3),.08f,.10f,true);          // 目标前方偏右的普通物资，走廊内共3个
+        assert(many.outs>0&&many.backs>0&&many.wz<0&&many.left);
+        auto leftside=run(true,inv(3),-.08f,.10f,true);
+        assert(leftside.outs>0&&leftside.wz>0);
+        auto danger=run(true,inv(1,0,0,1),.06f,.10f,true);  // 走廊内有危险物：同样只扫不搬
+        assert(danger.outs>0&&danger.left);
+        assert(run(false,inv(3),.08f,.10f,true).outs==0);   // 开关关闭
+        assert(run(true,inv(2),.08f,.10f,true).outs==0);    // 走廊合法
+        assert(run(true,inv(3),.08f,.30f,true).outs==0);    // 在目标后方
+        assert(run(true,inv(3),.30f,.10f,true).outs==0);    // 带外
+        assert(run(true,inv(3),.08f,.10f,false).outs==0);   // 数据过期
+    }
+    { // 远处邻居（框前沿够不到）：先慢速前探到距邻居约.03m，再转出扫开；邻居已贴近则不前探。
+        const auto run=[&](float uy){
+            TaskTuning t;t.enable_search_cues=false;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
+            t.clear_neighbours=true;
+            Sim s(t);s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
+            s.in.distance_m=.34f;s.in.corridor=inv(3);
+            int creeps=0,outs=0;bool order_ok=true;
+            for(int i=0;i<300;++i){
+                s.in.clutter_body={{.08f,uy}};s.in.clutter_ts_us=s.in.now_us;
+                s.tick();
+                if(s.out.state!=PushState::APPROACH)break;
+                if(s.out.reason=="sweep_creep"&&s.out.motion.vx_mps>0&&s.out.motion.wz_rps==0)++creeps;
+                if((s.out.reason=="sweep_neighbour_out"||s.out.reason=="sweep_upright_out")&&s.out.motion.wz_rps!=0){if(!creeps&&uy>.22f)order_ok=false;++outs;}
+            }
+            return std::make_tuple(creeps,outs,order_ok);
+        };
+        const auto far=run(.28f);
+        assert(std::get<0>(far)>0&&std::get<1>(far)>0&&std::get<2>(far));
+        assert(std::get<0>(run(.20f))==0);
+    }
+    { // 扫动阶段沿用搬运的视角分级：5° → 20°(剩余≤track_near_m) → 40°(剩余≤intermediate_to_near_m)，只降不升；关闭开关则全程5°。
+        TaskTuning t;t.enable_search_cues=false;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;
+        const auto mk=[&](float ratio,float dist,Sim &s){s.in.target_valid=true;s.in.distance_m=dist;s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=ratio;};
+        const auto ladder=[&](bool handoff){
+            TaskTuning tt=t;tt.sweep_view_handoff=handoff;
+            Sim s(tt);mk(.002f,.9f,s);std::vector<int> seq;
+            for(int i=0;i<3000;++i){s.tick();
+                if(s.out.state==PushState::SCATTER){const int p=s.out.motion.camera_pitch_cdeg;if(seq.empty()||seq.back()!=p)seq.push_back(p);}
+                if(s.out.reason=="blind_scatter_done")break;}
+            return seq;
+        };
+        const auto on=ladder(true);
+        assert(on.size()>=2&&on.front()==500);
+        for(size_t i=1;i<on.size();++i)assert(on[i]>on[i-1]);
+        assert(std::find(on.begin(),on.end(),2000)!=on.end());
+        const auto off=ladder(false);
+        assert(off.size()==1);
+    }
+    { // 锁定目标不是普通物资：不抓取，冲入摆扫后拉黑并回到扫描；普通物资单个仍正常抓取；开关关闭则按原流程。
+        g_non_supply_sweep=true;
+        TaskTuning t;t.enable_search_cues=false;t.assume_all_safe=true;t.track_pitch_cdeg=4000;t.intermediate_pitch_cdeg=2000;t.track_near_m=.4f;t.intermediate_to_near_m=.27f;t.rush_start_m=.35f;
+        const auto runOne=[&](const char *label,bool flag){
+            g_non_supply_sweep=flag;
+            Sim s(t);s.task.first_=true;s.in.label=label;s.in.distance_m=.5f;s.in.corridor=inv(0,1);
+            struct R{bool rush=false,swept=false,prepared=false;float max_wz=0;} r;
+            if(!s.until(PushState::APPROACH,120)&&!s.until(PushState::MID_APPROACH,1)){return r;}
+            s.in.distance_m=.25f;
+            for(int i=0;i<600;++i){
+                s.tick();
+                r.max_wz=std::max(r.max_wz,std::abs(s.out.motion.wz_rps));
+                if(s.out.reason=="disperse_rush"||s.out.reason=="non_supply_rush")r.rush=true;
+                if(s.out.reason=="non_supply_swept"){r.swept=true;assert(s.out.state==PushState::SCAN);break;}
+                if(s.out.state==PushState::PREPARE||s.out.state==PushState::RUSH){r.prepared=true;break;}
+            }
+            return r;
+        };
+        const auto core=runOne("core_supply",true);
+        assert(core.rush&&core.swept&&!core.prepared&&core.max_wz>=1.5f);
+        const auto inj=runOne("injured_person",true);
+        assert(inj.rush&&inj.swept&&!inj.prepared);
+        const auto ord=runOne("ordinary_supply",true);
+        assert(!ord.rush&&!ord.swept);
+        const auto off=runOne("core_supply",false);
+        assert(!off.rush&&!off.swept);
+        g_non_supply_sweep=false;
+    }
+    { // 清扫账本(Stage A)：所有退出路径只记一次实际清扫时间；远驱+近扫算同一次；总预算约束执行中的清扫；确认等待有界；扫完不连扫。
+        const std::vector<cv::Point2f> grp{{.20f,.50f},{.32f,.56f},{.26f,.44f}};
+        TaskTuning base;base.enable_search_cues=false;base.blind_scatter_first_turn_rad=0.f;base.assume_motion_ratio=1.f;
+        struct L{int starts=0;bool done=false;std::string exit;uint64_t t_start=0,t_end=0;int done_cnt=0;uint64_t spent=0;bool open=true;};
+        // 近距成团：持续喂同一个团，跑到第一次扫结束(任何退出)后再多跑extra个tick，检查账本不再变化。
+        const auto near=[&](TaskTuning tt,int extra,int ticks){
+            Sim s(tt);s.in.target_valid=false;s.in.distance_m=.9f;L l;int after=-1;uint64_t spent_at_end=0;
+            for(int i=0;i<ticks;++i){
+                s.in.clutter_body=grp;s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(s.out.reason=="blind_scatter_start"){++l.starts;if(l.starts==1)l.t_start=s.in.now_us;}
+                if(l.starts>=1&&!l.done&&s.out.state!=PushState::SCATTER){l.done=true;l.exit=s.out.reason;l.t_end=s.in.now_us;spent_at_end=s.task.sweepSpentUs(s.in.now_us);after=0;}
+                if(after>=0){++after;if(after>=extra)break;}
+            }
+            l.done_cnt=s.task.sweepDone();l.spent=s.task.sweepSpentUs(s.in.now_us);l.open=s.task.sweepChainOpen();
+            assert(!l.done||l.spent==spent_at_end); // 退出后继续跑，账本不变(不重复计时)
+            return l; };
+        { // 完整近扫：计1次，用时≈实际时长，链已关闭。
+            const L l=near(base,200,2400);
+            assert(l.starts>=1&&l.done&&l.exit=="blind_scatter_done"&&l.done_cnt==1&&!l.open);
+            const double dur=double(l.t_end-l.t_start)/1e6,sp=double(l.spent)/1e6;
+            assert(sp>=dur-.2&&sp<=dur+.2); }
+        { // 超时退出：用时记入但不计次数；sweep_gap(20 s)内不再起扫，间隔过后才允许下一次，且两次用时各记一次。
+            TaskTuning t=base;t.blind_scatter_budget_us=600000;
+            Sim s(t);s.in.target_valid=false;s.in.distance_m=.9f;int starts=0,starts_in_gap=0;bool timeout=false;
+            for(int i=0;i<600;++i){
+                s.in.clutter_body=grp;s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(s.out.reason=="blind_scatter_start"){++starts;if(i<380)++starts_in_gap;}
+                if(s.out.reason=="blind_scatter_timeout")timeout=true;
+                if(i==379){assert(timeout&&starts==1&&s.task.sweepDone()==0&&!s.task.sweepChainOpen());
+                    const double sp=double(s.task.sweepSpentUs(s.in.now_us))/1e6;assert(sp>=.5&&sp<=.9);}
+            }
+            assert(starts_in_gap==1&&starts==2&&s.task.sweepDone()==0&&!s.task.sweepChainOpen());
+            const double sp2=double(s.task.sweepSpentUs(s.in.now_us))/1e6;assert(sp2>=1.0&&sp2<=1.8); }
+        { // 总预算在清扫执行中生效：3 s预算切断近扫，用时不超过预算+1个tick，原因sweep_budget_exhausted。
+            TaskTuning t=base;t.sweep_time_budget_us=3000000;
+            const L l=near(t,20,2400);
+            assert(l.done&&l.exit=="sweep_budget_exhausted"&&!l.open);
+            const double sp=double(l.spent)/1e6;assert(sp>=2.9&&sp<=3.2);
+            // 对照：默认预算下同一场景走完整扫且用时大于3 s
+            const L d=near(base,0,2400);assert(d.exit=="blind_scatter_done"&&double(d.spent)/1e6>3.3); }
+        { // 退场不安全：back阶段retreat_safe=false -> 立即结束且不下发倒车。
+            Sim s(base);s.in.target_valid=false;s.in.distance_m=.9f;bool back=false,ended=false;float min_vx=0;
+            for(int i=0;i<2400&&!ended;++i){
+                s.in.clutter_body=grp;s.in.clutter_ts_us=s.in.now_us;
+                if(s.out.reason=="blind_scatter_back")back=true;
+                s.in.retreat_safe=!back;s.tick();
+                if(!s.in.retreat_safe)min_vx=std::min(min_vx,s.out.motion.vx_mps);
+                if(back&&s.out.reason=="blind_scatter_back_unsafe"){ended=true;assert(s.out.state==PushState::SCAN);}
+            }
+            assert(back&&ended&&min_vx>=-1e-4f&&!s.task.sweepChainOpen()); }
+        // 远驱+近扫：世界固定的远群(约1.9 m)，同一条链。
+        struct F{bool far=false,near_group=false,done=false;std::string exit;uint64_t t_far=0,t_near=0,t_end=0,spent=0;int done_cnt=0;bool open=true;};
+        const auto farChain=[&](TaskTuning tt){
+            Sim s(tt);s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=.006f;
+            const float x0=s.px,y0=s.py;
+            const std::vector<cv::Point2f> world{{x0+.0f,y0+1.90f},{x0+.08f,y0+1.98f},{x0-.07f,y0+1.84f}};
+            F f;
+            for(int i=0;i<3000&&!f.done;++i){
+                const float c=std::cos(s.phi),sn=std::sin(s.phi);s.in.clutter_body.clear();
+                for(const auto&w:world){const float dx=w.x-s.px,dy=w.y-s.py;s.in.clutter_body.push_back({dx*c+dy*sn,-dx*sn+dy*c});}
+                const cv::Point2f lk=s.in.clutter_body[0];s.in.target_valid=lk.y>.1f;s.in.distance_m=std::hypot(lk.x,lk.y);s.in.heading_error=std::atan2(-lk.x,lk.y);
+                s.in.clutter_ts_us=s.in.now_us;s.tick();
+                if(!f.far&&(s.out.reason=="blind_scatter_far_group"||s.out.reason=="blind_scatter_far_start")){f.far=true;f.t_far=s.in.now_us;}
+                if(!f.near_group&&s.out.reason=="blind_scatter_near_group"){f.near_group=true;f.t_near=s.in.now_us;}
+                if(f.far&&s.out.state!=PushState::SCATTER){f.done=true;f.exit=s.out.reason;f.t_end=s.in.now_us;}
+            }
+            f.spent=s.task.sweepSpentUs(s.in.now_us);f.done_cnt=s.task.sweepDone();f.open=s.task.sweepChainOpen();
+            return f; };
+        TaskTuning fc=base;fc.blind_scatter_max_y_m=.5f;fc.blind_scatter_far_max_y_m=4.f;fc.blind_scatter_half_x_m=2.5f;fc.sweep_confirm_wait_us=0;
+        F ref;
+        { // 远驱->近扫算同一次：计1次，用时覆盖远驱起点到结束，而不是只有近扫段。
+            ref=farChain(fc);
+            assert(ref.far&&ref.near_group&&ref.done&&ref.exit=="blind_scatter_done"&&ref.done_cnt==1&&!ref.open);
+            const double whole=double(ref.t_end-ref.t_far)/1e6,near_only=double(ref.t_end-ref.t_near)/1e6,sp=double(ref.spent)/1e6;
+            assert(sp>=whole-.2&&sp<=whole+.2&&sp>near_only+.5); }
+        { // 远->近切换不能重置整次作业期限：作业预算=远驱段+2.5 s，近扫被sweep_op_timeout切断，总时长≈预算。
+            const double far_part=double(ref.t_near-ref.t_far)/1e6;
+            TaskTuning t=fc;t.sweep_op_budget_us=uint64_t((far_part+2.5)*1e6);
+            const F f=farChain(t);
+            assert(f.far&&f.near_group&&f.done&&f.exit=="sweep_op_timeout"&&!f.open);
+            const double whole=double(f.t_end-f.t_far)/1e6;assert(whole<=double(t.sweep_op_budget_us)/1e6+.2&&whole>=far_part+2.3); }
+        // 确认等待：普通物资锁定(2.5 m)+远群。默认等待内由3帧确认的单目标追踪优先于2帧群决策；等待为0则回到群追。
+        struct Cf{bool group=false,approach=false,seen=false;uint64_t t_group=0;};
+        const auto confirm=[&](TaskTuning tt,bool flip,bool burst){
+            tt.first_burst=burst;
+            Sim s(tt);s.in.pixel_mode="box_area";s.in.pixel_ratio_smoothed=s.in.pixel_ratio_raw=.006f;
+            s.in.target_valid=true;s.in.distance_m=2.5f;Cf c;
+            const std::vector<cv::Point2f> world{{0.f,2.5f},{.20f,2.30f},{-.25f,2.60f}};
+            for(int i=0;i<400&&!c.group&&!c.approach;++i){
+                s.in.clutter_body=world;s.in.clutter_ts_us=s.in.now_us;
+                s.in.target_id=flip?(i%2?7:8):s.in.target_id;
+                s.tick();
+                if(s.out.reason=="blind_scatter_far_group"){c.group=true;c.t_group=s.in.now_us;}
+                if(s.out.state==PushState::APPROACH)c.approach=true;
+                if(s.out.reason=="blind_scatter_target_seen")c.seen=true;
+            }
+            return c; };
+        TaskTuning ct=fc;ct.sweep_confirm_wait_us=1200000;
+        { const Cf c=confirm(ct,false,false);assert(c.approach&&!c.group); }
+        { TaskTuning z=ct;z.sweep_confirm_wait_us=0;const Cf c=confirm(z,false,false);assert(c.group); }
+        { // 目标ID来回跳(永远凑不够3帧)：等待有界，约1.2 s后仍交给群决策，不无限挂起。
+            const Cf c=confirm(ct,true,false);assert(c.group&&c.t_group>=900000&&c.t_group<=2500000); }
+        { // 开局首次远驱(first_burst且未用过)不被确认等待拦住。
+            const Cf c=confirm(ct,true,true);assert(c.group&&c.t_group<=500000); }
     }
     std::cout << "Capture, transport rules, carry, delivery, drop and stop checks passed\n";
 }

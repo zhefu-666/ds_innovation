@@ -57,7 +57,7 @@ if [[ "$mode" == run && $site_clear -ne 1 ]]; then
   exit 2
 fi
 
-binary=${RESCUE_BINARY:-/home/cat/startup-fix-build/rescue_upper_host}
+binary=${RESCUE_BINARY:-$PWD/build-school-competition/rescue_upper_host}
 demo_profile="$PWD/config/demo_20261008.assume.json"
 known_file="/tmp/rescue-demo-$(id -u)/known_frame.json"
 placeholder=0

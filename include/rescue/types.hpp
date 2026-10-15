@@ -24,6 +24,8 @@ struct SegDetection {
     cv::Mat mask; // 可选分割掩码
     cv::Point2f ground_point_px; // 地面接触点，像素
     cv::Point2f body_xy_m; // 米；x向右、y向前
+    cv::Point2f body_center_xy_m; // 框中心像素按物块半高平面投影到机体系；body_center_valid为假时不可用
+    bool body_center_valid = false;
     bool ground_contact_valid = false; // explicit measured contact; a box bottom is only an estimate
     bool ground_position_valid = false; // metric projection succeeded; not a path/delivery guarantee
     std::string ground_contact_reason; // empty when ground_contact_valid; otherwise why not
