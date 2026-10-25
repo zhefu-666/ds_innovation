@@ -45,9 +45,9 @@ calibration_runs/
 
 # Demo deployment artifacts and local backups
 /backups_sync/
-/tool/demo/backup-*/
-/tool/demo/logs/
-/tool/demo/view.lock
+/tools/demo/backup-*/
+/tools/demo/logs/
+/tools/demo/view.lock
 
 # Local pre-change archives (e.g. protocol-20261023)
 /backups/
