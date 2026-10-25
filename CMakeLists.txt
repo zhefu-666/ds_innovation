@@ -242,7 +242,8 @@ if(BUILD_TESTING)
     target_compile_options(rescue_recovery_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_recovery_stage_tests COMMAND rescue_recovery_stage_tests)
     add_executable(rescue_search_stage_tests tests/search_stage_tests.cpp
-        src/task/search_stage.cpp src/transport_rules.cpp src/zone_estimate.cpp)
+        src/task/search_stage.cpp src/task/sweep_ledger.cpp src/task/disperse_turn_stage.cpp
+        src/task/disperse_swing_stage.cpp src/transport_rules.cpp src/zone_estimate.cpp)
     target_include_directories(rescue_search_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
     target_link_libraries(rescue_search_stage_tests PRIVATE ${OpenCV_LIBS})
     target_compile_options(rescue_search_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
