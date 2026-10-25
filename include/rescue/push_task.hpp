@@ -14,6 +14,7 @@
 #include "rescue/task/disperse_rush_stage.hpp"
 #include "rescue/task/recovery_stage.hpp"
 #include "rescue/task/search_stage.hpp"
+#include "rescue/task/sweep_stage.hpp"
 #include <map>
 #include <string>
 
@@ -650,7 +651,6 @@ class PushTask {
     int clear_attempts_ = 0;
     int near_failures_ = 0;
     uint64_t clear_commanded_us_ = 0, clear_planned_us_ = 0;
-    float clear_heading_rad_ = 0;
     int search_cue_id_ = -1, capture_target_id_ = -1;
     int target_id_ = -1, confirmations_ = 0, misses_ = 0, step_ = 0;
     float last_range_ = 0; // last tracked range in MID_APPROACH, inf when none
@@ -679,12 +679,8 @@ class PushTask {
     // PILE state
     int pile_phase_ = 0, pile_runs_ = 0, pile_seen_ = 0;
     uint64_t pile_phase_us_ = 0, pile_cool_until_us_ = 0;
-    float pile_yaw0_ = 0, pile_travel0_ = 0, pile_cut_yaw_ = 0, pile_cut_m_ = 0, pile_push0_ = -1.f;
-    int pile_chain_n_ = 0, pile_chain_look_ = 0;
-    float pile_chain_in_m_ = 0, pile_chain_yaw_pre_ = 0,
-          pile_chain_yaw_mid_ =
-              0; // PILE chain: rounds spent / looks spent this round / metres driven in this round
-                 // / heading before the turn / middle of the turn
+    float pile_yaw0_ = 0, pile_push0_ = -1.f;
+    int pile_chain_n_ = 0;
     int approach_last_id_ = -1;
     float approach_last_heading_ = 0.f, approach_last_distance_ = 0.f,
           approach_last_world_yaw_ = 0.f;
@@ -746,7 +742,7 @@ class PushTask {
     int scatter_count_ = 0, scatter_seen_ = 0;
     bool scatter_commit_ = false;
     uint64_t scatter_cool_until_us_ = 0, scatter_idle_since_us_ = 0;
-    float scatter_yaw_ = 0, scatter_range_ = 0, scatter_back_ = 0, scan_turn_acc_ = 0;
+    float scatter_yaw_ = 0, scatter_range_ = 0, scan_turn_acc_ = 0;
     float scan_mid_limit_ = 0;
     bool post_disperse_mid_ = false;
     bool disperse_small_ = false;
@@ -815,6 +811,7 @@ class PushTask {
     DisperseSwingStage disperse_swing_;
     RecoveryStage recovery_;
     SearchStage search_;
+    SweepStage sweep_;
     // 假设模式：YOLO-pose粗略区域位姿锚定在里程系，视野丢失后用IMU航向+缩放后的指令位移继续推算。
     AnchoredZone zone_;
     float odo_ = 0, ratio_est_ = 0, ratio_odo_ = 0, last_imu_yaw_ = 0;

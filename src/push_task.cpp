@@ -1775,671 +1775,160 @@ PushOutput PushTask::update(const PushObservation& in) {
             search_.update(state_, t_, in, context, services);
             break;
         }
-        case PushState::SCATTER: {
-            commandFrame(0, now);
-            approach_forward_ = 0;
-            const auto scatterEnd = [&](const char* why) {
-                burst_fast_ = burst_swing_ = burst_swing_armed_ = false;
-                scatter_cool_until_us_ = now + t_.blind_scatter_cooldown_us;
-                const bool swung = sweep_ledger_.close(t_, now);
-                if (swung || std::strcmp(why, "blind_scatter_target_seen") != 0)
-                    sweep_ledger_.setGapUntil(
-                        now + t_.sweep_gap_us); // a target seen before any swing leaves the
-                                                // dense-pile check open for APPROACH
-                scan_mid_limit_ =
-                    scan_turn_acc_ +
-                    2.f *
-                        float(CV_PI); // first full turn after the scatter looks at the close range
-                rejected_.clear();
-                rejected_bearings_.clear(); // the group has moved: earlier vetoes no longer apply
-                if (swung && std::strcmp(why, "blind_scatter_done") == 0 &&
-                    beginPileFromSweep("pile_chain_scatter"))
-                    return;
-                enter(PushState::SCAN, now, why);
+        case PushState::SCATTER:
+        case PushState::PILE:
+        case PushState::CUE_APPROACH:
+        case PushState::CUE_PREPARE:
+        case PushState::CLEAR_PILE:
+        case PushState::CLEAR_PAUSE: {
+            SweepContext context;
+            context.now_us = now;
+            context.elapsed_us = elapsed;
+            context.clutter_fresh = clutter_fresh;
+            context.scatter_ok = scatter_ok;
+            context.first_ordinary = first_;
+            context.pitch_cmd = pitch_cmd_;
+            context.sweep_over = sweepOver;
+            context.sweep_operation_timeout = sweepBudget.operation_timeout;
+            context.target_forward_m = target_forward_m;
+            context.motion_vx = &motion.vx_mps;
+            context.motion_wz = &motion.wz_rps;
+            context.approach_forward = &approach_forward_;
+            context.burst_fast = &burst_fast_;
+            context.burst_swing = &burst_swing_;
+            context.burst_swing_armed = &burst_swing_armed_;
+            context.capture_target_id = &capture_target_id_;
+            context.clear_attempts = &clear_attempts_;
+            context.clear_commanded_us = &clear_commanded_us_;
+            context.confirmations = &confirmations_;
+            context.cue_mode = &cue_mode_;
+            context.disperse_cool_until_us = &disperse_cool_until_us_;
+            context.disperse_rush_m = &disperse_rush_m_;
+            context.disperse_small = &disperse_small_;
+            context.label = &label_;
+            context.misses = &misses_;
+            context.pile_chain_n = &pile_chain_n_;
+            context.pile_cool_until_us = &pile_cool_until_us_;
+            context.pile_phase = &pile_phase_;
+            context.pile_phase_us = &pile_phase_us_;
+            context.pile_push0 = &pile_push0_;
+            context.pile_runs = &pile_runs_;
+            context.pile_seen = &pile_seen_;
+            context.pile_yaw0 = &pile_yaw0_;
+            context.reason = &reason_;
+            context.scan_mid_limit = &scan_mid_limit_;
+            context.scan_turn_acc = &scan_turn_acc_;
+            context.scatter_approach_m = &scatter_approach_m_;
+            context.scatter_approach_n = &scatter_approach_n_;
+            context.scatter_commit = &scatter_commit_;
+            context.scatter_cool_until_us = &scatter_cool_until_us_;
+            context.scatter_far = &scatter_far_;
+            context.scatter_idle_since_us = &scatter_idle_since_us_;
+            context.scatter_range = &scatter_range_;
+            context.scatter_seen = &scatter_seen_;
+            context.scatter_yaw = &scatter_yaw_;
+            context.search_cue_id = &search_cue_id_;
+            context.sweep_phase = &sweep_phase_;
+            context.sweep_pitch = &sweep_pitch_;
+            context.sweep_start_us = &sweep_start_us_;
+            context.sweep_t0_us = &sweep_t0_us_;
+            context.sweep_travel0 = &sweep_travel0_;
+            context.sweep_yaw0 = &sweep_yaw0_;
+            context.target_id = &target_id_;
+            context.track_close = &track_close_;
+            context.travel = &travel_;
+            context.sweep_ledger = &sweep_ledger_;
+            context.disperse_rush = &disperse_rush_;
+            context.disperse_turn = &disperse_turn_;
+            context.disperse_swing = &disperse_swing_;
+
+            SweepServices services;
+            services.command_frame = [&](uint8_t open, uint64_t at) {
+                commandFrame(open, at);
             };
-            const auto approachEnd =
-                [&](const char* why) { // no sweep happened: keep the scatter budget, retrigger from
-                                       // the short range at once
-                    scatter_far_ = false;
-                    ++scatter_approach_n_;
-                    burst_fast_ = false;
-                    sweep_ledger_.pause(now);
-                    enter(PushState::SCAN, now, why);
-                    scatter_idle_since_us_ =
-                        now > t_.blind_scatter_wait_us ? now - t_.blind_scatter_wait_us : 1;
+            services.drive = [&](float vx, float wz) {
+                drive(vx, wz);
+            };
+            services.enter = [&](PushState next, uint64_t at, const char* why) {
+                enter(next, at, why);
+            };
+            services.fail_stop = [&](const char* why) {
+                failStop(why);
+            };
+            services.scan_after_clear = [&](const char* why) {
+                scanAfterClear(why);
+            };
+            services.blacklist = [&](uint64_t at) {
+                blacklist(at);
+            };
+            services.clear_trip = [&] {
+                clearTrip();
+            };
+            services.candidate = [&](const PushObservation& o, uint64_t at) {
+                return candidate(o, at);
+            };
+            services.weak_candidate = [&](const PushObservation& o) {
+                return weakCandidate(o);
+            };
+            services.cue_candidate = [&] {
+                return cueCandidate();
+            };
+            services.target_body = [&] {
+                return targetBody();
+            };
+            services.find_best =
+                [&](const std::vector<cv::Point2f>& pts, float max_y, float radius) {
+                    findBest(pts, max_y, radius);
+                    return SweepBest{best_n, best_d};
                 };
-            const auto sightedTarget =
-                [&] { // driving to a far group: a lock does not stop the drive until it is inside
-                      // the short window (the group sweep itself checks first); a committed sweep
-                      // ignores locks
-                    return !scatter_commit_ && candidate(in, now) && !weakCandidate(in) &&
-                           !(scatter_far_ && in.distance_m > t_.blind_scatter_max_y_m);
+            services.eval_group =
+                [&](const std::vector<cv::Point2f>& pts, int need, int far_need, float radius) {
+                    return evalGroup(pts, need, far_need, radius);
                 };
-            if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
-                scatter_far_ = false;
-                scatterEnd("blind_scatter_no_heading");
-                break;
-            }
-            if (elapsed > t_.blind_scatter_budget_us) {
-                scatter_far_ = false;
-                scatterEnd("blind_scatter_timeout");
-                break;
-            }
-            if (sweepOver) {
-                scatter_far_ = false;
-                scatterEnd(sweepBudget.operation_timeout ? "sweep_op_timeout"
-                                                         : "sweep_budget_exhausted");
-                break;
-            }
-            if (t_.sweep_view_handoff && midPitch() &&
-                sweep_phase_ != 6) { // carry's camera ladder toward the group: down only, the base
-                                     // waits while it tilts
-                const float left = scatter_range_ - travel_ / motionRatio();
-                if (t_.sweep_view_cap_mid) {
-                    if (sweep_phase_ < 4 && (!scatter_far_ || left <= t_.track_near_m) &&
-                        sweep_pitch_ < t_.intermediate_pitch_cdeg)
-                        sweep_pitch_ = t_.intermediate_pitch_cdeg;
-                } else if (left <= t_.intermediate_to_near_m)
-                    sweep_pitch_ = t_.track_pitch_cdeg;
-                else if (left <= t_.track_near_m && sweep_pitch_ == t_.far_pitch_cdeg)
-                    sweep_pitch_ = t_.intermediate_pitch_cdeg;
-            }
-            if (sweep_phase_ == 6) { // back out the distance driven in
-                if (sightedTarget()) {
-                    scatterEnd("blind_scatter_target_seen");
-                    break;
-                }
-                if (travel_ - sweep_travel0_ >= scatter_back_ ||
-                    now - sweep_start_us_ > t_.blind_scatter_back_budget_us) {
-                    scatterEnd("blind_scatter_done");
-                    break;
-                }
-                if (!in.retreat_safe) {
-                    scatterEnd("blind_scatter_back_unsafe");
-                    break;
-                } // the rear is blind: no reversing without the adapter's say-so, the sweep ends
-                  // where it is
-                reason_ = "blind_scatter_back";
-                drive(-t_.blind_scatter_back_speed, 0);
-                if (motion.vx_mps < 0)
-                    motion.vx_mps = -t_.blind_scatter_back_speed;
-                break;
-            }
-            if (t_.sweep_observation_guard && !clutter_fresh && !candidate(in, now) &&
-                !(t_.sweep_far_judge && sweep_phase_ >= 4) &&
-                !(disperse_turn_.active() && sweep_phase_ == 5)) {
-                scatterEnd("blind_scatter_observation_lost");
-                break;
-            }
-            if (sweep_phase_ == 0) {
-                if (sightedTarget()) {
-                    scatter_far_ = false;
-                    scatterEnd("blind_scatter_target_seen");
-                    break;
-                }
-                if (elapsed > t_.blind_scatter_align_budget_us) {
-                    scatter_far_ = false;
-                    scatterEnd("blind_scatter_align_timeout");
-                    break;
-                }
-                const float err =
-                    wrapAngle(scatter_yaw_ - in.heading_rad); // body yaw grows on left turns
-                if (std::abs(err) > t_.blind_scatter_align_tol_rad) {
-                    reason_ = "blind_scatter_align";
-                    drive(0, err);
-                    if (motion.wz_rps != 0)
-                        motion.wz_rps =
-                            std::copysign(std::abs(err) > .3f ? t_.blind_scatter_align_wz
-                                                              : .5f * t_.blind_scatter_align_wz,
-                                          err);
-                    break;
-                }
-                if (scatter_far_) {
-                    sweep_phase_ = 7;
-                    sweep_start_us_ = now;
-                    sweep_travel0_ = travel_;
-                } else {
-                    disperse_rush_m_ = std::clamp(scatter_range_ - t_.sweep_frame_front_m +
-                                                      t_.blind_scatter_depth_m,
-                                                  0.f,
-                                                  t_.blind_scatter_max_m);
-                    sweep_phase_ = 4;
-                    sweep_start_us_ = sweep_t0_us_ = now;
-                    sweep_travel0_ = travel_;
-                }
-            }
-            if (sweep_phase_ == 7) { // drive toward the far group at normal speed with IMU yaw hold
-                const bool ordinary_lock =
-                    t_.sweep_confirm_wait_us > 0 && sightedTarget() &&
-                    targetKind(in.label) == TargetKind::ORDINARY &&
-                    (!burst_swing_armed_ ||
-                     (t_.sweep_observation_guard &&
-                      !t_.first_burst_full_impact)); // first opening pile keeps its impact; a lone
-                                                     // target still exits through sightedTarget
-                                                     // below (SCAN, then APPROACH decides on the
-                                                     // pile)
-                if (scatter_ok && clutter_fresh &&
-                    !ordinary_lock) { // the group reached the short window: sweep it now, whatever
-                                      // single lock is in view
-                    std::vector<cv::Point2f> pts = in.clutter_body;
-                    if (candidate(in, now) && std::isfinite(in.distance_m)) {
-                        pts.emplace_back(targetBody());
-                        ord_extra.push_back(pts.back());
-                    }
-                    findBest(pts, t_.blind_scatter_max_y_m, t_.disperse_radius_m);
-                    if (best_n >= t_.blind_scatter_min) {
-                        if (++scatter_seen_ < t_.sweep_confirm) {
-                            reason_ = "blind_scatter_near_confirm";
-                            break;
-                        }
-                        scatter_seen_ = 0;
-                        beginScatter(false, true, "blind_scatter_near_group");
-                        break;
-                    }
-                }
-                scatter_seen_ = 0;
-                if (sightedTarget()) {
-                    scatter_far_ = false;
-                    scatterEnd("blind_scatter_target_seen");
-                    break;
-                }
-                if (travel_ - sweep_travel0_ >= scatter_approach_m_ * motionRatio()) {
-                    approachEnd("blind_scatter_approached");
-                    break;
-                }
-                if (now - sweep_start_us_ > t_.blind_scatter_approach_budget_us) {
-                    approachEnd("blind_scatter_approach_timeout");
-                    break;
-                }
-                const float err = wrapAngle(scatter_yaw_ - in.heading_rad);
-                const float hold_wz =
-                    std::abs(err) > t_.startup_hold_deadband_rad ? t_.startup_hold_gain * err : 0.f;
-                const bool fast = burst_fast_ && (t_.first_burst_full_impact ||
-                                                  scatter_approach_m_ - (travel_ - sweep_travel0_) /
-                                                                            motionRatio() >
-                                                      t_.first_burst_slow_m);
-                reason_ = fast ? "first_burst_approach" : "blind_scatter_approach";
-                drive(fast ? t_.first_burst_speed : t_.approach_speed, hold_wz);
-                if (fast && motion.vx_mps > 0)
-                    motion.vx_mps = t_.first_burst_speed; // drive() caps at max_speed; the chassis
-                                                          // packs up to 1.0 m/s
-                break;
-            }
-            if (disperseStep()) {
-                if (t_.blind_scatter_return && travel_ > .05f * motionRatio()) {
-                    scatter_back_ = travel_ * t_.blind_scatter_back_frac;
-                    sweep_phase_ = 6;
-                    sweep_start_us_ = now;
-                    sweep_travel0_ = travel_;
-                } else
-                    scatterEnd("blind_scatter_done");
-            }
-            break;
-        }
-        case PushState::PILE: {
-            commandFrame(0, now);
-            approach_forward_ = 0;
-            const auto pileEnd = [&](const char* why) {
-                const uint64_t until = now + t_.pile_cool_us;
-                pile_cool_until_us_ = until;
-                scatter_cool_until_us_ = std::max(scatter_cool_until_us_, until);
-                disperse_cool_until_us_ = std::max(disperse_cool_until_us_, until);
-                sweep_ledger_.extendGapUntil(until);
-                target_id_ = -1;
-                confirmations_ = 0;
-                cue_mode_ = false;
-                sweep_phase_ = 0;
-                disperse_small_ = false;
+            services.add_ordinary_extra = [&](const cv::Point2f& pt) {
+                ord_extra.push_back(pt);
+            };
+            services.clear_rejected = [&] {
                 rejected_.clear();
+            };
+            services.clear_rejected_bearings = [&] {
                 rejected_bearings_.clear();
-                scan_mid_limit_ = scan_turn_acc_ + 2.f * float(CV_PI);
-                std::cout << "[PILE] end why=" << why << " runs=" << pile_runs_ << "\n";
-                enter(PushState::SCAN, now, why);
             };
-            const auto setPhase = [&](int ph) {
-                pile_phase_ = ph;
-                pile_phase_us_ = now;
-                pile_seen_ = 0;
-                pile_travel0_ = travel_;
-                pile_push0_ = -1.f;
+            services.begin_scatter = [&](bool far, bool commit, const char* why) {
+                beginScatter(far, commit, why);
             };
-            if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
-                pileEnd("pile_no_heading");
-                break;
-            }
-            if (elapsed > t_.pile_budget_us) {
-                pileEnd("pile_timeout");
-                break;
-            }
-            const float yaw = in.heading_rad;
-            struct Blk {
-                cv::Point2f p;
-                bool ordinary = false;
+            services.sweep_frame_ready = [&] {
+                return sweepFrameReady();
             };
-            // Visible blocks in body coordinates; the locked target can be missing from the clutter
-            // list.
-            const auto pileBlocks = [&] {
-                std::vector<Blk> v;
-                if (clutter_fresh)
-                    for (const auto& u : in.clutter_body) {
-                        if (!std::isfinite(u.x) || !std::isfinite(u.y))
-                            continue;
-                        Blk b;
-                        b.p = u;
-                        for (const auto& o : in.clutter_ordinary)
-                            if (std::abs(o.x - u.x) < 1e-4f && std::abs(o.y - u.y) < 1e-4f) {
-                                b.ordinary = true;
-                                break;
-                            }
-                        v.push_back(b);
-                    }
-                if (in.target_valid && in.geometry_valid && !in.target_in_zone &&
-                    std::isfinite(in.distance_m) && std::isfinite(in.heading_error)) {
-                    const cv::Point2f tp = targetBody();
-                    const bool tord = targetKind(in.label) == TargetKind::ORDINARY;
-                    bool dup = false;
-                    for (const auto& u : v)
-                        if (u.ordinary == tord && cv::norm(u.p - tp) < .03) {
-                            dup = true;
-                            break;
-                        } // a touching block of another type is a different block
-                    if (!dup) {
-                        Blk b;
-                        b.p = tp;
-                        b.ordinary = tord;
-                        v.push_back(b);
-                    }
-                }
-                return v;
+            services.disperse_step = [&] {
+                return disperseStep();
             };
-            // The cluster straight ahead: the block nearest the heading and everything within
-            // pile_cluster_radius_m of it.
-            const auto pileCluster = [&] {
-                std::vector<Blk> c;
-                const auto v = pileBlocks();
-                int seed = -1;
-                float bb = 1e9f;
-                for (size_t i = 0; i < v.size(); ++i) {
-                    if (v[i].p.y < .08f || v[i].p.y > 1.2f ||
-                        std::abs(v[i].p.x) > t_.pile_cluster_half_x_m)
-                        continue;
-                    const float b = std::abs(std::atan2(-v[i].p.x, v[i].p.y));
-                    if (b < bb) {
-                        bb = b;
-                        seed = int(i);
-                    }
-                }
-                if (seed < 0)
-                    return c;
-                for (const auto& u : v)
-                    if (std::abs(u.p.x) <= t_.pile_cluster_half_x_m &&
-                        cv::norm(u.p - v[seed].p) <= t_.pile_cluster_radius_m)
-                        c.push_back(u);
-                return c;
+            services.begin_pile_from_sweep = [&](const char* why) {
+                return beginPileFromSweep(why);
             };
-            const auto faceYaw =
-                [&](float target_yaw,
-                    float tol,
-                    const char* why) { // in-place turn to a world yaw; true when aligned
-                    const float err = wrapAngle(target_yaw - yaw);
-                    if (std::abs(err) <= tol)
-                        return true;
-                    reason_ = why;
-                    const float wz = std::copysign(
-                        std::abs(err) > .5f ? t_.pile_turn_wz : .5f * t_.pile_turn_wz, err);
-                    drive(0, wz);
-                    if (motion.wz_rps != 0)
-                        motion.wz_rps = wz;
-                    return false;
-                };
-            const auto backTo =
-                [&](float metres, uint64_t budget) { // reverse a measured distance; true when done
-                    if (!in.retreat_safe) {
-                        reason_ = "pile_back_unsafe";
-                        return true;
-                    }
-                    if (travel_ - pile_travel0_ >= metres * motionRatio() ||
-                        now - pile_phase_us_ > budget)
-                        return true;
-                    drive(-t_.blind_scatter_back_speed, 0);
-                    if (motion.vx_mps < 0)
-                        motion.vx_mps = -t_.blind_scatter_back_speed;
-                    return false;
-                };
-            switch (pile_phase_) {
-                case 0: { // frame open (the rest of the flow carries it open), stand still for a
-                          // moment
-                    if (!sweepFrameReady())
-                        break;
-                    if (now - pile_phase_us_ < 400000) {
-                        reason_ = "pile_settle";
-                        break;
-                    }
-                    std::cout << "[PILE] start yaw0=" << pile_yaw0_
-                              << " corridor=" << in.corridor.total()
-                              << " distance=" << in.distance_m << "\n";
-                    setPhase(1);
-                    break;
-                }
-                case 1: { // face the pile
-                    if (now - pile_phase_us_ > t_.pile_advance_budget_us) {
-                        pileEnd("pile_face_pile_timeout");
-                        break;
-                    }
-                    if (faceYaw(pile_yaw0_, .6f * t_.pile_align_tol_rad, "pile_face_pile"))
-                        setPhase(2);
-                    break;
-                }
-                case 2: { // straight into the pile with the frame open: pile_advance_m at
-                          // pile_advance_speed
-                    if ((travel_ - pile_travel0_) >= t_.pile_advance_m * motionRatio() ||
-                        now - pile_phase_us_ > t_.pile_advance_budget_us) {
-                        setPhase(3);
-                        break;
-                    }
-                    const float err = wrapAngle(pile_yaw0_ - yaw);
-                    reason_ = "pile_advance";
-                    drive(t_.pile_advance_speed,
-                          std::abs(err) > .04f ? t_.heading_gain * err : 0.f);
-                    break;
-                }
-                case 3: { // short back-off so the camera sees the remaining cluster
-                    if (backTo(t_.pile_view_back_m, t_.pile_back_budget_us)) {
-                        setPhase(4);
-                        break;
-                    }
-                    reason_ = "pile_view_back";
-                    break;
-                }
-                case 4: { // measure the cluster, turn by one block's angular size to the better
-                          // side and cut in
-                    if (now - pile_phase_us_ < t_.pile_measure_us) {
-                        reason_ = "pile_measure";
-                        break;
-                    }
-                    const auto c = pileCluster();
-                    if (c.size() < 2) {
-                        if (++pile_seen_ < 8) {
-                            reason_ = "pile_measure_wait";
-                            break;
-                        }
-                        pileEnd("pile_cluster_clear");
-                        break;
-                    }
-                    float cx = 0, cy = 0, ymin = 1e9f;
-                    for (const auto& b : c) {
-                        cx += b.p.x / float(c.size());
-                        cy += b.p.y / float(c.size());
-                        ymin = std::min(ymin, b.p.y);
-                    }
-                    const float range = std::max(.10f, float(std::hypot(cx, cy)));
-                    const float theta =
-                        2.f * std::atan(t_.pile_block_half_m /
-                                        range); // one block as the camera sees it at this range
-                    struct Eval {
-                        int ord_in = 0, other_in = 0, ord_shed = 0, other_shed = 0;
-                        float along_min = 1e9f;
-                        float need = 0, cost = 0;
-                    };
-                    const auto eval = [&](float beta) { // frame edge line through the origin at
-                                                        // body bearing beta (left positive)
-                        Eval e;
-                        const float un = -std::sin(beta), uy = std::cos(beta), nx = std::cos(beta),
-                                    ny = std::sin(beta);
-                        for (const auto& b : c) {
-                            const float along = b.p.x * un + b.p.y * uy,
-                                        lat = b.p.x * nx + b.p.y * ny;
-                            const bool in_frame =
-                                along > 0 && std::abs(lat) <= t_.pile_frame_half_m;
-                            if (in_frame) {
-                                (b.ordinary ? e.ord_in : e.other_in)++;
-                                e.along_min = std::min(e.along_min, along);
-                            } else
-                                (b.ordinary ? e.ord_shed : e.other_shed)++;
-                        }
-                        // Keep the ordinary supplies in the frame, drop what the corridor rules
-                        // would reject, and no more than kMaxSuppliesPerTrip supplies enclosed.
-                        e.need = 100.f * float(e.other_in) +
-                                 20.f * float(std::max(0, e.ord_in - kMaxSuppliesPerTrip));
-                        e.cost = e.need + 3.f * float(e.ord_shed);
-                        return e;
-                    };
-                    const Eval e0 = eval(0.f), el = eval(theta), er = eval(-theta);
-                    std::cout << "[PILE] measure n=" << c.size() << " range=" << range
-                              << " block_deg=" << theta * 57.2958f << " straight(cost=" << e0.cost
-                              << " in=" << e0.ord_in << "+" << e0.other_in
-                              << ") left(cost=" << el.cost << " in=" << el.ord_in << "+"
-                              << el.other_in << " shed=" << el.ord_shed << "+" << el.other_shed
-                              << ") right(cost=" << er.cost << " in=" << er.ord_in << "+"
-                              << er.other_in << " shed=" << er.ord_shed << "+" << er.other_shed
-                              << ")\n";
-                    // Same-type first: a mixed frame is the dominant cost (other_in), so widen the
-                    // cut one block at a time until the enclosed set is clean; ties keep the
-                    // smaller turn, then the left side.
-                    bool left = el.cost <= er.cost;
-                    int best_k = 1;
-                    Eval best = left ? el : er;
-                    for (int k = 2; k <= t_.pile_cut_max_steps && best.other_in > 0; ++k) {
-                        const Eval wl = eval(k * theta), wr = eval(-k * theta);
-                        for (const bool wleft :
-                             {true,
-                              false}) { // a wide turn can sweep the frame clear of every block:
-                                        // only cuts that still enclose an ordinary supply count
-                            const Eval& wb = wleft ? wl : wr;
-                            if (wb.ord_in > 0 && wb.cost < best.cost) {
-                                best = wb;
-                                left = wleft;
-                                best_k = k;
-                            }
-                        }
-                    }
-                    if (e0.need <= 0) {
-                        pileEnd("pile_frame_already_ok");
-                        break;
-                    } // nothing the corridor rules would reject is enclosed any more
-                    if (!(best.need < e0.need)) {
-                        pileEnd("pile_cut_no_gain");
-                        break;
-                    }
-                    pile_cut_yaw_ = wrapAngle(yaw + (left ? 1.f : -1.f) * float(best_k) * theta);
-                    pile_cut_m_ = std::clamp(
-                        best.along_min - t_.sweep_frame_front_m + t_.pile_cut_depth_m, 0.f, .5f);
-                    std::cout << "[PILE] cut side=" << (left ? "left" : "right")
-                              << " steps=" << best_k << " turn_deg=" << best_k * theta * 57.2958f
-                              << " in=" << best.ord_in << "+" << best.other_in
-                              << " travel=" << pile_cut_m_ << "\n";
-                    setPhase(5);
-                    break;
-                }
-                case 5: { // turn, then drive the edge in
-                    if (now - pile_phase_us_ > t_.pile_cut_budget_us) {
-                        pile_cut_m_ =
-                            pile_push0_ >= 0 ? (travel_ - pile_push0_) / motionRatio() : 0.f;
-                        setPhase(6);
-                        break;
-                    }
-                    if (pile_push0_ >= 0) {
-                        if (travel_ - pile_push0_ >= pile_cut_m_ * motionRatio()) {
-                            setPhase(6);
-                            break;
-                        }
-                        const float err = wrapAngle(pile_cut_yaw_ - yaw);
-                        reason_ = "pile_cut_drive";
-                        drive(t_.pile_cut_speed,
-                              std::abs(err) > .04f ? t_.heading_gain * err : 0.f);
-                        break;
-                    }
-                    if (faceYaw(pile_cut_yaw_, .1f, "pile_cut_align"))
-                        pile_push0_ = travel_;
-                    break;
-                }
-                case 6: { // back out to the viewing position; SCAN picks the target from what is
-                          // left
-                    if (backTo(pile_cut_m_, t_.pile_back_budget_us)) {
-                        pileEnd("pile_split_done");
-                        break;
-                    }
-                    reason_ = "pile_cut_back";
-                    break;
-                }
-                case 7: { // chain: is the pushed-out cluster still more than one layer deep?
-                    if (!sweepFrameReady())
-                        break;
-                    if (now - pile_phase_us_ < t_.pile_measure_us) {
-                        reason_ = "pile_chain_measure";
-                        break;
-                    }
-                    const auto c = pileCluster();
-                    if (c.size() < 2) {
-                        if (++pile_seen_ < 8) {
-                            reason_ = "pile_chain_wait";
-                            break;
-                        }
-                        if (pile_chain_n_ > 0 &&
-                            pile_chain_look_ <
-                                2) { // the turn took the blocks out of view: look at the middle of
-                                     // the turn, then at the heading it rushed in on
-                            pile_yaw0_ =
-                                pile_chain_look_ == 0 ? pile_chain_yaw_mid_ : pile_chain_yaw_pre_;
-                            ++pile_chain_look_;
-                            std::cout << "[PILE] chain relook " << pile_chain_look_
-                                      << " yaw=" << pile_yaw0_ << "\n";
-                            setPhase(11);
-                            break;
-                        }
-                        pileEnd("pile_chain_cluster_clear");
-                        break;
-                    }
-                    pile_chain_look_ = 0;
-                    float cx = 0, cy = 0, ymin = 1e9f, ymax = -1e9f;
-                    for (const auto& b : c) {
-                        cx += b.p.x / float(c.size());
-                        cy += b.p.y / float(c.size());
-                        ymin = std::min(ymin, b.p.y);
-                        ymax = std::max(ymax, b.p.y);
-                    }
-                    const float depth = ymax - ymin;
-                    const bool one_layer = depth <= t_.pile_layer_depth_m;
-                    std::cout << "[PILE] chain n=" << c.size() << " depth=" << depth
-                              << " one_layer=" << one_layer << " round=" << pile_chain_n_ << "/"
-                              << t_.pile_chain_max << "\n";
-                    if (one_layer || pile_chain_n_ >= t_.pile_chain_max) {
-                        setPhase(4);
-                        break;
-                    }
-                    ++pile_chain_n_;
-                    pile_yaw0_ = wrapAngle(yaw + std::atan2(-cx, cy));
-                    pile_chain_yaw_pre_ = pile_yaw0_;
-                    setPhase(8);
-                    break;
-                }
-                case 8: { // chain: face the cluster, then arm the disperse step (rush in +
-                          // big-angle turn)
-                    if (now - pile_phase_us_ > t_.pile_advance_budget_us) {
-                        pileEnd("pile_chain_face_timeout");
-                        break;
-                    }
-                    if (!faceYaw(pile_yaw0_, .6f * t_.pile_align_tol_rad, "pile_chain_face"))
-                        break;
-                    sweep_phase_ = 4;
-                    sweep_start_us_ = now;
-                    sweep_travel0_ = travel_;
-                    disperse_rush_m_ = t_.pile_chain_rush_m;
-                    disperse_small_ = false;
-                    disperse_rush_.clearFlags();
-                    burst_swing_ = false;
-                    disperse_swing_.beginSwing();
-                    disperse_turn_.clearConfirmation();
-                    disperse_swing_.restartPass();
-                    setPhase(9);
-                    break;
-                }
-                case 9: { // chain: one disperse step
-                    if (disperseStep()) {
-                        sweep_phase_ = 0;
-                        sweep_ledger_.setSwung(false);
-                        pile_chain_yaw_mid_ =
-                            wrapAngle(sweep_yaw0_ + .5f * wrapAngle(yaw - sweep_yaw0_));
-                        pile_chain_look_ = 0;
-                        pile_chain_in_m_ = std::max(0.f, travel_ - pile_travel0_) / motionRatio();
-                        setPhase(10);
-                    }
-                    break;
-                }
-                case 10: { // chain: back off part of the way in so the camera sees what is left
-                    if (backTo(std::max(pile_chain_in_m_ * t_.pile_chain_back_frac,
-                                        t_.pile_chain_min_back_m),
-                               t_.pile_back_budget_us)) {
-                        pile_yaw0_ = pile_chain_yaw_mid_;
-                        setPhase(11);
-                        break;
-                    }
-                    reason_ = "pile_chain_back";
-                    break;
-                }
-                case 11: { // chain: turn to where the pushed-out blocks went, then measure
-                    if (now - pile_phase_us_ > t_.pile_advance_budget_us) {
-                        pileEnd("pile_chain_look_timeout");
-                        break;
-                    }
-                    if (faceYaw(pile_yaw0_, .6f * t_.pile_align_tol_rad, "pile_chain_look"))
-                        setPhase(7);
-                    break;
-                }
-                default:
-                    pileEnd("pile_bad_phase");
-                    break;
-            }
-            break;
-        }
-        case PushState::CUE_APPROACH: {
-            commandFrame(0, now);
-            // First-trip green preempts only a search cue, never an active cargo batch.
-            if (!first_ && label_ != "ordinary_supply" && in.label == "ordinary_supply" &&
-                cueCandidate()) {
-                scanAfterClear("green_priority_reselect");
-                break;
-            }
-            if (!cueCandidate() || in.target_id != search_cue_id_ || in.label != label_) {
-                if (lostTarget()) {
-                    if (t_.enable_lost_search)
-                        searchLost();
-                    else {
-                        blacklist(now);
-                        scanAfterClear("search_cue_lost");
-                    }
-                }
-                break;
-            }
-            misses_ = 0;
-            if (elapsed > t_.cue_approach_budget_us) {
-                blacklist(now);
-                scanAfterClear("cue_approach_timeout");
-                break;
-            }
-            if (in.distance_m <= t_.track_near_m && t_.track_pitch_cdeg != t_.far_pitch_cdeg) {
-                target_id_ = capture_target_id_ = -1;
-                cue_mode_ = false;
-                const bool mid = t_.intermediate_pitch_cdeg > t_.far_pitch_cdeg &&
-                                 t_.intermediate_pitch_cdeg < t_.track_pitch_cdeg;
-                enter(mid ? PushState::MID_REACQUIRE : PushState::NEAR_REACQUIRE,
-                      now,
-                      mid ? "mid_reacquire_pitch_wait" : "near_reacquire_pitch_wait");
-                break;
-            }
-            if (in.distance_m <= t_.track_near_m)
-                track_close_ = true;
-            if (desiredPitch() != pitch_cmd_) {
-                reason_ = "near_camera_pitch_wait";
-                break;
-            }
-            if (in.distance_m <= t_.rush_start_m) {
-                target_id_ = -1;
-                cue_mode_ = false;
-                enter(PushState::SELECT_CARGO, now, "select_cargo_at_near_range");
-                break;
-            }
-            steer(t_.cue_approach_speed, in.heading_error);
+            services.search_lost = [&] {
+                searchLost();
+            };
+            services.lost_target = [&] {
+                return lostTarget();
+            };
+            services.steer = [&](float speed, float heading) {
+                steer(speed, heading);
+            };
+            services.desired_pitch = [&]() -> int16_t {
+                return desiredPitch();
+            };
+            services.tracking = [&](const PushObservation& o) {
+                return tracking(o);
+            };
+            services.mid_pitch = [&] {
+                return midPitch();
+            };
+            services.motion_ratio = [&] {
+                return motionRatio();
+            };
+
+            sweep_.update(state_, t_, in, context, services);
             break;
         }
         case PushState::MID_APPROACH: {
@@ -2666,62 +2155,6 @@ PushOutput PushTask::update(const PushObservation& in) {
             steer(t_.approach_speed, in.heading_error);
             break;
         }
-        case PushState::CUE_PREPARE: {
-            commandFrame(0, now);
-            if (!t_.enable_short_push || clear_attempts_ >= 2) {
-                failStop("clear_attempt_limit");
-                break;
-            }
-            if (!in.clear_push_safe) {
-                failStop("clear_path_or_boundary_unverified");
-                break;
-            }
-            if (!in.gripper_closed_observed || !in.heading_valid) {
-                if (elapsed > t_.gripper_timeout_us) {
-                    failStop("clear_closed_feedback_missing");
-                }
-                break;
-            }
-            if (++confirmations_ < t_.confirm_frames)
-                break;
-            clear_heading_rad_ = in.heading_rad;
-            clear_commanded_us_ = 0;
-            ++clear_attempts_;
-            enter(PushState::CLEAR_PILE, now, "closed_push_010");
-            break;
-        }
-        case PushState::CLEAR_PILE: {
-            commandFrame(0, now);
-            if (!t_.enable_short_push || !in.clear_push_safe || !in.gripper_closed_observed ||
-                !in.heading_valid ||
-                std::abs(wrapAngle(in.heading_rad - clear_heading_rad_)) > .10f) {
-                failStop("clear_evidence_lost");
-                break;
-            }
-            if (!tracking(in)) {
-                failStop("clear_target_unverified");
-                break;
-            }
-            if (target_forward_m <= t_.grasp_trigger_y_m) {
-                enter(PushState::CLEAR_PAUSE, now, "clear_target_distance_reached");
-                break;
-            }
-            // Time/integrated command only bounds an attempt; it never proves arrival.
-            if (elapsed >= t_.clear_wall_budget_us || travel_ >= t_.clear_max_commanded_m) {
-                failStop("clear_distance_not_reached");
-                break;
-            }
-            motion.vx_mps = std::min(t_.clear_speed, t_.max_speed);
-            motion.wz_rps = 0;
-            break;
-        }
-        case PushState::CLEAR_PAUSE:
-            commandFrame(0, now);
-            if (elapsed >= 500000) {
-                clearTrip();
-                enter(PushState::MID_REACQUIRE, now, "clear_reobserve_cargo");
-            }
-            break;
         case PushState::APPROACH:
             // Keep jaw state from MID_APPROACH; a camera change must not close on unseen cargo.
             if (sweep_phase_) {

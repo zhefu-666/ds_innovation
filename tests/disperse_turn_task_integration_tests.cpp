@@ -80,7 +80,7 @@ struct Rig {
         if (state == PushState::PILE) {
             task.pile_phase_ = 9;
             task.pile_phase_us_ = input.now_us;
-            task.pile_travel0_ = 0;
+            task.sweep_.pile_travel0_ = 0;
         }
         task.sweep_phase_ = 4;
         task.sweep_start_us_ = task.sweep_t0_us_ = input.now_us;
@@ -166,7 +166,7 @@ struct Rig {
                   << " frame=" << int(output.motion.gripper_offset) << " done=" << task.sweepDone()
                   << " spent=" << task.sweepSpentUs(input.now_us)
                   << " open=" << task.sweepChainOpen() << " pile=" << task.pile_phase_
-                  << " pile_mid=" << task.pile_chain_yaw_mid_ << '\n';
+                  << " pile_mid=" << task.sweep_.pile_chain_yaw_mid_ << '\n';
     }
 };
 
@@ -406,7 +406,7 @@ void pushAndParentLifecycle() {
         if (state == PushState::PILE) {
             assert(rig.output.state == PushState::PILE && rig.task.pile_phase_ == 10 &&
                    rig.task.sweep_phase_ == 0);
-            assert(std::abs(rig.task.pile_chain_yaw_mid_ - .9f) < .0001f);
+            assert(std::abs(rig.task.sweep_.pile_chain_yaw_mid_ - .9f) < .0001f);
         } else
             assert(rig.task.sweepDone() == 1 && !rig.task.sweepChainOpen());
         rig.report(state == PushState::SCATTER ? "scatter_push_completion_closes_parent_chain"
