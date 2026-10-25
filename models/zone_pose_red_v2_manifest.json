@@ -6,8 +6,8 @@
     "RK3588S"
   ],
   "source_onnx": {
-    "file": "zone_pose_red_v2.onnx",
-    "sha256": "8a2c253046598c406437bc69e0ae83c621d9e15070187bba0b7c676218f4df19",
+    "file": "zone_pose_new_20261013.onnx",
+    "sha256": "78cfa539042cf78e0713f2d7ed28348ac456f088d1fe71c59a1b4a0803d472ad",
     "opset": 17
   },
   "input": {
@@ -61,7 +61,7 @@
   "calibration_image_count": 0,
   "default_confidence": 0.25,
   "default_nms_iou": 0.45,
-  "generated_at": "2026-10-10T23:03:07+0800",
+  "generated_at": "2026-10-13T12:38:02+0800",
   "model_files": [
     "model_fp.rknn"
   ]

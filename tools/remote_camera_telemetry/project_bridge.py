@@ -94,7 +94,7 @@ class Source:
     def run(self):
         while not self.stop.is_set():
             self.poll()
-            self.stop.wait(0.05)
+            self.stop.wait(0.004)
 
     def snapshot(self):
         with self.lock:
@@ -134,7 +134,23 @@ DECISION_SCHEMA = schema({
 })
 MOTION_SCHEMA = schema({**fields('vx_mps wz_rps hardware_output_enabled'), **fields('valid', 'boolean')})
 CONFIG_SCHEMA = schema({**fields('camera_index requested_width requested_height requested_fps confidence nms input_size dry_run'),
-    **fields('team model imu_port', 'string'), **fields('imu_baud imu_enabled'), **fields('valid', 'boolean')})
+    **fields('team model imu_port', 'string'), **fields('imu_baud imu_enabled'), **fields('valid', 'boolean'),
+    'effective': schema({
+        **fields('schema_version'), **fields('resolution number_encoding', 'string'),
+        'policy': schema(fields('name version', 'string')),
+        'mode': schema({**fields('operation mcu_access task_scope', 'string'), **fields('static_check')}),
+        'startup': schema(fields('requested_advance_ms requested_speed_mps effective_advance_us effective_speed_mps '
+                                 'requested_scan_wz_rps effective_scan_wz_rps requested_turn_wz_rps effective_turn_wz_rps')),
+        'identity': schema({**fields('config_file working_directory executable audit_error rknn_library_lookup', 'string'),
+                            **fields('rknn_compiled telemetry_compiled'),
+                            'arguments': {'type': 'array', 'items': {'type': 'string'}},
+                            'resource_paths': {'type': 'object', 'additionalProperties': {'type': 'string'}}}),
+        **{name: {'type': 'object'} for name in
+           ('request', 'task', 'capture', 'ground_contact', 'match', 'motion_link', 'hardware', 'calibration')},
+        'assumptions': {'type': 'array', 'items': schema(fields('id scope replacement evidence status', 'string'))},
+        'field_sources': {'type': 'array', 'items': schema({**fields('field', 'string'),
+                           'history': {'type': 'array', 'items': {'type': 'string'}}})},
+    })})
 DETECTION_SCHEMA = schema({**fields('valid', 'boolean'), **fields('sequence source_width source_height'),
     'items': {'type': 'array', 'items': schema({**fields('track_id class_id confidence'),
         **fields('label model_label', 'string'), 'box': schema(fields('x y width height'))})}})
@@ -266,7 +282,7 @@ def handler(source):
                             self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(jpeg)).encode() + b'\r\n\r\n' + jpeg + b'\r\n')
                             self.wfile.flush()
                             previous = stamp
-                        source.stop.wait(1 / source.fps)
+                        source.stop.wait(0.004)
                 except (OSError, socket.timeout):
                     pass
                 return

@@ -28,7 +28,7 @@ def transaction(fd, parser, current_angle, current_id, target_angle, pitch, emit
     action_id = next_target(current_angle, current_id, target_angle)
     packet = serial.packet(0, 0, target_angle, action_id, pitch)
     emit(json.dumps({'event':'TX_PLAN', 'vx':0, 'wz':0, 'frame_angle':target_angle,
-                     'action_id':action_id, 'pitch_tx':pitch-40, 'pitch_rx_target':pitch,
+                     'action_id':action_id, 'pitch_tx':pitch-120, 'pitch_rx_target':pitch,
                      'temporary_semantics':'done_bit', 'raw':packet.hex(' ')}))
     start = time.monotonic()
     deadline = start + 2
@@ -97,7 +97,7 @@ def main():
     p.add_argument('--expected-id',type=int,required=True)
     p.add_argument('--expected-pitch-rx',type=int,required=True)
     p.add_argument('--target-angle',type=int,choices=[0,20])
-    p.add_argument('--pitch-rx',type=int,choices=range(0,81))
+    p.add_argument('--pitch-rx',type=int,choices=range(90,151))
     p.add_argument('--site-clear',action='store_true')
     p.add_argument('--wheels-disabled',action='store_true')
     p.add_argument('--assume-done-bit',action='store_true')
@@ -106,7 +106,7 @@ def main():
     p.add_argument('--wheel',choices=['forward','backward','left','right'])
     p.add_argument('--watchdog-tested',action='store_true',help='Operator has confirmed a measured watchdog upper bound <=200ms')
     a=p.parse_args()
-    if not 1 <= a.expected_id <= 255 or not 0 <= a.expected_pitch_rx <= 80:
+    if not 1 <= a.expected_id <= 255 or not 90 <= a.expected_pitch_rx <= 150:
         p.error('Require a known nonzero action ID and valid RX pitch')
     angle=a.known_angle if a.target_angle is None else a.target_angle
     pitch=a.expected_pitch_rx if a.pitch_rx is None else a.pitch_rx

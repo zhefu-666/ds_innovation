@@ -6,19 +6,22 @@
 namespace rescue {
 // One RKNN context loaded through dlopen. Not thread-safe: each model is owned by
 // exactly one thread. Input is a square NHWC uint8 RGB image (mean/std embedded
-// at conversion); the single output is returned as an owned float32 [1,C,N] tensor.
+// at conversion). Returns an owned float32 [1,C,N] tensor. Runtime converts
+// each output independently; boxes/scores and four pose branches are reassembled
+// in channel order, interleaving pose x,y,visibility for each keypoint.
 class RknnModel {
-public:
+  public:
     // core_mask: -1 leaves the runtime default; otherwise RKNN_NPU_CORE_* (0 auto, 1, 2, 4).
-    RknnModel(const std::string &library,const std::string &model,int core_mask);
+    RknnModel(const std::string& library, const std::string& model, int core_mask);
     ~RknnModel();
-    RknnModel(const RknnModel&)=delete;
-    RknnModel &operator=(const RknnModel&)=delete;
+    RknnModel(const RknnModel&) = delete;
+    RknnModel& operator=(const RknnModel&) = delete;
     int inputSize() const;
     int outputChannels() const;
     int outputAnchors() const;
-    cv::Mat run(const cv::Mat &rgb);
-private:
+    cv::Mat run(const cv::Mat& rgb);
+
+  private:
     struct Runtime;
     std::unique_ptr<Runtime> r_;
 };

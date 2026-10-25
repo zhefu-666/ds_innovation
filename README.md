@@ -2,7 +2,9 @@
 
 本文说明从 GitHub 下载 `ds_innovation` 后，如何在 LubanCat/RK3588S 这类 ARM64 板子上完成编译，并通过网页或 Foxglove 查看主程序的实时检测画面。
 
-当前版本的主程序是**感知预览模式**，底盘运动输出仍关闭。阶段 0/1 已加入 IMU→SensorState、只读实际 pitch 接收、帧时刻匹配的地面映射、关键点过滤、二维位姿拟合、ZoneEstimate 质量门控与 IPPE 交叉校验。关键点模型、投放规划和真实运动闭环仍待后续阶段。
+当前主程序支持感知预览、离线回放和显式 `--hardware` 运动输出；网页管理脚本默认启动 `--dry-run` 预览。硬件路径使用 IMU、MCU 反馈、比赛许可和 MotionLink 门控，是否具备实车验收证据需要按实际模型、标定和运行策略分别确认。
+
+当前架构见 [应用架构](docs/ARCHITECTURE.md)，新增 JSON 配置与最终参数导出见 [运行配置](docs/RUNTIME_CONFIGURATION.md)，本轮实施与验证边界见 [重构进度](docs/REFACTORING_PROGRESS.md)。旧命令仍使用原有参数覆盖顺序，命令行请求值不一定等于现场最终值。
 
 新增参数、六点标注规范、无硬件回放和真实标定要求见 [阶段 0/1 实现说明](STAGE01_IMPLEMENTATION.md)。
 
@@ -29,7 +31,7 @@ git pull --ff-only origin main
 ```bash
 sudo apt update
 sudo apt install -y \
-  build-essential cmake pkg-config libopencv-dev \
+  build-essential cmake pkg-config libopencv-dev nlohmann-json3-dev \
   v4l-utils python3 python3-venv
 ```
 
@@ -55,7 +57,7 @@ python -m pip install 'websockets>=10,<11'
 
 ## 3. 补齐 Git 忽略的运行资源
 
-为了避免把大文件和板卡二进制提交到 Git，`.gitignore` 排除了 `benchmark_results/`。完整运行仍需要下面两个文件：
+为了避免把大文件和板卡二进制提交到 Git，`.gitignore` 排除了 `benchmark_results/`。完整运行仍需要模型与板卡运行库：
 
 ```text
 benchmark_results/best_fp16.rknn
@@ -77,7 +79,9 @@ scp user@source-host:/path/librknnrt.so benchmark_results/
 ls -lh benchmark_results/best_fp16.rknn benchmark_results/librknnrt.so
 ```
 
-如果模型路径不同，运行时使用 `--model` 和 `--rknn-library` 指定。模型类别顺序必须与项目的七类模型契约一致。
+如果模型路径不同，运行时使用 `--model` 和 `--rknn-library` 指定。检测模型类别顺序必须与 `--classes` 一致；当前默认是 `blue,orange,green,black`，分别映射危险物、伤员、普通物资和核心物资。
+
+启用 RKNN 编译还需要与运行库匹配的厂商 SDK 头文件 `rknn_api.h`。可放在 `benchmark_results/`，或通过 CMake 的 `-DRESCUE_RKNN_INCLUDE_DIR=/path/to/sdk/include` 指定。默认启用 RKNN；头文件缺失时配置会明确失败，不会使用猜测的 ABI。
 
 ## 4. 检查相机
 
@@ -123,6 +127,19 @@ ctest --test-dir build-arm64-no-telemetry --output-on-failure
 ```
 
 `--telemetry` 只对启用了 `RESCUE_ENABLE_TELEMETRY=ON` 的二进制有效。
+
+只运行离线测试或 CPU ONNX 推理、不使用 RKNN 时：
+
+```bash
+cmake -S . -B build-offline -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=ON -DRESCUE_ENABLE_RKNN=OFF -DRESCUE_ENABLE_TELEMETRY=ON
+cmake --build build-offline -j4
+ctest --test-dir build-offline --output-on-failure
+./build-offline/rescue_upper_host --config config/runtime/push_replay.json
+./build-offline/rescue_upper_host --config config/runtime/preview.json --dump-config /tmp/effective_config.json
+```
+
+`--dump-config -` 将纯 JSON 写入标准输出，诊断写入标准错误；导出后直接退出，不初始化模型、相机或串口。`--check-config` 另行校验静态标定，不能证明现场条件已满足。关闭 RKNN 的二进制不能加载 `.rknn` 模型。
 
 ## 6. 启动主程序和查看服务
 
@@ -285,81 +302,24 @@ stat /dev/shm/rescue-telemetry.bin
 - `--dry-run` 不发送运动命令；显式 `--imu` 可打开 IMU 接收，显式 `--pitch-feedback` 可打开 MCU 只读反馈接收。
 - `--hardware` 打开 MCU 串口下发 `PushTask` 输出（必须同时带 `--imu`，不能与 `--dry-run`/`--pitch-feedback`/回放模式同用），25Hz重发，命令停更150ms改发零速，退出补发零速，详见 [速度协议](VELOCITY_PROTOCOL.md)“主程序下发”。
 - `hardware_output_enabled=0` 表示速度是算法计算值，不是底盘实测速度。
-- IMU 和安全区几何处理接口已接入；ToF、投放规划尚未接入；`--hardware` 已能下发，但 `safety_ok/path_safe/retreat_safe` 等证据尚无生产者（`ground_contact_valid` 已由 GeometryPipeline 生成，见 STAGE_HW2_GROUND_CONTACT.md，但需要验收过的 PITCH_MODEL 标定与真实 pitch 读回），实车上 `PushTask` 仍停在 WAIT_START。
+- IMU、地面几何、持有证据、受控场地和导航适配已有生产路径；实际可用性取决于当前模型、标定、传感器和许可。兼容现场策略含独立的放宽与假设，详见最终配置的 `assumptions`；本轮离线验证不能证明实车流程通过。ToF 没有接入主程序的实时测距来源。
 - 遥测只保留最新快照，不记录所有中间状态，也不自动生成 MCAP。
 - 查看服务断开不会阻塞主程序；主程序可以继续采集和推理。
 
 
 ---
 
-# 项目说明与开发参考
+# 开发参考
 
-# 智能救援地面推行上位机
+主入口与模块职责见 [当前架构](docs/ARCHITECTURE.md)，运行参数见 [运行配置](docs/RUNTIME_CONFIGURATION.md)。`src/controller.cpp` 是未加入当前构建的历史控制器；`config/rescue.yaml` 是历史参考，当前运行配置使用显式 `--config` JSON。
 
-当前 `rescue_upper_host` 入口已改为地面推行任务，移除了原先夹爪抓取、释放和定时前冲流程。主入口使用 `PushTask`，不调用旧的 `Controller` 夹爪控制代码。
-
-**本阶段完成任务规则和离线回放。尚未完成实车控制接入。** 相机模式仅预览；普通启动会在打开串口前拒绝执行。需要补齐标定、合法推行路径、安全区半区、传感器与底盘适配器，才能使真实观测驱动运动。C++ RKNN 后端已接入现有 `benchmark_results/best_fp16.rknn` 和 `librknnrt.so`，默认输入为 448×448；ONNX 路径保留，但现有 best.onnx 在板子 OpenCV 4.6 下仍存在兼容问题。
-
-## 已实现规则
-
-- 首次成功交付只允许一件普通物资；成功后普通/核心物资每批最多三件，伤员一件。
-- 危险目标和未知类别不能成为任务目标。候选需连续三个有效观测确认，锁定后不能换目标 ID 或类别。
-- 前进要求有效的目标、米制几何、路径安全与外部安全监督许可。目标丢失、非有限几何值或观测超过 200 ms 时停车。
-- 推行目的地必须是己方安全区，普通/核心进入物资半区，伤员进入伤员半区。
-- 不以超时或检测框中心进入区域判定交付。需要目标完全进入对应半区、不压围栏/隔板、静止、交付数量正确，连续八帧确认，随后确认机器人与目标脱离才累计交付。
-- 推入和后退有一秒上限，任务活动阶段有八秒上限。后退需单独提供后方安全许可。
-- 暂停/安全中断放弃当前批次但保留已确认交付；显式 reset 清空任务统计。
-
-状态流程：
-
-```text
-WAIT_START → SEARCH_TARGET → APPROACH_TARGET → PUSH_TARGET
-           → ALIGN_ZONE → VERIFY_DELIVERY → BACK_OUT → SEARCH_TARGET
-```
-
-## 构建和验证
-
-```bash
-cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build build-arm64 -j4
-ctest --test-dir build-arm64 --output-on-failure
-./build-arm64/rescue_upper_host --push-replay tests/fixtures/push_delivery.json
-```
-
-在本机也可使用上述构建方式，但本机二进制不能复制到 ARM64 板子上运行。回放不需要模型、摄像头或串口；最后应出现 `SEARCH_TARGET batch=0 delivered=1`。固定示例只验证规则，不代表实车投放成功。
-
-板子单图推理与相机预览：
-
-```bash
-./build-arm64/rescue_upper_host --detect-image benchmark_results/npu/sample.jpg --conf 0.25
-./build-arm64/rescue_upper_host --dry-run --camera 0
-```
-
-## 模块入口
-
-| 路径 | 用途 |
-|---|---|
-| `src/main.cpp` | 推行/像素几何回放与相机预览入口，不发送电机/舵机包 |
-| `src/geometry_pipeline.cpp` | 同帧传感器匹配、地面映射、关键点位姿与区域观测适配 |
-| `src/keypoint_filter.cpp`、`src/ground_pose_fitter.cpp` | 关键点过滤、固定尺度 SE(2) 拟合、两点先验及多帧重新捕获 |
-| `include/rescue/push_task.hpp`、`src/push_task.cpp` | 正式推行任务规则、观测和输出接口 |
-| `tests/push_task_tests.cpp` | 首单、批次、交付、目标丢失、超时和暂停等回归验证 |
-| `tests/fixtures/push_delivery.json` | 单件普通物资完整交付回放 |
-| `src/detector.cpp` | ONNX/RKNN 检测后端；RKNN 运行时动态加载 |
-| `src/tracker.cpp`、`camera_calibration.cpp`、`sensor_fusion.cpp` | 可复用跟踪、标定、安全组件；地面映射与相机读回pitch绑定，`SensorFusion`已在预览中否决`safety_ok` |
-| `src/uart_controller.cpp` | 15字节浮点运动包（夹爪+动作编号+相机pitch+CRC16）发送、8字节A6执行器反馈（含换行帧尾）；尚未接入任务运动主链路 |
-| `src/imu_adapter.cpp` | HI91快照→`SensorState`（车体坐标姿态），供`SensorFusion`倾斜停车与地面映射倾斜判断 |
-| `src/controller.cpp` | 历史抓取控制器，当前主入口不使用 |
-
-输入字段和接入边界参见 [USAGE_GUIDE.md](USAGE_GUIDE.md)。`config/rescue.yaml` 是配置参考，当前 CLI 不读取该文件。
-
-视觉模型契约、已实现能力及实车差距见 [VISION_INTEGRATION.md](VISION_INTEGRATION.md)。
-
-相机自动标定与人工测量步骤见 [标定工具说明](tools/camera_calibration/README.md)。
+重构前 README 中的早期状态名、模型尺寸、门控和入口说明已保存在 [历史阶段摘录](docs/history/README_BEFORE_APP_REFACTOR.md)，不作为当前部署指南。
 
 ## 2026-09-25 电控接口更新
 
-上位机发送 `56 + float32 vx(m/s) + float32 wz(rad/s) + uint8 gripper_open(0关闭/1张开) + uint8 gripper_action_id + int16 camera_pitch_cdeg(0.01°，0平视、正值向下) + CRC16/Modbus`，固定15字节、小端，CRC覆盖字节0..12；下位机反馈 `A6 + gripper_done + gripper_action_id + int16 camera_pitch_cdeg(读回) + CRC16/Modbus`，固定8字节（末尾0x0A换行），CRC覆盖字节0..4；上位机用 `gripperActionResult()` 按编号确认夹爪完成，用 `cameraPitchResult()` 按读回角确认相机到位。ToF字段保留注释，IMU状态独立。
+此节保留该日期的接口演进记录；当前主程序的硬件运行方式以本文前面的功能边界和应用架构为准。
+
+上位机发送 `56 + float32 vx(m/s) + float32 wz(rad/s) + int8 gripper_offset(+5开/-5关) + uint8 gripper_action_id + int16 camera_pitch_offset(-30..+30°) + int16 imu_yaw_cdeg(0.01°，-32768表示IMU不可用) + CRC16/Modbus`，固定17字节、小端，CRC覆盖字节0..14；下位机反馈 `A6 + gripper_done + gripper_action_id + int16 camera_pitch_cdeg(读回) + CRC16/Modbus`，固定8字节（末尾0x0A换行），CRC覆盖字节0..4；上位机用 `gripperActionResult()` 按编号确认夹爪完成，用 `cameraPitchResult()` 按读回角确认相机到位。ToF字段保留注释，IMU状态独立。
 
 调用 `UARTController::sendMotion(command)` 发送，使用 `latestActuatorFeedback()` 读取反馈。旧无参数 `execute()` 不再发送旧双电机/双舵机协议。详情见 [速度协议](VELOCITY_PROTOCOL.md) 和 [反馈协议](SENSOR_PROTOCOL.md)。本次接口改动不开放主程序实车模式，也不构成执行器动作闭环。
 
@@ -381,7 +341,7 @@ tools/gripper/gripper_close.sh    # 合上
 ```bash
 tools/camera_pitch/pitch_status.sh     # 查看动作编号/夹爪开关状态/pitch读回（不发包）
 tools/camera_pitch/pitch_set.sh 80     # 张开夹爪，相机向下20°；直接输入真实角度
-tools/camera_pitch/pitch_set.sh -5     # 相机向上5°；限位±40°
+tools/camera_pitch/pitch_set.sh -5     # 相机向上5°；新协议限位±30°
 tools/camera_pitch/pitch_repl.sh       # 交互模式：终端输入角度实时调整
 ```
 
@@ -428,7 +388,7 @@ EOF
 
 ### 终端发送速度脚本
 
-`tools/send_velocity.py` 默认使用当前 15 字节运动协议，预览模式不会打开串口：
+`tools/send_velocity.py` 默认使用当前 17 字节运动协议，预览模式不会打开串口：
 
 ```bash
 python3 tools/send_velocity.py --port /dev/ttyACM0 --vx 0.10 --wz 0
@@ -457,7 +417,7 @@ python3 tools/send_velocity.py --port /dev/ttyACM0 \
   --vx 0 --wz 0.5 --duration 0 --send
 ```
 
-当前协议中 `--gripper open` 为 `1`、`--gripper closed` 为 `0`；夹爪状态变化时使用新的 `--action-id`（1..255），`0` 表示不触发新动作。`--pitch` 使用真实度数，限幅 ±40°。发送模式会监听现有 A6 执行器反馈并显示夹爪状态、动作编号和 pitch；下位机不回传速度帧，因此终端不能显示实测 `vx/wz`，只能显示发送命令。使用前应停止占用 `/dev/ttyACM0` 的其他程序。
+当前协议中 `--gripper open` 为 `1`、`--gripper closed` 为 `0`；夹爪状态变化时使用新的 `--action-id`（1..255），`0` 表示不触发新动作。`--pitch` 使用内部偏移真实度数，限幅 `±30°`；A6 回传为绝对角 `90..150°`，`120°` 为零点。发送模式会监听现有 A6 执行器反馈并显示夹爪状态、动作编号和 pitch；下位机不回传速度帧，因此终端不能显示实测 `vx/wz`，只能显示发送命令。使用前应停止占用 `/dev/ttyACM0` 的其他程序。
 
 旧六字节协议可用 `--protocol legacy6` 显式选择；不要将两种协议混用。
 

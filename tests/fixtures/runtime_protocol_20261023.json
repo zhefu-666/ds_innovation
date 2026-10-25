@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "protocol": "a6-90-150-zero120",
+  "baseline_sha256": "c828d652eb7316c817ab6182ba13f8202496b59f9b66b06dd9abdbd108b4d79f",
+  "legacy_revision": "bd73a38cea79533807259be1f81be266958dd842",
+  "evidence": [
+    "docs/通信协议.md",
+    "docs/validation/CAT_VEHICLE_ACCEPTANCE_20261024.md",
+    "/tmp/cat-protocol/include/rescue/types.hpp",
+    "/tmp/cat-protocol/src/uart_controller.cpp"
+  ],
+  "replacements": [
+    {
+      "case": "push_delivery",
+      "field": "stdout",
+      "from": "camera_protocol_cmd_deg=40",
+      "to": "camera_protocol_cmd_deg=30",
+      "count": 55
+    }
+  ]
+}

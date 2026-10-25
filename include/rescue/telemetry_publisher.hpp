@@ -2,11 +2,13 @@
 #include "rescue/config.hpp"
 #include "rescue/hipnuc_imu.hpp"
 #include "rescue/push_task.hpp"
+#include <nlohmann/json_fwd.hpp>
 #include <opencv2/core.hpp>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -22,17 +24,25 @@ struct DecisionTelemetry {
 // A bounded, optional observation path. The worker never opens the camera or UART.
 // One atomic snapshot in tmpfs is consumed by the separate Foxglove bridge.
 class TelemetryPublisher {
-public:
-    explicit TelemetryPublisher(const Config& config);
+  public:
+    explicit TelemetryPublisher(const Config& config,
+                                const std::string& effective_config_json = {});
     ~TelemetryPublisher();
     TelemetryPublisher(const TelemetryPublisher&) = delete;
     TelemetryPublisher& operator=(const TelemetryPublisher&) = delete;
-    void submit(const cv::Mat& annotated, const std::vector<SegDetection>& detections,
-                const PushObservation& observation, const PushOutput& output,
-                uint64_t epoch_ns, uint64_t sequence, double loop_fps,
-                double inference_ms, double capture_ms, const ImuSnapshot& imu = {},
+    void submit(const cv::Mat& annotated,
+                const std::vector<SegDetection>& detections,
+                const PushObservation& observation,
+                const PushOutput& output,
+                uint64_t epoch_ns,
+                uint64_t sequence,
+                double loop_fps,
+                double inference_ms,
+                double capture_ms,
+                const ImuSnapshot& imu = {},
                 const DecisionTelemetry& decision = {}) noexcept;
-private:
+
+  private:
     struct Snapshot {
         cv::Mat frame;
         std::vector<SegDetection> detections;
@@ -46,6 +56,7 @@ private:
     void run() noexcept;
     void writeSnapshot(const Snapshot& snapshot);
     Config config_;
+    std::unique_ptr<nlohmann::json> effective_config_;
     std::mutex mutex_;
     std::condition_variable ready_;
     Snapshot pending_;
@@ -55,4 +66,4 @@ private:
     int lock_fd_ = -1;
     std::thread worker_;
 };
-}
+} // namespace rescue

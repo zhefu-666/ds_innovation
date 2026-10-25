@@ -12,8 +12,13 @@
 
 namespace rescue {
 
-enum class FrameAction { Open, Close };
-constexpr int16_t frameAngle(FrameAction a) { return a == FrameAction::Open ? 0 : 20; }
+enum class FrameAction {
+    Open,
+    Close
+};
+constexpr int16_t frameAngle(FrameAction a) {
+    return a == FrameAction::Open ? 0 : 20;
+}
 
 struct SegDetection {
     int track_id = -1;
@@ -21,19 +26,27 @@ struct SegDetection {
     std::string model_label;
     float confidence = 0.0f;
     cv::Rect box;
-    cv::Mat mask; // 可选分割掩码
+    cv::Mat mask;                // 可选分割掩码
     cv::Point2f ground_point_px; // 地面接触点，像素
-    cv::Point2f body_xy_m; // 米；x向右、y向前
-    cv::Point2f body_center_xy_m; // 框中心像素按物块半高平面投影到机体系；body_center_valid为假时不可用
+    cv::Point2f body_xy_m;       // 米；x向右、y向前
+    cv::Point2f
+        body_center_xy_m; // 框中心像素按物块半高平面投影到机体系；body_center_valid为假时不可用
     bool body_center_valid = false;
-    bool ground_contact_valid = false; // explicit measured contact; a box bottom is only an estimate
-    bool ground_position_valid = false; // metric projection succeeded; not a path/delivery guarantee
+    bool ground_contact_valid =
+        false; // explicit measured contact; a box bottom is only an estimate
+    bool ground_position_valid =
+        false;                         // metric projection succeeded; not a path/delivery guarantee
     std::string ground_contact_reason; // empty when ground_contact_valid; otherwise why not
-    bool injured_upright_rejected = false; // injured_person fits the on-end pose clearly better than the lying pose: never a transport target
-    float pose_err_lying = -1.f, pose_err_upright = -1.f; // log-size fit error per resting pose; -1 when not evaluated
-    float silhouette_hw = -1.f; // injured_person only: height/width of the orange blob inside the box; -1 when unavailable
-    int pose_vote_n = 0; float pose_diff_med = 0.f; // frames voting on the injured pose and their median (lying err - upright err); upright when > margin
-    uint64_t frame_id = 0; // image sequence, not a coordinate-frame name
+    bool injured_upright_rejected = false; // injured_person fits the on-end pose clearly better
+                                           // than the lying pose: never a transport target
+    float pose_err_lying = -1.f,
+          pose_err_upright = -1.f; // log-size fit error per resting pose; -1 when not evaluated
+    float silhouette_hw = -1.f; // injured_person only: height/width of the orange blob inside the
+                                // box; -1 when unavailable
+    int pose_vote_n = 0;
+    float pose_diff_med = 0.f; // frames voting on the injured pose and their median (lying err -
+                               // upright err); upright when > margin
+    uint64_t frame_id = 0;     // image sequence, not a coordinate-frame name
     int class_id = -1;
     uint64_t timestamp_us = 0; // 上位机单调时钟，微秒
 
@@ -47,19 +60,38 @@ using Detection = SegDetection;
 #error "Packed UART packets require a little-endian target"
 #endif
 // 线上包：小端、1字节对齐。
+// 车体航向线上编码：0.01°，-18000..18000；-32768(00 80)表示IMU不可用，收端不得按角度解释。
+constexpr int16_t kImuYawInvalid = std::numeric_limits<int16_t>::min();
+constexpr int16_t kImuYawLimitCdeg = 18000;
+// 按航向归一化到(-180°,180°]再转0.01°；非有限值输出kImuYawInvalid。
+inline int16_t imuYawToWire(float yaw_rad) {
+    if (!std::isfinite(yaw_rad))
+        return kImuYawInvalid;
+    // yaw是相对航向，可能因积分或安装变换超出±180°，先归一化再编码。
+    constexpr float kPi = 3.14159265358979323846f;
+    float deg = std::fmod(yaw_rad * (180.0f / kPi), 360.0f);
+    if (deg <= -180.0f)
+        deg += 360.0f;
+    else if (deg > 180.0f)
+        deg -= 360.0f;
+    return static_cast<int16_t>(
+        std::clamp<long>(std::lround(deg * 100.0f), -kImuYawLimitCdeg, kImuYawLimitCdeg));
+}
 #pragma pack(push, 1)
 
-// 上位机 → 下位机：15字节，小端IEEE754 float32；CRC16/Modbus覆盖字节0..12。
+// 上位机 → 下位机：17字节，小端IEEE754 float32；CRC16/Modbus覆盖字节0..14。
 struct MotionPacket {
-    static constexpr size_t kSize = 15;
+    static constexpr size_t kSize = 17;
     static constexpr uint8_t kHeader = 0x56;
     uint8_t start_of_frame = kHeader;
-    float vx_mps = 0.0f; // m/s，正前进、负后退；下位机对下发速度有限制，buildMotionPacket()硬限幅到±kMaxLinearSpeedMps（1.0m/s）
-    float wz_rps = 0.0f; // rad/s
-    int8_t gripper_offset = 0; // 方框逻辑角度：0开、20关
+    float vx_mps = 0.0f;       // m/s，正前进、负后退；协议层透传有限值
+    float wz_rps = 0.0f;       // rad/s，正逆时针；轮差速±wz*0.12m/s
+    int8_t gripper_offset = 0; // 线上偏移-5..+5：0=85°中位，+5=90°开，-5=80°关
     uint8_t gripper_action_id = 0; // 夹爪动作编号：仅目标变化时+1，1..255循环，0保留为“无动作”
-    int16_t camera_pitch_offset = 0; // TX偏移角-40..40；实测TX35->RX75，TX40->RX80
-    uint16_t crc16 = 0; // Modbus CRC，覆盖字节0..12，初值FFFF、多项式A001，低字节在前
+    int16_t camera_pitch_offset = 0; // TX偏移-30..30；0=120°，+30=150°下，-30=90°上
+    // 车体航向IMU yaw，单位0.01°；-18000..18000（-32768保留为无效）。仅上送，下位机不参与运动解算。
+    int16_t imu_yaw_cdeg = kImuYawInvalid;
+    uint16_t crc16 = 0; // Modbus CRC，覆盖字节0..14，初值FFFF、多项式A001，低字节在前
 };
 
 // 下位机 → 上位机：8字节执行器反馈，以换行结尾便于串口助手按行显示；IMU直连，ToF暂未安装。
@@ -70,7 +102,7 @@ struct SensorPacket {
     uint8_t start_of_frame = kHeader;
     uint8_t gripper_open = 0; // 旧A6二值状态保留：原始状态，开闭含义由验收配置提供
     uint8_t gripper_action_id = 0; // 该状态对应的夹爪动作编号，0表示上电后尚未收到动作
-    int16_t camera_pitch_deg = 40; // 线上整数度0..80；解析时减40转回标定角；-32768无效
+    int16_t camera_pitch_deg = 120; // 线上整数度90..150；解析时减120转回偏移角；-32768无效
     // uint16_t tof_fl_mm = 0; // 左前，毫米
     // uint16_t tof_fr_mm = 0; // 右前，毫米
     // uint16_t tof_rl_mm = 0; // 左后，毫米
@@ -83,34 +115,39 @@ struct SensorPacket {
 // A6 的开关状态须与本次目标和编号匹配，不是独立到位传感器。
 // 相机pitch读回无效标记（int16最小值，即字节00 80）。
 constexpr int16_t kCameraPitchInvalid = std::numeric_limits<int16_t>::min();
-// 内部沿用旧标定坐标±4000 cdeg；TX仍为标定偏移角-40..40，RX为0..80度；RX减40转换回标定角。
-constexpr int16_t kCameraPitchLimitCdeg = 4000; // 旧标定坐标，也是TX偏移角范围
-constexpr int16_t kCameraProtocolZeroDeg = 40; // RX = calibration_deg + 40; TX = calibration_deg
-constexpr int16_t kStartupRestPitchCdeg = 0; // 开机静止位RX40=旧0°，启动检查接受该角度或旧5°
+// 2026-10-23实测TX 0/+5/-5 -> A6 120/125/115；旧视觉标定仍须核验。
+constexpr int16_t kCameraPitchLimitCdeg = 3000; // TX允许的偏移范围；旧视觉标定须重新确认
+constexpr int16_t kCameraProtocolZeroDeg = 120; // RX = offset_deg + 120; TX = calibration_deg
+constexpr int16_t kStartupRestPitchCdeg = 0; // 开机静止位RX120=偏移0°，启动检查接受该角度或旧5°
 inline int16_t cameraPitchToWire(int16_t calibrated_cdeg) {
-    return static_cast<int16_t>(std::round(std::clamp<int>(calibrated_cdeg, -4000, 4000) / 100.0));
+    return static_cast<int16_t>(std::round(std::clamp<int>(calibrated_cdeg, -3000, 3000) / 100.0));
 }
 inline int16_t cameraPitchToFeedbackDeg(int16_t calibrated_cdeg) {
-    return calibrated_cdeg == kCameraPitchInvalid ? kCameraPitchInvalid
-        : static_cast<int16_t>(cameraPitchToWire(calibrated_cdeg) + kCameraProtocolZeroDeg);
+    return calibrated_cdeg == kCameraPitchInvalid
+               ? kCameraPitchInvalid
+               : static_cast<int16_t>(cameraPitchToWire(calibrated_cdeg) + kCameraProtocolZeroDeg);
 }
 constexpr int16_t cameraPitchFromWire(int16_t wire_deg) {
-    return wire_deg >= 0 && wire_deg <= 80
-        ? static_cast<int16_t>((wire_deg - kCameraProtocolZeroDeg) * 100) : kCameraPitchInvalid;
+    return wire_deg >= 90 && wire_deg <= 150
+               ? static_cast<int16_t>((wire_deg - kCameraProtocolZeroDeg) * 100)
+               : kCameraPitchInvalid;
 }
 
-// 上位机下发线速度硬限幅，m/s。下位机对速度有限制，buildMotionPacket()把|vx|截断到该值。
+// 上层运动策略的线速度上限，m/s；协议编码器不使用该值限幅。
 constexpr float kMaxLinearSpeedMps = 1.0f;
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
               "Motion protocol requires IEEE754 float32");
 static_assert(sizeof(MotionPacket) == MotionPacket::kSize && offsetof(MotionPacket, vx_mps) == 1 &&
-              offsetof(MotionPacket, wz_rps) == 5 && offsetof(MotionPacket, gripper_offset) == 9 &&
-              offsetof(MotionPacket, gripper_action_id) == 10 && offsetof(MotionPacket, camera_pitch_offset) == 11 &&
-              offsetof(MotionPacket, crc16) == 13,
+                  offsetof(MotionPacket, wz_rps) == 5 &&
+                  offsetof(MotionPacket, gripper_offset) == 9 &&
+                  offsetof(MotionPacket, gripper_action_id) == 10 &&
+                  offsetof(MotionPacket, camera_pitch_offset) == 11 &&
+                  offsetof(MotionPacket, imu_yaw_cdeg) == 13 && offsetof(MotionPacket, crc16) == 15,
               "MotionPacket wire layout mismatch");
-static_assert(sizeof(SensorPacket) == SensorPacket::kSize && offsetof(SensorPacket, gripper_action_id) == 2 &&
-              offsetof(SensorPacket, camera_pitch_deg) == 3 &&
-              offsetof(SensorPacket, crc16) == 5 && offsetof(SensorPacket, newline) == 7,
+static_assert(sizeof(SensorPacket) == SensorPacket::kSize &&
+                  offsetof(SensorPacket, gripper_action_id) == 2 &&
+                  offsetof(SensorPacket, camera_pitch_deg) == 3 &&
+                  offsetof(SensorPacket, crc16) == 5 && offsetof(SensorPacket, newline) == 7,
               "SensorPacket wire layout mismatch");
 
 // 执行器反馈与IMU状态独立；valid只表示帧校验通过且尚未过期。
@@ -119,7 +156,7 @@ struct ActuatorFeedback {
     uint64_t timestamp_us = 0;
     uint8_t gripper_open = 0; // 旧A6二值状态：必须使用已验收映射解释，非角度
     uint8_t gripper_action_id = 0;
-    int16_t camera_pitch_cdeg = kCameraPitchInvalid; // 转换后的标定角pitch，0.01°，线上角减40度
+    int16_t camera_pitch_cdeg = kCameraPitchInvalid; // 转换后的标定角pitch，0.01°，线上角减120度
     bool valid = false;
 };
 
@@ -137,7 +174,7 @@ struct SensorState {
     float tof_rr_m = 0.0f;
     bool imu_valid = false; // 上位机根据角度范围及接收超时判断
     std::array<bool, 4> tof_valid{{false, false, false, false}}; // 上位机判断，不在线上传输
-    bool encoder_valid = false; // 预留，当前协议未上报
+    bool encoder_valid = false;                                  // 预留，当前协议未上报
 };
 
 struct SafeZonePose {
@@ -150,18 +187,30 @@ struct SafeZonePose {
     float distance_m = 0.0f;
     float heading_error_deg = 0.0f; // 目标方位偏角，度
 
-    enum View { FRONT, OBLIQUE, SIDE, PARTIAL, UNKNOWN } view = UNKNOWN;
+    enum View {
+        FRONT,
+        OBLIQUE,
+        SIDE,
+        PARTIAL,
+        UNKNOWN
+    } view = UNKNOWN;
 };
 
 // 算法业务请求；禁止直接发送sizeof(MotionCommand)，该结构可能包含对齐填充。
 // buildMotionPacket()序列化为15字节（含动作编号与CRC），sendMotion()负责串口发送。
 struct MotionCommand {
-    uint64_t frame_transaction = 0; // changes only for a new logical request, including explicit retry
+    uint64_t frame_transaction =
+        0; // changes only for a new logical request, including explicit retry
     uint8_t header = 0x56;
-    float vx_mps = 0.0f; // m/s；发给下位机的速度有限制，超过±1.0m/s（kMaxLinearSpeedMps）会在打包时被截断
-    float wz_rps = 0.0f; // rad/s
-    int16_t gripper_offset = 0; // 方框目标偏移度；仅接受0开、20关
-    int16_t camera_pitch_cdeg = 0; // 相机标定角目标，0.01°，正值向下；TX除100发偏移角-40..40，RX减40后入标定；标定范围±4000
+    float vx_mps = 0.0f; // m/s；协议层透传有限值，上层策略按自身约束限速
+    float wz_rps = 0.0f; // rad/s，正逆时针；轮差速±wz*0.12m/s
+    // 任务内部保留历史逻辑值：0=开、20=关；串口编码器将其映射为线上+5/-5。
+    int16_t gripper_offset = 0;
+    int16_t camera_pitch_cdeg =
+        0; // 相机偏移目标，0.01°，正值向下；TX除100并钳位±30度；RX绝对角减120转换为偏移
+    // 车体航向（body_rpy_rad[2]经安装变换），弧度；MotionLink每包写入实时值，业务层无需填充。
+    // 默认NaN=未提供，编码为kImuYawInvalid；不能让“未填”变成看似合理的0°。
+    float imu_yaw_rad = std::numeric_limits<float>::quiet_NaN();
 };
 
-}
+} // namespace rescue

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "behavior_policy": "legacy_field_v1",
+  "hardware": {
+    "camera_index": 0,
+    "frame_width": 1280,
+    "frame_height": 720,
+    "fps": 60
+  },
+  "models": {
+    "rknn_library": "../../benchmark_results/librknnrt.so",
+    "model_path": "../../models/detect_fp.rknn",
+    "input_size": 640,
+    "confidence": 0.5,
+    "injured_confidence": 0.25,
+    "nms": 0.45,
+    "class_names": ["blue", "orange", "green", "black"]
+  },
+  "calibration": {
+    "zone_geometry_file": "../zone_geometry.json",
+    "pitch_presets_cdeg": [500, 500, 4000]
+  },
+  "runtime": {
+    "team": "blue",
+    "dry_run": true,
+    "hardware": false,
+    "show": false,
+    "vision_log_dir": "none"
+  }
+}

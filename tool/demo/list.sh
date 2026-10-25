@@ -8,10 +8,10 @@ cat <<'HELP'
   tool/demo/frame_close.sh                        # 20°放下/关框，默认检查
   tool/demo/frame_status.sh --run                 # 只读A6
 移动：
-  tool/demo/move_forward.sh --speed 0.05 --seconds 0.5
-  tool/demo/move_backward.sh --speed 0.05 --seconds 0.5
-  tool/demo/turn_left.sh --wz 0.20 --seconds 0.5
-  tool/demo/turn_right.sh --wz 0.20 --seconds 0.5
+  tool/demo/move_forward.sh --speed 0.05           # 无--seconds即持续，Ctrl+C停止
+  tool/demo/move_backward.sh --speed 0.05
+  tool/demo/turn_left.sh --wz 0.20
+  tool/demo/turn_right.sh --wz 0.20
 相机：
   tool/demo/camera.sh --offset-deg 5               # RX45°
   tool/demo/camera.sh --offset-deg 20              # RX60°

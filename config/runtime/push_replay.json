@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "behavior_policy": "legacy_replay_v1",
+  "behavior": {
+    "startup_advance_ms": 0
+  },
+  "calibration": {
+    "pitch_presets_cdeg": [500, 500, 4000]
+  },
+  "runtime": {
+    "push_replay": "../../tests/fixtures/push_delivery.json",
+    "show": false
+  }
+}

@@ -33,13 +33,13 @@ def main():
     stable = int(all(f[:3] == frames[-1][:3] for f in frames))
     print('[下位机] 最近A6帧 %s' % raw.hex(' ').upper())
     print('LOWER_STATE state=%d id=%d pitch=%d samples=%d stable=%d' % (state, action_id, pitch, len(frames), stable))
-    print('[下位机] 完成位=%d  方框动作编号=%d  相机实际角=%d°(RX 0..80)' % (state, action_id, pitch))
+    print('[下位机] 原始A6状态字节=%d（含义待固件确认）  动作编号=%d  相机角字段=%d°(RX 90..150)' % (state, action_id, pitch))
     if not stable:
         print('[下位机] 警告：采样期间反馈在变化，可能有其他程序正在控制下位机')
     if action_id == 0:
-        print('[下位机] 编号0=下位机本次上电后还没收到过方框动作；A6不含方框位置，实际是0°还是20°只能由现场确认')
+        print('[下位机] 编号0=下位机本次上电后还没收到过夹爪动作；状态仍按当前A6帧解释')
     else:
-        print('[下位机] A6不含方框位置，只能确认最后一次动作编号；实际角度仍以现场为准')
+        print('[下位机] A6状态字节不能据此证明夹爪实际位置、机械到位或夹持成功')
     return 0
 
 

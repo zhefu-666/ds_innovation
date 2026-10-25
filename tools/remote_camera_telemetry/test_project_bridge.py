@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 import websockets
 from websockets.server import serve
-from project_bridge import PAGE, Source, read_packet, client, imu_view
+from project_bridge import PAGE, CONFIG_SCHEMA, CHANNELS, Source, read_packet, client, imu_view
 
 
 def packet(stamp=None):
@@ -26,6 +26,31 @@ def packet(stamp=None):
     return b'RSTEL001' + struct.pack('<II', len(meta), len(jpeg)) + meta + jpeg
 
 class PacketTests(unittest.TestCase):
+    def test_runtime_config_schema_extends_existing_fields(self):
+        properties = CONFIG_SCHEMA['properties']
+        for name in ('camera_index', 'requested_width', 'requested_height', 'requested_fps',
+                     'confidence', 'nms', 'input_size', 'dry_run', 'imu_baud', 'imu_enabled'):
+            self.assertEqual(properties[name], {'type': 'number'})
+        for name in ('team', 'model', 'imu_port'):
+            self.assertEqual(properties[name], {'type': 'string'})
+        self.assertEqual(properties['valid'], {'type': 'boolean'})
+        effective = properties['effective']['properties']
+        self.assertEqual(effective['policy']['properties']['name'], {'type': 'string'})
+        self.assertEqual(effective['policy']['properties']['version'], {'type': 'string'})
+        self.assertEqual(effective['mode']['properties']['operation'], {'type': 'string'})
+        self.assertEqual(effective['mode']['properties']['mcu_access'], {'type': 'string'})
+        self.assertEqual(effective['startup']['properties']['effective_advance_us'], {'type': 'number'})
+        self.assertEqual(effective['startup']['properties']['requested_speed_mps'], {'type': 'number'})
+        self.assertEqual(effective['identity']['properties']['executable'], {'type': 'string'})
+        self.assertEqual(effective['identity']['properties']['arguments']['items'], {'type': 'string'})
+        self.assertEqual(effective['identity']['properties']['resource_paths']['additionalProperties'], {'type': 'string'})
+        self.assertEqual(effective['task'], {'type': 'object'})
+        self.assertNotIn('required', CONFIG_SCHEMA)
+        config_channel = next(channel for channel in CHANNELS if channel['topic'] == '/runtime/config')
+        self.assertEqual(config_channel['id'], 6)
+        self.assertEqual(config_channel['schemaName'], 'rescue.RuntimeConfig')
+        self.assertEqual(json.loads(config_channel['schema']), CONFIG_SCHEMA)
+
     def test_dashboard_reports_live_hardware_mode(self):
         self.assertIn(b"id=\"permit\"", PAGE)
         self.assertIn(b"id=\"preflight\"", PAGE)
