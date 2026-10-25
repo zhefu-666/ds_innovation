@@ -1,3 +1,4 @@
+#include "rescue/stage_audit.hpp"
 #include "rescue/model_io.hpp"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/dnn.hpp>
@@ -21,14 +22,15 @@ ModelImage prepareModelImage(const cv::Mat &bgr,int size) {
     int w=std::max(1,int(std::round(bgr.cols*scale))),h=std::max(1,int(std::round(bgr.rows*scale)));
     out.sx=float(w)/bgr.cols;out.sy=float(h)/bgr.rows;
     out.pad_x=(size-w)/2;out.pad_y=(size-h)/2;
-    cv::Mat resized;cv::resize(bgr,resized,{w,h},0,0,cv::INTER_LINEAR);
-    cv::Mat canvas(size,size,CV_8UC3,cv::Scalar(114,114,114));
-    resized.copyTo(canvas(cv::Rect(out.pad_x,out.pad_y,w,h)));
-    cv::cvtColor(canvas,out.rgb,cv::COLOR_BGR2RGB);
+    cv::Mat resized;{AuditScope audit("preprocess.resize");cv::resize(bgr,resized,{w,h},0,0,cv::INTER_LINEAR);}
+    cv::Mat canvas;{AuditScope audit("preprocess.pad_copy");canvas=cv::Mat(size,size,CV_8UC3,cv::Scalar(114,114,114));
+    resized.copyTo(canvas(cv::Rect(out.pad_x,out.pad_y,w,h)));}
+    {AuditScope audit("preprocess.bgr_rgb");cv::cvtColor(canvas,out.rgb,cv::COLOR_BGR2RGB);}
     return out;
 }
 std::vector<SegDetection> decodeModelOutput(const cv::Mat &output,const ModelImage &image,
         cv::Size original,const Config &config,uint64_t timestamp) {
+    AuditScope audit("detector.decode_nms");
     if(config.require_instance_masks) throw std::runtime_error("Current model is detection-only; instance masks unavailable");
     const int attrs=4+int(config.class_names.size());
     if(output.type()!=CV_32F || output.dims!=3 || output.size[0]!=1 || output.size[1]!=attrs || !output.isContinuous())

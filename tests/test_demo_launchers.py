@@ -77,7 +77,7 @@ class DemoTests(unittest.TestCase):
 
     def test_camera_converts_at_tool_boundary(self):
         _, plan = self.plan('camera', '--offset-deg', '5')
-        command = plan['command'];self.assertEqual(command[command.index('set')+1], '45')
+        command = plan['command'];self.assertEqual(command[command.index('set')+1], '125')
         self.assertIn('--frame-config', command)
 
     def test_reject_limits_and_invalid_mode_combinations(self):
@@ -146,9 +146,9 @@ class DemoTests(unittest.TestCase):
 
     def test_packet_limits_crc_and_angle(self):
         for vx, wz in [(float('nan'), 0), (.11, 0), (0, .26)]:
-            with self.assertRaises(ValueError):demo_serial.packet(vx, wz, 0, 7, 45)
-        packet = demo_serial.packet(.05, -.2, 20, 7, 45)
-        self.assertEqual(len(packet), 15);self.assertEqual(packet[9:11], bytes([20, 7]))
+            with self.assertRaises(ValueError):demo_serial.packet(vx, wz, 0, 7, 125)
+        packet = demo_serial.packet(.05, -.2, 20, 7, 125)
+        self.assertEqual(len(packet), 15);self.assertEqual(packet[9:11], bytes([251, 7]))
         self.assertEqual(struct.unpack('<h', packet[11:13])[0], 5)
         self.assertEqual(int.from_bytes(packet[13:], 'little'), demo_serial.frame.crc16(packet[:13]))
 
@@ -159,7 +159,7 @@ class DemoTests(unittest.TestCase):
             while not stop.is_set():
                 if not stop_feedback or not packets:
                     ident = 8 if wrong_id and packets else 7
-                    raw = struct.pack('<BBBh', 0xa6, 1, ident, 45)
+                    raw = struct.pack('<BBBh', 0xa6, 1, ident, 125)
                     raw += struct.pack('<H', demo_serial.frame.crc16(raw))+b'\n'
                     os.write(master, raw)
                 if select.select([master], [], [], .01)[0]:
@@ -182,7 +182,7 @@ class DemoTests(unittest.TestCase):
         self.assertTrue(packets)
         self.assertTrue(any(struct.unpack('<f', p[1:5])[0]>.01 for p in packets))
         self.assertEqual(struct.unpack('<ff',packets[-1][1:9]),(0.,0.))
-        self.assertTrue(all(p[9]==0 and p[10]==7 for p in packets))
+        self.assertTrue(all(p[9]==5 and p[10]==7 for p in packets))
         return error
 
     def test_virtual_serial_motion_ends_with_zero_and_preserves_open(self):

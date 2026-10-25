@@ -54,11 +54,11 @@ struct MotionPacket {
     static constexpr size_t kSize = 15;
     static constexpr uint8_t kHeader = 0x56;
     uint8_t start_of_frame = kHeader;
-    float vx_mps = 0.0f; // m/s，正前进、负后退；下位机对下发速度有限制，buildMotionPacket()硬限幅到±kMaxLinearSpeedMps（1.0m/s）
-    float wz_rps = 0.0f; // rad/s
-    int8_t gripper_offset = 0; // 方框逻辑角度：0开、20关
+    float vx_mps = 0.0f; // m/s，正前进、负后退；协议层透传有限值
+    float wz_rps = 0.0f; // rad/s，正逆时针；轮差速±wz*0.12m/s
+    int8_t gripper_offset = 0; // 线上偏移-5..5度；+5开(90°)，-5关(80°)，0中位(85°)
     uint8_t gripper_action_id = 0; // 夹爪动作编号：仅目标变化时+1，1..255循环，0保留为“无动作”
-    int16_t camera_pitch_offset = 0; // TX偏移角-40..40；实测TX35->RX75，TX40->RX80
+    int16_t camera_pitch_offset = 0; // TX偏移-30..30；0=120°，+30=150°下，-30=90°上
     uint16_t crc16 = 0; // Modbus CRC，覆盖字节0..12，初值FFFF、多项式A001，低字节在前
 };
 
@@ -70,7 +70,7 @@ struct SensorPacket {
     uint8_t start_of_frame = kHeader;
     uint8_t gripper_open = 0; // 旧A6二值状态保留：原始状态，开闭含义由验收配置提供
     uint8_t gripper_action_id = 0; // 该状态对应的夹爪动作编号，0表示上电后尚未收到动作
-    int16_t camera_pitch_deg = 40; // 线上整数度0..80；解析时减40转回标定角；-32768无效
+    int16_t camera_pitch_deg = 120; // 线上整数度90..150；解析时减120转回偏移角；-32768无效
     // uint16_t tof_fl_mm = 0; // 左前，毫米
     // uint16_t tof_fr_mm = 0; // 右前，毫米
     // uint16_t tof_rl_mm = 0; // 左后，毫米
@@ -83,23 +83,23 @@ struct SensorPacket {
 // A6 的开关状态须与本次目标和编号匹配，不是独立到位传感器。
 // 相机pitch读回无效标记（int16最小值，即字节00 80）。
 constexpr int16_t kCameraPitchInvalid = std::numeric_limits<int16_t>::min();
-// 内部沿用旧标定坐标±4000 cdeg；TX仍为标定偏移角-40..40，RX为0..80度；RX减40转换回标定角。
-constexpr int16_t kCameraPitchLimitCdeg = 4000; // 旧标定坐标，也是TX偏移角范围
-constexpr int16_t kCameraProtocolZeroDeg = 40; // RX = calibration_deg + 40; TX = calibration_deg
-constexpr int16_t kStartupRestPitchCdeg = 0; // 开机静止位RX40=旧0°，启动检查接受该角度或旧5°
+// 2026-10-23实测TX 0/+5/-5 -> A6 120/125/115；旧视觉标定仍须核验。
+constexpr int16_t kCameraPitchLimitCdeg = 3000; // TX允许的偏移范围；旧视觉标定须重新确认
+constexpr int16_t kCameraProtocolZeroDeg = 120; // RX = offset_deg + 120; TX = calibration_deg
+constexpr int16_t kStartupRestPitchCdeg = 0; // 开机静止位RX120=偏移0°，启动检查接受该角度或旧5°
 inline int16_t cameraPitchToWire(int16_t calibrated_cdeg) {
-    return static_cast<int16_t>(std::round(std::clamp<int>(calibrated_cdeg, -4000, 4000) / 100.0));
+    return static_cast<int16_t>(std::round(std::clamp<int>(calibrated_cdeg, -3000, 3000) / 100.0));
 }
 inline int16_t cameraPitchToFeedbackDeg(int16_t calibrated_cdeg) {
     return calibrated_cdeg == kCameraPitchInvalid ? kCameraPitchInvalid
         : static_cast<int16_t>(cameraPitchToWire(calibrated_cdeg) + kCameraProtocolZeroDeg);
 }
 constexpr int16_t cameraPitchFromWire(int16_t wire_deg) {
-    return wire_deg >= 0 && wire_deg <= 80
+    return wire_deg >= 90 && wire_deg <= 150
         ? static_cast<int16_t>((wire_deg - kCameraProtocolZeroDeg) * 100) : kCameraPitchInvalid;
 }
 
-// 上位机下发线速度硬限幅，m/s。下位机对速度有限制，buildMotionPacket()把|vx|截断到该值。
+// 上层运动策略的线速度上限，m/s；协议编码器不使用该值限幅。
 constexpr float kMaxLinearSpeedMps = 1.0f;
 static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559,
               "Motion protocol requires IEEE754 float32");
@@ -119,7 +119,7 @@ struct ActuatorFeedback {
     uint64_t timestamp_us = 0;
     uint8_t gripper_open = 0; // 旧A6二值状态：必须使用已验收映射解释，非角度
     uint8_t gripper_action_id = 0;
-    int16_t camera_pitch_cdeg = kCameraPitchInvalid; // 转换后的标定角pitch，0.01°，线上角减40度
+    int16_t camera_pitch_cdeg = kCameraPitchInvalid; // 转换后的标定角pitch，0.01°，线上角减120度
     bool valid = false;
 };
 
@@ -158,10 +158,10 @@ struct SafeZonePose {
 struct MotionCommand {
     uint64_t frame_transaction = 0; // changes only for a new logical request, including explicit retry
     uint8_t header = 0x56;
-    float vx_mps = 0.0f; // m/s；发给下位机的速度有限制，超过±1.0m/s（kMaxLinearSpeedMps）会在打包时被截断
-    float wz_rps = 0.0f; // rad/s
+    float vx_mps = 0.0f; // m/s；协议层透传有限值，上层策略按自身约束限速
+    float wz_rps = 0.0f; // rad/s，正逆时针；轮差速±wz*0.12m/s
     int16_t gripper_offset = 0; // 方框目标偏移度；仅接受0开、20关
-    int16_t camera_pitch_cdeg = 0; // 相机标定角目标，0.01°，正值向下；TX除100发偏移角-40..40，RX减40后入标定；标定范围±4000
+    int16_t camera_pitch_cdeg = 0; // 相机偏移目标，0.01°，正值向下；TX除100并钳位±30度；RX绝对角减120转换为偏移
 };
 
 }

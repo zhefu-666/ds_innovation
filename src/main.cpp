@@ -1,4 +1,7 @@
+#include "rescue/stage_audit.hpp"
 #include "rescue/config.hpp"
+#include "rescue/camera_settings.hpp"
+#include "rescue/camera_capture.hpp"
 #include "rescue/demo_policy.hpp"
 #include "rescue/async_log.hpp"
 #include <sstream>
@@ -34,6 +37,7 @@
 #include "rescue/vision_logic.hpp"
 #include <opencv2/opencv.hpp>
 #include <csignal>
+#include <cstdlib>
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
@@ -218,11 +222,12 @@ public:
         }
     }
     bool hasPose() const { return pose_ != nullptr; }
-    VisionResult infer(const cv::Mat &frame, uint64_t timestamp_us) {
+    VisionResult infer(const cv::Mat &frame, uint64_t timestamp_us, const rescue::ModelImage *prepared = nullptr) {
         using namespace rescue;
         const auto ms = [](Clock::time_point a, Clock::time_point b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
+        AuditScope audit("vision.total");
         VisionResult r;
         const auto started = Clock::now();
         if (!rknn_) {
@@ -230,7 +235,7 @@ public:
             r.detect_ms = r.total_ms = ms(started, Clock::now());
             return r;
         }
-        const auto image = prepareModelImage(frame, config_.input_size);
+        const auto image = prepared && !prepared->rgb.empty() ? *prepared : prepareModelImage(frame, config_.input_size);
         const auto runPose = [&] {
             const auto t = Clock::now();
             auto halves = pose_->infer(image, frame.size());
@@ -286,6 +291,18 @@ int main(int argc, char **argv) {
     std::signal(SIGTERM, signalHandler);
     try {
         const Config config = parseArgs(argc, argv);
+        AuditQuietCout audit_quiet(config.dry_run);
+        // Nested OpenCV pools compete with capture, pose and preview workers on RK3588S.
+        int opencv_threads = 1;
+        if (const char *value = std::getenv("RESCUE_OPENCV_THREADS")) {
+            size_t used = 0;
+            opencv_threads = std::stoi(value, &used);
+            if (std::string(value).size() != used || opencv_threads < 1 || opencv_threads > 64)
+                throw std::runtime_error("RESCUE_OPENCV_THREADS must be 1..64");
+        }
+        cv::setNumThreads(opencv_threads);
+        std::cout << "[CPU] opencv_threads=" << cv::getNumThreads() << "\n";
+
         std::cout << "MATCH_TIME_LIMIT=" << (config.no_match_time_limit ? "disabled_debug" : "enabled") << "\n";
         if(config.allow_mechanical_pitch_model)
             std::cout << "GEOMETRY_SOURCE=mechanical_assumption NOT_FIELD_VALIDATED\n";
@@ -553,19 +570,28 @@ int main(int argc, char **argv) {
         CaptureMonitor capture(capture_config);
         PixelSelector pixel_selector;pixel_selector.setRelock(tuning.relock_window_us,tuning.relock_gate_frac);{RowParams rp;rp.min_n=tuning.row_min_n;rp.resid_m=tuning.row_resid_m;rp.max_tilt_rad=tuning.row_max_tilt_rad;rp.half_along_m=tuning.row_half_along_m;rp.half_across_m=tuning.row_half_across_m;pixel_selector.setRow(tuning.row_select,rp);}uint64_t progress_ref_us=0;int progress_total=-1;MultiViewCapture multi_view(frame_views,{config.frame_width,config.frame_height},view_image_polygon);
         bool observing=false;uint64_t observation_round=0;
-        // Use the USB camera's MJPEG V4L2 path; automatic GStreamer negotiation
-        // fails when applying the requested 720p/60 FPS settings on this board.
-        cv::VideoCapture camera(config.camera_index, cv::CAP_V4L2);
-        if (!camera.isOpened()) throw std::runtime_error("Cannot open camera");
-        camera.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
-        camera.set(cv::CAP_PROP_FRAME_WIDTH, config.frame_width);
-        camera.set(cv::CAP_PROP_FRAME_HEIGHT, config.frame_height);
-        camera.set(cv::CAP_PROP_FPS, config.fps);
-        camera.set(cv::CAP_PROP_BUFFERSIZE, 1); // backend may ignore; timestamp remains host dequeue time
+        cv::VideoCapture camera;
+        std::unique_ptr<CameraCapture> camera_capture;
+        cv::Size capture_size;
+        if (config.async_capture) {
+            camera_capture = std::make_unique<CameraCapture>(config.camera_index,
+                config.frame_width, config.frame_height, config.fps, config.input_size);
+            if (!camera_capture->start()) throw std::runtime_error("Cannot open camera");
+            CameraFrame first;
+            if (!camera_capture->waitNext(0, first, 2000)) throw std::runtime_error("Camera startup timed out");
+            capture_size = first.image.size();
+            std::cout << "[CAMERA] async latest-frame capture; timestamps=host_read_complete (see raw/decoded mode above), not sensor exposure\n";
+        } else {
+            camera.open(config.camera_index, cv::CAP_V4L2);
+            if (!camera.isOpened()) throw std::runtime_error("Cannot open camera");
+            configureCameraCapture(camera, config.camera_index, config.frame_width,
+                                   config.frame_height, config.fps);
+            capture_size = {int(camera.get(cv::CAP_PROP_FRAME_WIDTH)), int(camera.get(cv::CAP_PROP_FRAME_HEIGHT))};
+        }
         cv::VideoWriter writer;
         if (config.save_output) {
             writer.open("output_cpp.mp4", cv::VideoWriter::fourcc('m','p','4','v'), config.fps,
-                        cv::Size(camera.get(cv::CAP_PROP_FRAME_WIDTH), camera.get(cv::CAP_PROP_FRAME_HEIGHT)));
+                        capture_size);
             if (!writer.isOpened()) throw std::runtime_error("Cannot open recording");
         }
         std::cout << (link ? "Ground-pushing LIVE: motion follows PushTask; still gated by safety/geometry evidence.\n"
@@ -600,21 +626,41 @@ int main(int argc, char **argv) {
                 std::cout<<"[DEMO_RESULT] wall_budget_exhausted mode="<<config.demo_mode<<"\n";
                 demo_exit=config.demo_mode=="recognize"?0:2;break;
             }
+            AuditScope iteration_audit("main.iteration");
             const auto capture_started = Clock::now();
             cv::Mat frame;
-            if (!camera.read(frame) || frame.empty()) throw std::runtime_error("Camera frame lost");
+            ModelImage prepared_image;
+            uint64_t timestamp = 0, epoch_ns = 0;
+            if (camera_capture) {
+                CameraFrame captured;
+                if (!camera_capture->waitNext(frame_sequence, captured, config.sensor_timeout_ms))
+                    throw std::runtime_error("Camera frame lost or capture timed out");
+                frame = std::move(captured.image);
+                prepared_image = std::move(captured.prepared);
+                timestamp = captured.timestamp_us;
+                epoch_ns = captured.epoch_ns;
+                frame_sequence = captured.frame_number;
+            } else {
+                if (!camera.read(frame) || frame.empty()) throw std::runtime_error("Camera frame lost");
+                timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    Clock::now().time_since_epoch()).count());
+                epoch_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+                ++frame_sequence;
+            }
             const auto now = Clock::now();
-            const auto epoch_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
+            const auto now_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                now.time_since_epoch()).count());
+            if (timestamp > now_us || now_us - timestamp > uint64_t(config.sensor_timeout_ms) * 1000)
+                throw std::runtime_error("Camera frame is stale");
+            const double frame_age_ms = (now_us - timestamp) / 1000.0;
             const double capture_ms = std::chrono::duration<double, std::milli>(now - capture_started).count();
-            const auto timestamp = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
-            ++frame_sequence;
             // Detect and pose share this frame's id and capture time.
-            auto vision_result=vision_frontend.infer(frame,timestamp);
+            auto vision_result=vision_frontend.infer(frame,timestamp,&prepared_image);
+            AuditScope logic_audit("main.logic_and_logs");
             auto& raw=vision_result.detections;
             for(auto& d:raw){d.frame_id=frame_sequence;d.timestamp_us=timestamp;}
-            auto detections = tracker.update(raw, timestamp);
+            auto detections = [&]{AuditScope audit("logic.tracker");return tracker.update(raw, timestamp);}();
             const double inference_ms = std::chrono::duration<double, std::milli>(Clock::now() - now).count();
             std::vector<ZoneKeypoint> zone_points;
             if(vision_result.pose_ran)zone_points=zoneHalvesToKeypoints(vision_result.halves,config.pose_keypoint_confidence);
@@ -1087,7 +1133,10 @@ int main(int argc, char **argv) {
                 log << "[PERF] loop_fps=" << loop_fps << " inference_ms=" << inference_ms
                           << " detect_ms=" << vision_result.detect_ms << " pose_ms=" << vision_result.pose_ms
                           << " zone_points=" << zone_points.size()
-                          << " capture_ms=" << capture_ms << " detections=" << detections.size() << "\n";
+                          << " capture_ms=" << capture_ms << " frame_age_ms=" << frame_age_ms
+                          << " capture_sequence=" << frame_sequence
+                          << " capture_overwritten=" << (camera_capture ? camera_capture->droppedFrames() : 0)
+                          << " detections=" << detections.size() << "\n";
                 if(vision_result.pose_ran) {
                     static const char *kn[]={"fl","nl","fr","nr"};
                     log<<"[ZONEPTS]";
@@ -1122,6 +1171,9 @@ int main(int argc, char **argv) {
                 async_log.submit(log.str());
                 last_report = now;
             }
+            logic_audit.finish();
+            const bool skip_audit_draw=config.dry_run&&StageAudit::instance().enabled()&&std::getenv("RESCUE_AUDIT_NO_DRAW");
+            {AuditScope draw_audit("main.draw");if(!skip_audit_draw){
             vision.drawDetections(frame, detections);
             drawZone(frame, zone_points);
             const char *output_label = !link ? "PREVIEW - NO MCU LINK" :
@@ -1130,6 +1182,7 @@ int main(int argc, char **argv) {
             const cv::Scalar output_color = !link ? cv::Scalar(0,255,255) :
                 out.hardware_output_enabled ? cv::Scalar(0,0,255) : cv::Scalar(0,190,255);
             cv::putText(frame, output_label, {10,25}, cv::FONT_HERSHEY_SIMPLEX, 0.6, output_color, 2);
+            }}
 #ifdef RESCUE_ENABLE_TELEMETRY
             if (telemetry) {
                 DecisionTelemetry decision;
@@ -1148,8 +1201,9 @@ int main(int argc, char **argv) {
                 std::cout<<"[DEMO_RESULT] "<<out.reason<<" match="<<match_status.reason<<"\n";
                 demo_exit=success?0:2;match.command(MatchCommand::FINISH,imuNowUs());break;
             }
-            if (writer.isOpened()) writer.write(frame);
+            if (writer.isOpened()) {AuditScope audit("main.record");writer.write(frame);}
             if (config.show) {
+                AuditScope audit("main.display");
                 cv::imshow("Ground pushing", frame);
                 const int key = cv::waitKey(1);
                 if (key == 27 || key == 'q' || key == 'Q') break;

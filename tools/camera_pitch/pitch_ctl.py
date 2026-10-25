@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""终端手动控制相机pitch，或在启动前安全设置45°（原5°）（不启动主程序）。
+"""终端手动控制相机pitch，或在启动前安全设置125°（原5°）（不启动主程序）。
 
 用法：
   pitch_ctl.py status                 查看当前动作编号/done/pitch读回
   pitch_ctl.py set <度>               方框抬起并转到目标角，读回到位后退出
   pitch_ctl.py repl                   交互模式，终端输入角度实时调整
   pitch_ctl.py watch                  只读：持续显示下位机上传的pitch，不发任何包
-  pitch_ctl.py prepare45              零速度转到45°（原5°），保持当前方框状态和动作编号
+  pitch_ctl.py prepare45              零速度转到125°（原5°），保持当前方框状态和动作编号
 公共参数：[--port /dev/ttyACM0] [--baud 115200] [--timeout 3] [--tol 3] [--dry-run]
          [--watch 秒]（set 到位/超时后继续发包并显示读回的时长）
 
@@ -16,8 +16,8 @@ set/repl 下发后会在终端实时显示A6上传的pitch读回（变化时立�
 A6帧：A6 | gripper_open | 编号 | pitch低 pitch高 | CRC低 CRC高 | 0A
 运动包：56 | vx(4) | wz(4) | int8偏移(0放下/20抬起) | 编号 | pitch低 pitch高 | CRC低 CRC高
 
-角度单位为度：当前0..80，旧角度整体+40；当前40对应旧0，当前80对应旧40，超出会截断。
-界面和A6使用0..80°；TX仍是-40..40偏移角，发送前减40，工具内部用界面角的cdeg。
+角度单位为度：A6为绝对舵机角90..150，120为偏移0，125为偏移+5。
+界面和A6使用90..150°；TX为-30..30偏移角，发送前减120，工具内部用界面角的cdeg。
 set/repl 启动时先读A6反馈拿到当前动作编号，用“当前编号+1”发一次抬起并等状态与目标匹配，
 之后所有包沿用这个编号和偏移=20。prepare45（prepare5为兼容别名） 沿用当前方框状态与编号。
 速度固定为0；下位机断联停车能力需单独验收。
@@ -25,12 +25,12 @@ set/repl 启动时先读A6反馈拿到当前动作编号，用“当前编号+1�
 import argparse, fcntl, os, struct, sys, termios, threading, time, tty
 
 INVALID_PITCH = -32768
-PITCH_LIMIT = 8000  # 内部cdeg；线上整数度，线上范围0..80°
+PITCH_LIMIT = 15000  # 内部cdeg；线上整数度，线上范围90..150°
 
 
 
 def decode_pitch(deg):
-    return deg * 100 if 0 <= deg <= 80 else INVALID_PITCH
+    return deg * 100 if 90 <= deg <= 150 else INVALID_PITCH
 
 
 def crc16(data):
@@ -52,7 +52,7 @@ FRAME_HOLD_STATE = None
 def motion_packet(gripper_open, action_id, pitch):
     if gripper_open not in (0, 1):
         raise ValueError('A6方框状态必须是0或1，不能作为角度直接发送')
-    b = struct.pack('<BffbBh', 0x56, 0.0, 0.0, hold_angle(gripper_open, FRAME_MAPPING, FRAME_KNOWN), action_id, max(0, min(80, int(round(pitch / 100)))) - 40)
+    b = struct.pack('<BffbBh', 0x56, 0.0, 0.0, 5 if hold_angle(gripper_open, FRAME_MAPPING, FRAME_KNOWN) == 0 else -5, action_id, max(-30, min(30, int(round(pitch / 100)) - 120)))
     return b + struct.pack('<H', crc16(b))
 
 
@@ -127,8 +127,8 @@ def frame_hex(raw):
 
 
 def cdeg_hex(p):
-    """TX偏移角int16小端；界面8000 cdeg -> TX40度 -> 28 00。"""
-    return struct.pack('<h', INVALID_PITCH if p == INVALID_PITCH else int(round(p / 100)) - 40).hex(' ').upper()
+    """TX偏移角int16小端；界面12500 cdeg -> TX5度 -> 05 00。"""
+    return struct.pack('<h', INVALID_PITCH if p == INVALID_PITCH else int(round(p / 100)) - 120).hex(' ').upper()
 
 
 def pitch_detail(p, raw):
@@ -186,9 +186,9 @@ class Tracer:
 def to_cdeg(deg):
     if not __import__('math').isfinite(deg):
         raise ValueError('角度必须为有限数值')
-    actual = max(0, min(80, int(round(deg))))
+    actual = max(90, min(150, int(round(deg))))
     if actual != deg:
-        print('提示: 按整数度与0..80°限位，实际目标为 %d°' % actual)
+        print('提示: 按整数度与90..150°限位，实际目标为 %d°' % actual)
     return actual * 100
 
 
@@ -260,9 +260,9 @@ def move_pitch(link, action_id, target, timeout, tol, watch=0.0):
 def prepare_pitch_forty_five(link, gripper_open, action_id, timeout):
     if gripper_open not in (0, 1) or not 0 <= action_id <= 255:
         raise ValueError('A6方框状态或动作编号无效，拒绝发送')
-    target = 4500
+    target = 12500
     pkt = motion_packet(gripper_open, action_id, target)
-    print('TX (零速度、保持方框%d/编号%d、pitch 45°): %s' %
+    print('TX (零速度、保持方框%d/编号%d、pitch 125°): %s' %
           (gripper_open, action_id, pkt.hex(' ').upper()), flush=True)
     if link.dry_run:
         return True
@@ -281,21 +281,21 @@ def prepare_pitch_forty_five(link, gripper_open, action_id, timeout):
                     stable_since = now
                 last_good = now
                 if now - stable_since >= 0.3:
-                    print('确认：A6连续读回45°且方框状态/编号未变: %s' % frame_hex(raw))
+                    print('确认：A6连续读回125°且方框状态/编号未变: %s' % frame_hex(raw))
                     return True
             else:
                 stable_since = None
                 last_good = None
         time.sleep(0.05)
-    print('超时：未取得稳定的45°反馈；最后A6: %s' %
+    print('超时：未取得稳定的125°反馈；最后A6: %s' %
           (frame_hex(link.last[3]) if link.last else '无'), file=sys.stderr)
     return False
 
 
-# Historical API: prepare5 means old calibrated 5 degrees, now wire 45.
+# Historical API: prepare5 means old calibrated 5 degrees, now wire 125.
 prepare_pitch_five = prepare_pitch_forty_five
 
-REPL_HELP = """输入角度(度)直接转，如 40 / 45 / 80；正值向下，线上范围0..80，40为原0度，80为原40度
+REPL_HELP = """输入角度(度)直接转，如 115 / 120 / 125；正值向下，线上范围90..150，120为偏移0度，150为偏移30度
   输入角度后实时显示读回，到位且稳定0.3s或超时后回到提示符（Ctrl+C 提前返回）
   s  查看读回    m  持续显示读回直到 Ctrl+C    x  打印当前包    h  帮助    q  退出"""
 
@@ -405,7 +405,7 @@ def main():
             FRAME_KNOWN=(args.known_frame_angle,args.known_frame_id)
             print(DONE_FLAG_NOTE+'; known angle=%d id=%d' % FRAME_KNOWN, flush=True)
     if args.action == 'set' and args.deg is None:
-        ap.error('set 需要目标角，例如: pitch_ctl.py set 10')
+        ap.error('set 需要目标角，例如: pitch_ctl.py set 125')
 
     try:
         fd = open_port(args.port, args.baud)

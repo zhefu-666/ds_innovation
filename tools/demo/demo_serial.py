@@ -17,14 +17,14 @@ from frame_semantics import check_known_id, hold_angle
 def packet(vx, wz, angle, action_id, pitch_rx):
     if not all(math.isfinite(v) for v in (vx, wz)) or abs(vx) > .10 or abs(wz) > .25:
         raise ValueError('Demo velocity exceeds 0.10 m/s or 0.25 rad/s')
-    if angle not in (0, 20) or not 0 <= action_id <= 255 or not 0 <= pitch_rx <= 80:
+    if angle not in (0, 20) or not 0 <= action_id <= 255 or not 90 <= pitch_rx <= 150:
         raise ValueError('Invalid actuator command')
-    data = struct.pack('<BffbBh', 0x56, vx, wz, angle, action_id, pitch_rx - 40)
+    data = struct.pack('<BffbBh', 0x56, vx, wz, 5 if angle == 0 else -5, action_id, max(-30, min(30, pitch_rx - 120)))
     return data + struct.pack('<H', frame.crc16(data))
 
 
 def valid_feedback(fb):
-    return fb[0] in (0, 1) and 0 <= fb[2] <= 80
+    return fb[0] in (0, 1) and 90 <= fb[2] <= 150
 
 
 def initial_feedback(fd, parser, timeout=2):
@@ -42,7 +42,7 @@ def manual_motion(port, baud, mapping, vx, wz, duration, emit=print, known=None)
     if not math.isfinite(duration) or not 0 < duration <= 1:
         raise ValueError('Manual wheel motion duration must be in (0, 1] seconds')
     # Validate before opening any port.
-    packet(vx, wz, 0, 0, 40)
+    packet(vx, wz, 0, 0, 120)
     with frame.serial_port(port, baud, False) as fd:
         parser = frame.Feedback()
         fb = initial_feedback(fd, parser)

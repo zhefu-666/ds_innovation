@@ -1,3 +1,4 @@
+#include "rescue/stage_audit.hpp"
 #include "rescue/zone_keypoints.hpp"
 #include "rescue/rknn_model.hpp"
 #include <algorithm>
@@ -9,6 +10,7 @@ ZoneHalves decodeZonePose(const cv::Mat &output,const ModelImage &image,cv::Size
         throw std::runtime_error("Expected float32 [1,18,N] zone pose output (2 classes, 4 keypoints)");
     if(!std::isfinite(box_confidence)||box_confidence<0||box_confidence>1)throw std::runtime_error("Invalid pose threshold");
     if(image.sx<=0||image.sy<=0)throw std::runtime_error("Invalid letterbox scale");
+    AuditScope audit("pose.decode");
     const int count=output.size[2];const float *raw=output.ptr<float>();
     const auto at=[&](int row,int i){return raw[row*count+i];};
     std::array<int,2> best{-1,-1};

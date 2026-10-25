@@ -182,7 +182,7 @@ def make_plan(args, p):
         if not -40 <= args.offset_deg <= 40:
             raise ValueError('相机内部/TX偏移角须为-40..40°')
         required = ['frame_config', 'acceptance']
-        command = [py, str(ROOT/'tools/camera_pitch/pitch_ctl.py'), 'set', str(args.offset_deg+40),
+        command = [py, str(ROOT/'tools/camera_pitch/pitch_ctl.py'), 'set', str(args.offset_deg+120),
                    '--port', p['port'], '--baud', str(p['baud']), '--frame-config', p['frame_config'], '--timeout', '2']
     elif action in WHEELS:
         required = ['frame_config', 'acceptance']

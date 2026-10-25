@@ -1,3 +1,4 @@
+#include "rescue/stage_audit.hpp"
 #include "rescue/zone_color.hpp"
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
@@ -46,6 +47,7 @@ ZoneColorResult resolveZoneColor(ZoneColorResult measured,const std::string& tea
 }
 ZoneColorResult ZoneColorClassifier::classify(const cv::Mat& frame,const ZoneHalves& halves,
                                               const std::vector<SegDetection>& objects,float threshold) const {
+    AuditScope audit("logic.zone_color");
     ZoneColorResult result;
     if(!config_.measured)return result;
     if(frame.empty()||frame.type()!=CV_8UC3){result.reason="invalid_color_frame";return result;}

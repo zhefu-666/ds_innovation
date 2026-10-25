@@ -8,7 +8,7 @@ from demo import demo_lock
 
 def packet(vx):
     if vx not in (0,.4):raise ValueError('Only zero or 0.4 m/s')
-    raw=struct.pack('<BffbBh',0x56,vx,0.,0,24,5)
+    raw=struct.pack('<BffbBh',0x56,vx,0.,5,24,5)
     return raw+struct.pack('<H',s.frame.crc16(raw))
 
 def run(fd,parser,emit=print):
@@ -33,6 +33,7 @@ def run(fd,parser,emit=print):
         emit(json.dumps({'event':'ZERO_SENT','elapsed_s':time.monotonic()-start,'packets':count,'physical_speed_measured':False}))
 
 def main():
+    raise RuntimeError("旧场次专用测试已失效，请重新验收后再使用")
     if sys.argv[1:]!=['--run','--clear-straight-confirmed','--watchdog-tested']:
         print('PREVIEW NO_TX: .4 m/s, .2 s, nominal .08 m, packet='+packet(.4).hex(' '));return
     signal.signal(signal.SIGTERM,lambda *_:sys.exit(130))

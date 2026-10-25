@@ -1,3 +1,4 @@
+#include "rescue/stage_audit.hpp"
 #include "rescue/detector.hpp"
 #include "rescue/rknn_model.hpp"
 #include <chrono>

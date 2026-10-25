@@ -56,7 +56,7 @@ class Camera:
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                cap.set(cv2.CAP_PROP_FPS, 30)
+                cap.set(cv2.CAP_PROP_FPS, self.args.fps)
                 start, count, next_encode = time.monotonic(), 0, 0
                 while not self.stop.is_set():
                     ok, frame = cap.read()
@@ -241,6 +241,6 @@ if __name__ == '__main__':
     parser.add_argument('--ws-port', type=int, default=8765)
     parser.add_argument('--fps', type=float, default=10)
     args = parser.parse_args()
-    if not 0 < args.fps <= 30:
-        parser.error('--fps must be between 0 and 30')
+    if not 0 < args.fps <= 60:
+        parser.error('--fps must be between 0 and 60')
     asyncio.run(main(args))

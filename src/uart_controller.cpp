@@ -305,9 +305,9 @@ bool UARTController::sendMotion(const MotionCommand &command) {
     // 同步后首包若与下位机当前状态相同，沿用下位机编号，不消耗编号。
     const int16_t gripper = command.gripper_offset;
     if(gripper!=0 && gripper!=20) return false;
-    const bool retry = command.frame_transaction != transaction_;
-    const bool keep_mcu_action = !retry && !gripper_sent_ && gripper_synced_ && gripper == gripper_target_;
-    if (!keep_mcu_action && (!gripper_sent_ || gripper != gripper_target_ || retry)) {
+    // MCU只在偏移变化时递增；重复事务不能创造新编号。
+    const bool keep_mcu_action = !gripper_sent_ && gripper_synced_ && gripper == gripper_target_;
+    if (!keep_mcu_action && (!gripper_sent_ || gripper != gripper_target_)) {
         gripper_action_id_ = nextGripperActionId(gripper_action_id_);
         gripper_target_ = gripper;
         action_started_us_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -378,11 +378,12 @@ std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand &comm
     MotionPacket packet;
     if (command.header != MotionPacket::kHeader) throw std::invalid_argument("Motion header must be 0x56");
     const bool valid = std::isfinite(command.vx_mps) && std::isfinite(command.wz_rps);
-    // 下位机对速度有限制：vx硬限幅，任何上层请求都不能超过±kMaxLinearSpeedMps。
-    packet.vx_mps = valid ? std::clamp(command.vx_mps, -kMaxLinearSpeedMps, kMaxLinearSpeedMps) : 0.0f;
+    // 协议不限制有限速度；业务层的运动约束仍由上层执行。
+    packet.vx_mps = valid ? command.vx_mps : 0.0f;
     packet.wz_rps = valid ? command.wz_rps : 0.0f;
     if(command.gripper_offset!=0 && command.gripper_offset!=20)throw std::invalid_argument("Frame requires OPEN=0 or CLOSE=20");
-    packet.gripper_offset = static_cast<int8_t>(command.gripper_offset);
+    // 业务层保留历史0开/20关；线缆仅发送新偏移+5开/-5关。
+    packet.gripper_offset = command.gripper_offset == 0 ? 5 : -5;
     packet.gripper_action_id = gripper_action_id;
     packet.camera_pitch_offset = cameraPitchToWire(command.camera_pitch_cdeg);
     std::vector<uint8_t> bytes(sizeof(packet));

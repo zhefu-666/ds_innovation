@@ -18,7 +18,7 @@ pitch_ctl.FRAME_MAPPING={"open":0,"close":1} # synthetic only
 class FakeLink:
     dry_run = False
 
-    def __init__(self, state=0, action_id=7, pitch=4500):
+    def __init__(self, state=0, action_id=7, pitch=12500):
         self.state, self.action_id, self.pitch = state, action_id, pitch
         self.sent = []
         self.last = None
@@ -39,13 +39,13 @@ class PreparePitchTests(unittest.TestCase):
         self.assertTrue(pitch_ctl.prepare_pitch_five(link, 0, 7, 1))
         self.assertTrue(link.sent)
         for packet in link.sent:
-            self.assertEqual(struct.unpack('<BffbBh', packet[:13]), (0x56, 0.0, 0.0, 0, 7, 5))
+            self.assertEqual(struct.unpack('<BffbBh', packet[:13]), (0x56, 0.0, 0.0, 5, 7, 5))
             self.assertEqual(struct.unpack('<H', packet[13:])[0], pitch_ctl.crc16(packet[:13]))
 
     def test_raised_frame_maps_binary_feedback_to_twenty_degrees(self):
         link = FakeLink(state=1)
         self.assertTrue(pitch_ctl.prepare_pitch_five(link, 1, 7, 1))
-        self.assertTrue(all(packet[9] == 20 and packet[10] == 7 for packet in link.sent))
+        self.assertTrue(all(packet[9] == 251 and packet[10] == 7 for packet in link.sent))
 
     def test_changed_gripper_feedback_fails(self):
         link = FakeLink(state=1)
@@ -58,18 +58,18 @@ class PreparePitchTests(unittest.TestCase):
 
     def test_missing_or_stale_feedback_prevents_camera_tx(self):
         link=pitch_ctl.Link(-1,False)
-        packet=pitch_ctl.motion_packet(0,7,4500)
+        packet=pitch_ctl.motion_packet(0,7,12500)
         with patch.object(pitch_ctl.os,'write') as write:
             with self.assertRaises(TimeoutError):link.send(packet)
-            link.last=(0,7,4500,b'');link.last_received=time.monotonic()-1
+            link.last=(0,7,12500,b'');link.last_received=time.monotonic()-1
             with self.assertRaises(TimeoutError):link.send(packet)
             write.assert_not_called()
 
     def test_changed_state_or_id_prevents_camera_tx(self):
         link=pitch_ctl.Link(-1,False);link.last_received=time.monotonic()
-        packet=pitch_ctl.motion_packet(0,7,4500)
+        packet=pitch_ctl.motion_packet(0,7,12500)
         with patch.object(pitch_ctl.os,'write') as write:
-            for feedback in [(1,7,4500,b''),(0,8,4500,b'')]:
+            for feedback in [(1,7,12500,b''),(0,8,12500,b'')]:
                 link.last=feedback
                 with self.assertRaises(ValueError):link.send(packet)
             write.assert_not_called()
