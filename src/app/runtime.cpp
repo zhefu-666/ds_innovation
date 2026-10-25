@@ -29,6 +29,9 @@
 #include "rescue/perception_adapter.hpp"
 #include "rescue/pixel_selector.hpp"
 #include "rescue/multi_view_capture.hpp"
+#include "rescue/camera_capture.hpp"
+#include "rescue/camera_settings.hpp"
+#include "rescue/stage_audit.hpp"
 #include "rescue/tracker.hpp"
 #include "rescue/utils.hpp"
 #include "rescue/vision_logic.hpp"
@@ -252,17 +255,27 @@ int Runtime::run() {
                                     zone_geometry, zone_colors, controlled_field, fusion);
     // Use the USB camera's MJPEG V4L2 path; automatic GStreamer negotiation
     // fails when applying the requested 720p/60 FPS settings on this board.
-    cv::VideoCapture camera(config.camera_index, cv::CAP_V4L2);
-    if (!camera.isOpened()) throw std::runtime_error("Cannot open camera");
-    camera.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
-    camera.set(cv::CAP_PROP_FRAME_WIDTH, config.frame_width);
-    camera.set(cv::CAP_PROP_FRAME_HEIGHT, config.frame_height);
-    camera.set(cv::CAP_PROP_FPS, config.fps);
-    camera.set(cv::CAP_PROP_BUFFERSIZE, 1); // backend may ignore; timestamp remains host dequeue time
+    cv::VideoCapture camera;
+    std::unique_ptr<CameraCapture> camera_capture;
+    cv::Size capture_size;
+    if (config.async_capture) {
+        camera_capture = std::make_unique<CameraCapture>(config.camera_index,
+            config.frame_width, config.frame_height, config.fps, config.input_size);
+        if (!camera_capture->start()) throw std::runtime_error("Cannot open camera");
+        CameraFrame first;
+        if (!camera_capture->waitNext(0, first, 2000)) throw std::runtime_error("Camera startup timed out");
+        capture_size = first.image.size();
+        std::cout << "[CAMERA] async latest-frame capture; timestamps=host_read_complete, not sensor exposure\n";
+    } else {
+        camera.open(config.camera_index, cv::CAP_V4L2);
+        if (!camera.isOpened()) throw std::runtime_error("Cannot open camera");
+        configureCameraCapture(camera, config.camera_index, config.frame_width, config.frame_height, config.fps);
+        camera.set(cv::CAP_PROP_BUFFERSIZE, 1); // backend may ignore; timestamp remains host dequeue time
+        capture_size = {int(camera.get(cv::CAP_PROP_FRAME_WIDTH)), int(camera.get(cv::CAP_PROP_FRAME_HEIGHT))};
+    }
     cv::VideoWriter writer;
     if (config.save_output) {
-        writer.open("output_cpp.mp4", cv::VideoWriter::fourcc('m','p','4','v'), config.fps,
-                    cv::Size(camera.get(cv::CAP_PROP_FRAME_WIDTH), camera.get(cv::CAP_PROP_FRAME_HEIGHT)));
+        writer.open("output_cpp.mp4", cv::VideoWriter::fourcc('m','p','4','v'), config.fps, capture_size);
         if (!writer.isOpened()) throw std::runtime_error("Cannot open recording");
     }
     std::cout << (link ? "Ground-pushing LIVE: motion follows PushTask; still gated by safety/geometry evidence.\n"
@@ -296,18 +309,40 @@ int Runtime::run() {
             std::cout<<"[DEMO_RESULT] wall_budget_exhausted mode="<<config.demo_mode<<"\n";
             demo_exit=config.demo_mode=="recognize"?0:2;break;
         }
+        AuditScope iteration_audit("main.iteration");
         const auto capture_started = Clock::now();
         cv::Mat frame;
-        if (!camera.read(frame) || frame.empty()) throw std::runtime_error("Camera frame lost");
+        ModelImage prepared_image;
+        uint64_t timestamp = 0, epoch_ns = 0;
+        if (camera_capture) {
+            CameraFrame captured;
+            if (!camera_capture->waitNext(frame_sequence, captured, config.sensor_timeout_ms))
+                throw std::runtime_error("Camera frame lost or capture timed out");
+            frame = std::move(captured.image);
+            prepared_image = std::move(captured.prepared);
+            timestamp = captured.timestamp_us;
+            epoch_ns = captured.epoch_ns;
+            frame_sequence = captured.frame_number;
+        } else {
+            if (!camera.read(frame) || frame.empty()) throw std::runtime_error("Camera frame lost");
+            const auto read_at = Clock::now();
+            epoch_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            timestamp = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(read_at.time_since_epoch()).count());
+            ++frame_sequence;
+        }
         const auto now = Clock::now();
-        const auto epoch_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
         const double capture_ms = std::chrono::duration<double, std::milli>(now - capture_started).count();
-        const auto timestamp = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
-        ++frame_sequence;
+        if (camera_capture) {
+            const auto now_us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
+            if (timestamp > now_us || now_us - timestamp > uint64_t(config.sensor_timeout_ms) * 1000)
+                throw std::runtime_error("Camera frame is stale");
+        }
         // Detect and pose share this frame's id and capture time.
-        auto vision_result=vision_frontend.infer(frame,timestamp);
+        auto vision_result=vision_frontend.infer(frame,timestamp,camera_capture?&prepared_image:nullptr);
+        AuditScope logic_audit("main.logic_and_logs");
         auto& raw=vision_result.detections;
         for(auto& d:raw){d.frame_id=frame_sequence;d.timestamp_us=timestamp;}
         auto detections = tracker.update(raw, timestamp);

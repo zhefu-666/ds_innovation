@@ -1,4 +1,5 @@
 #include "rescue/app/perception_pipeline.hpp"
+#include "rescue/stage_audit.hpp"
 #include "rescue/utils.hpp"
 #include <future>
 #include <stdexcept>
@@ -13,10 +14,12 @@ PerceptionPipeline::PerceptionPipeline(const Config &config)
     }
 }
 
-PerceptionResult PerceptionPipeline::infer(const cv::Mat &frame, uint64_t timestamp_us) {
+PerceptionResult PerceptionPipeline::infer(const cv::Mat &frame, uint64_t timestamp_us,
+                                           const ModelImage *prepared) {
     const auto ms = [](Clock::time_point a, Clock::time_point b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
+    AuditScope audit("vision.total");
     PerceptionResult r;
     const auto started = Clock::now();
     if (!rknn_) {
@@ -24,7 +27,8 @@ PerceptionResult PerceptionPipeline::infer(const cv::Mat &frame, uint64_t timest
         r.detect_ms = r.total_ms = ms(started, Clock::now());
         return r;
     }
-    const auto image = prepareModelImage(frame, config_.input_size);
+    const ModelImage image = prepared && !prepared->rgb.empty()
+        ? *prepared : prepareModelImage(frame, config_.input_size);
     const auto runPose = [&] {
         const auto t = Clock::now();
         auto halves = pose_->infer(image, frame.size());

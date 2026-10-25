@@ -2,6 +2,7 @@
 
 #include "rescue/config.hpp"
 #include "rescue/detector.hpp"
+#include "rescue/model_io.hpp"
 #include "rescue/zone_keypoints.hpp"
 #include <cstdint>
 #include <memory>
@@ -22,7 +23,7 @@ class PerceptionPipeline {
 public:
     explicit PerceptionPipeline(const Config &config);
     bool hasPose() const { return pose_ != nullptr; }
-    PerceptionResult infer(const cv::Mat &frame, uint64_t timestamp_us);
+    PerceptionResult infer(const cv::Mat &frame, uint64_t timestamp_us, const ModelImage *prepared = nullptr);
 
 private:
     Config config_;
