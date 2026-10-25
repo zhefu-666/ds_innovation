@@ -1,7 +1,10 @@
 # 新接手快速上手指南
 
-验证日期：2026-10-24。适用于本机 `/home/jy/ds_innovation` 与车端
-`cat:/home/cat/ds_innovation-refactor-20261024` 这份对应快照。
+> **适用范围提醒**：本文件记录 2026-10-24 的实测快照，当时车端使用隔离目录
+> `/home/cat/ds_innovation-refactor-20261024`（现已不存在）与 `build-arm64-selfcontained/`。
+> 当前分支入口与目录见 [运行与调试](运行与调试.md)；下文的目录名和测试计数都属于那次快照，不要当作当前值。
+
+验证日期：2026-10-24。适用于本机 `/home/jy/ds_innovation` 与当时车端的对应快照。
 
 ## 1. 先看结论
 
@@ -54,7 +57,7 @@ ssh cat
 ```
 
 ```bash
-cd /home/cat/ds_innovation-refactor-20261024
+cd /home/cat/ds_innovation
 ```
 
 - 本机：x86，GCC 11.4、OpenCV 4.5.4，可进行无 RKNN 构建和离线测试。
@@ -77,7 +80,7 @@ cd /home/cat/ds_innovation-refactor-20261024
 ./build-onboarding-offline/rescue_upper_host --config config/runtime/push_replay.json
 ```
 
-车端将二进制换成 `build-arm64-selfcontained/rescue_upper_host`。输出中的 `vx/wz` 是算法计算值，
+车端将二进制换成 `build-arm64-consolidation-20261025/rescue_upper_host`（当时快照为 `build-arm64-selfcontained/`）。输出中的 `vx/wz` 是算法计算值，
 **不是实际车速，也不表示命令已发送**。
 
 正常结果：状态从搜索、接近、捕获，进入搬运、区域入口、交付核验，最终返回 `SCAN`，
