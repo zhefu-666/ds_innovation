@@ -212,7 +212,7 @@ void PushTask::clearTrip() {
     release_retreat_.clearTrip();
     push_in_.clearTrip();
     vref_used_ = false;
-    carry_progress_us_ = 0;
+    carry_approach_.reset();
     sweep_non_supply_active_ = false;
     cue_mode_ = false;
     clear_commanded_us_ = clear_planned_us_ = 0;
@@ -935,7 +935,7 @@ PushOutput PushTask::update(const PushObservation& in) {
         enter(resumeState(), now, "resume");
         if (state_ == PushState::CARRY) { // a pause is not carry time; re-check the hold
             carry_us_ = now;
-            carry_progress_us_ = 0;
+            carry_approach_.reset();
             step_ = 1;
         }
         stopped_from_ = PushState::WAIT_START;
@@ -2301,7 +2301,7 @@ PushOutput PushTask::update(const PushObservation& in) {
                     carry_us_ = now;
                     zone_search_started_us_ = 0;
                     if (verification.outcome == CaptureVerificationOutcome::Assumed)
-                        carry_progress_us_ = 0;
+                        carry_approach_.reset();
                     enter(PushState::CARRY, now, "");
                     hold_seen_us_ = now;
                     carried_ = 0;
@@ -2358,50 +2358,33 @@ PushOutput PushTask::update(const PushObservation& in) {
                 // 视觉闭环：YOLO-pose区域位姿锚定在里程系；沿区域中轴“追踪前视点”接近，丢失视野时用IMU航向+缩放位移继续推算。
                 if (zone_.valid(now)) {
                     const ZoneEstimate z = zone_.predicted(now);
-                    const bool fresh = now - vref_seen_us_ <= 400000;
                     const cv::Point2f hold = z.bodyToZone({0, holdCenter()});
+                    CarryApproachContext context;
+                    context.now_us = now;
+                    context.hold = hold;
+                    context.carrot = z.zoneToBody(
+                        {halfX(),
+                         std::min(hold.y + t_.assume_lookahead_m, -t_.assume_release_gap_m)});
+                    context.fresh_fix = now - vref_seen_us_ <= 400000;
+                    context.imu_blocked_us = in.imu_blocked_us;
+                    context.hold_center = holdCenter();
                     vref_used_ = true;
                     zone_search_started_us_ = 0;
                     lockDropHalf("assumed_trip");
-                    if (!carry_progress_us_ ||
-                        hold.y > carry_best_y_ + t_.assume_stall_progress_m) {
-                        carry_best_y_ = hold.y;
-                        carry_progress_us_ = now;
-                    }
-                    // Blocked by the zone rim: no forward progress near the front edge counts as
-                    // arrived. The IMU decides "pressed against the rim" (dead reckoning keeps
-                    // advancing while the wheels slip); a vision-only no-progress check needs a
-                    // fresh fix.
-                    const bool imu_blocked = in.imu_blocked_us >= t_.assume_imu_block_us &&
-                                             hold.y >= -t_.assume_imu_block_near_m;
-                    if (imu_blocked || (fresh && hold.y >= -t_.assume_stall_near_m &&
-                                        now - carry_progress_us_ >= t_.assume_stall_us)) {
-                        noteDropZone(imu_blocked ? "release_stall_imu" : "release_stall", hold);
-                        enter(PushState::RAISE_RELEASE,
-                              now,
-                              imu_blocked ? "assumed_drop_point_imu_blocked"
-                                          : "assumed_drop_point_stalled");
+                    const auto approach = carry_approach_.update(t_, context);
+                    if (approach.outcome == CarryApproachOutcome::RaiseRelease) {
+                        noteDropZone(approach.drop_event, hold);
+                        enter(PushState::RAISE_RELEASE, now, approach.reason);
                         break;
                     }
-                    if (hold.y >= -t_.assume_release_gap_m) {
-                        noteDropZone("release", hold);
-                        enter(PushState::RAISE_RELEASE,
-                              now,
-                              fresh ? "assumed_drop_point_visual" : "assumed_drop_point_visual_dr");
-                        break;
-                    }
-                    const cv::Point2f carrot = z.zoneToBody(
-                        {halfX(),
-                         std::min(hold.y + t_.assume_lookahead_m, -t_.assume_release_gap_m)});
-                    reason_ = fresh ? "assumed_visual_carry" : "assumed_visual_dead_reckoning";
-                    const float h = std::atan2(-carrot.x, std::max(.02f, carrot.y - holdCenter()));
-                    if (std::abs(h) > t_.rotate_in_place_rad &&
-                        hold.y < -t_.assume_release_gap_m - t_.assume_align_zone_m) {
-                        // 离区前沿还远：边走边转，不原地等转向（原地转实测很慢，会卡几秒）；临近前沿再原地对正。
-                        drive(t_.carry_speed * std::max(.4f, std::cos(std::min(std::abs(h), 1.f))),
-                              t_.heading_gain * h);
+                    reason_ = approach.reason;
+                    if (approach.blend) {
+                        drive(
+                            t_.carry_speed *
+                                std::max(.4f, std::cos(std::min(std::abs(approach.heading), 1.f))),
+                            t_.heading_gain * approach.heading);
                     } else
-                        steer(t_.carry_speed, h);
+                        steer(t_.carry_speed, approach.heading);
                     break;
                 }
                 if (!t_.assume_all_safe) {

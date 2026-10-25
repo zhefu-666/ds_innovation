@@ -59,7 +59,7 @@ struct Rig {
         task.frame_transaction_ = task.wire_txn_ = kTransaction;
         task.wire_last_ = 0;
         task.carry_us_ = 333;
-        task.carry_progress_us_ = kProgress;
+        task.carry_approach_.seedProgressUs(kProgress);
         task.hold_seen_us_ = 444;
         task.zone_search_started_us_ = 555;
         task.carried_ = 2.f;
@@ -110,7 +110,7 @@ struct Rig {
         assert(task.carry_us_ == input.now_us && task.hold_seen_us_ == input.now_us);
         assert(task.zone_search_started_us_ == 0 && task.carried_ == 0);
         assert(task.phase_us_ == input.now_us);
-        assert(task.carry_progress_us_ == (assumed ? 0 : kProgress));
+        assert(task.carry_approach_.progressUs() == (assumed ? 0 : kProgress));
         assert(!task.fault_);
         closed();
         blacklisted(false);
@@ -124,7 +124,7 @@ struct Rig {
                   << " transaction=" << output.motion.frame_transaction
                   << " blacklisted=" << rejected.size() << " fault=" << task.fault_
                   << " phase_us=" << task.phase_us_ << " carry_us=" << task.carry_us_
-                  << " carry_progress_us=" << task.carry_progress_us_
+                  << " carry_progress_us=" << task.carry_approach_.progressUs()
                   << " hold_seen_us=" << task.hold_seen_us_
                   << " zone_search_us=" << task.zone_search_started_us_
                   << " carried=" << task.carried_ << '\n';
@@ -151,7 +151,7 @@ void verifiedTests() {
         rig.tick();
         assert(rig.output.state == PushState::VERIFY_CAPTURE);
         assert(rig.output.reason == "seed_reason" && rig.output.verdict == RuleVerdict::DANGEROUS);
-        assert(rig.task.phase_us_ == kStart && rig.task.carry_progress_us_ == kProgress);
+        assert(rig.task.phase_us_ == kStart && rig.task.carry_approach_.progressUs() == kProgress);
         rig.closed();
         rig.report("continue_single");
         rig.tick();
@@ -348,7 +348,7 @@ void lifecycleTests() {
         assert(rig.task.trip_ == ordinary() && !rig.task.fault_);
         assert(rig.task.carry_us_ == rig.input.now_us &&
                rig.task.hold_seen_us_ == rig.input.now_us);
-        assert(rig.task.carry_progress_us_ == 0 && rig.task.carried_ == 0);
+        assert(rig.task.carry_approach_.progressUs() == 0 && rig.task.carried_ == 0);
         rig.closed();
         rig.blacklisted(false);
         rig.report("new_capture_after_reset");

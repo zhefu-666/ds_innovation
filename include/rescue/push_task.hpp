@@ -7,6 +7,7 @@
 #include "rescue/task/capture_verification_stage.hpp"
 #include "rescue/task/delivery_verification_stage.hpp"
 #include "rescue/task/release_retreat_stage.hpp"
+#include "rescue/task/carry_approach_stage.hpp"
 #include "rescue/task/enter_stage.hpp"
 #include "rescue/task/push_in_stage.hpp"
 #include "rescue/task/sweep_ledger.hpp"
@@ -703,8 +704,6 @@ class PushTask {
         enemy_evade_count_ = 0; // phase: 0 idle, 1 turning about, 2 driving away
     float enemy_evade_turned_ = 0, enemy_evade_yaw_ = 0, enemy_evade_last_yaw_ = 0;
     uint64_t enemy_evade_start_us_ = 0, enemy_evade_cool_until_us_ = 0;
-    float carry_best_y_ = 0;
-    uint64_t carry_progress_us_ = 0;
     uint64_t last_us_ = 0, phase_us_ = 0, gripper_us_ = 0, carry_us_ = 0, pitch_wait_us_ = 0,
              hold_seen_us_ = 0;
     // Dead-reckoned from the previous command; only bounds a phase, never proves progress.
@@ -801,6 +800,7 @@ class PushTask {
     ReleaseRetreatStage release_retreat_;
     PushInStage push_in_;
     EnterStage enter_;
+    CarryApproachStage carry_approach_;
     SweepLedger sweep_ledger_;
     DisperseRushStage disperse_rush_;
     DisperseTurnStage disperse_turn_;
