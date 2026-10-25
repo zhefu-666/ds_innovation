@@ -658,7 +658,7 @@ class PushTask {
     std::string delivery_geometry_id_;
     std::string label_, reason_;
     Inventory trip_, pending_, seen_;
-    RuleVerdict verdict_ = RuleVerdict::OK, seen_verdict_ = RuleVerdict::OK;
+    RuleVerdict verdict_ = RuleVerdict::OK;
     bool first_ = false, fault_ = false, track_close_ = false, delivery_seen_ = false;
     uint8_t frame_raised_ = 0; // logical open, independent of wire angle
     bool sweep_open_ = false, sweep_open_done_ = false, sweep_open_disabled_ = false,
@@ -674,8 +674,6 @@ class PushTask {
     float bounded_approach_ = 0, bounded_retreat_ = 0;
     int16_t multi_view_pitch_ = kCameraPitchInvalid;
     int16_t pitch_cmd_ = t_.far_pitch_cdeg;
-    uint64_t rebind_since_us_ = 0;
-    uint64_t approach_last_us_ = 0;
     // PILE state
     int pile_phase_ = 0, pile_runs_ = 0, pile_seen_ = 0;
     uint64_t pile_phase_us_ = 0, pile_cool_until_us_ = 0;
@@ -731,8 +729,6 @@ class PushTask {
     }
     void noteCargo(const char* event, const cv::Point2f& rear, bool fix);
     void trackCargo(const PushObservation& in, uint64_t now);
-    float prep_ref_m_ = 0;
-    uint64_t prep_ref_us_ = 0, prep_last_us_ = 0;
     int scatter_approach_n_ = 0;
     bool scatter_far_ = false;
     float scatter_approach_m_ = 0;
@@ -754,10 +750,10 @@ class PushTask {
     uint64_t rush_stall_ref_us_ = 0, rush_stall_last_us_ = 0, rush_stall_obs_us_ = 0;
     int16_t rush_stall_pitch_ = kCameraPitchInvalid;
     int sweep_phase_ = 0, sweep_attempts_ = 0, sweep_seen_ = 0;
-    float sweep_creep_m_ = 0, sweep_travel0_ = 0;
+    float sweep_travel0_ = 0;
     float disperse_rush_m_ = 0, disperse_sign_ = 1;
     uint64_t disperse_cool_until_us_ = 0;
-    float sweep_yaw0_ = 0, sweep_sign_ = 1;
+    float sweep_yaw0_ = 0;
     uint64_t sweep_start_us_ = 0, sweep_t0_us_ = 0;
     int unstick_step_ = 0;
     uint64_t unstick_us_ = 0;
@@ -765,8 +761,6 @@ class PushTask {
     float rush_yaw_ref_ = 0;
     uint64_t prelower_us_ = 0;
     int rush_pulse_phase_ = 0, rush_pulse_count_ = 0;
-    float rush_pulse_yaw0_ = 0, rush_pulse_delta_ = 0;
-    uint64_t rush_pulse_start_us_ = 0, rush_pulse_t0_us_ = 0;
     bool uprightInCorridor(const PushObservation& in,
                            uint64_t now,
                            float& lateral,

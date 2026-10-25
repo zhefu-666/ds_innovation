@@ -75,29 +75,18 @@ struct SearchContext {
     int* rush_pulse_count = nullptr;
     int* precheck_seen = nullptr;
     int* precheck_rejects = nullptr;
-    float* sweep_creep_m = nullptr;
     float* sweep_travel0 = nullptr;
     float* sweep_yaw0 = nullptr;
-    float* sweep_sign = nullptr;
     float* last_range = nullptr;
     float* approach_last_heading = nullptr;
     float* approach_last_distance = nullptr;
     float* approach_last_world_yaw = nullptr;
-    float* rush_pulse_yaw0 = nullptr;
-    float* rush_pulse_delta = nullptr;
-    float* prep_ref_m = nullptr;
     float* disperse_sign = nullptr;
     float* disperse_rush_m = nullptr;
     float* scan_mid_limit = nullptr;
     uint64_t* sweep_start_us = nullptr;
     uint64_t* sweep_t0_us = nullptr;
-    uint64_t* rebind_since_us = nullptr;
-    uint64_t* approach_last_us = nullptr;
-    uint64_t* rush_pulse_start_us = nullptr;
-    uint64_t* rush_pulse_t0_us = nullptr;
     uint64_t* pile_cool_until_us = nullptr;
-    uint64_t* prep_last_us = nullptr;
-    uint64_t* prep_ref_us = nullptr;
     uint64_t* disperse_cool_until_us = nullptr;
     bool* sweep_non_supply_active = nullptr;
     bool* post_disperse_mid = nullptr;
@@ -106,7 +95,6 @@ struct SearchContext {
     bool* disperse_small = nullptr;
     int16_t* approach_pitch = nullptr;
     RuleVerdict* verdict = nullptr;
-    RuleVerdict* seen_verdict = nullptr;
     Inventory* seen = nullptr;
 
     SweepLedger* sweep_ledger = nullptr;
@@ -201,5 +189,12 @@ class SearchStage {
     float vis_bearing_ = 0;
     uint64_t vis_last_seen_us_ = 0, vis_chase_t0_ = 0, vis_cool_until_us_ = 0;
     uint64_t scan_hold_t0_ = 0, scan_hold_last_sight_us_ = 0, scan_hold_cool_until_us_ = 0;
+    float sweep_creep_m_ = 0, sweep_sign_ = 1;
+    float rush_pulse_yaw0_ = 0, rush_pulse_delta_ = 0;
+    uint64_t rush_pulse_start_us_ = 0, rush_pulse_t0_us_ = 0;
+    float prep_ref_m_ = 0;
+    uint64_t prep_last_us_ = 0, prep_ref_us_ = 0;
+    uint64_t rebind_since_us_ = 0, approach_last_us_ = 0;
+    RuleVerdict seen_verdict_ = RuleVerdict::OK;
 };
 } // namespace rescue
