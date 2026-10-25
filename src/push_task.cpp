@@ -78,7 +78,7 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     delivery_verification_.resetConfirmations();
     state_ = s;
     phase_us_ = now;
-    scan_last_valid_ = false;
+    search_.resetScanHeading();
     travel_ = 0;
     travel_limit_ = 0;
     sweep_phase_ = 0;
@@ -102,10 +102,7 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     if (s != PushState::SCAN) {
         scatter_idle_since_us_ = 0;
         scatter_seen_ = 0;
-        confirm_since_us_ = 0;
-        vis_hits_ = vis_miss_ = 0;
-        vis_chase_t0_ = 0;
-        scan_hold_t0_ = scan_hold_cool_until_us_ = 0;
+        search_.resetScanTracking();
     }
     if (s != PushState::RUSH)
         rush_yaw_ref_set_ = false; // PREPARE (tracked) -> RUSH keeps the last seen target bearing
@@ -753,7 +750,7 @@ PushOutput PushTask::update(const PushObservation& in) {
         disperse_cool_until_us_ = 0;
         scatter_cool_until_us_ = 0;
         sweep_ledger_.reset();
-        confirm_since_us_ = 0;
+        search_.resetConfirmSince();
         zone_mem_ = zone_enemy_ = cs_active_ = run_yaw0_set_ = false;
         scatter_count_ = 0;
         scatter_approach_n_ = 0;
@@ -1673,251 +1670,109 @@ PushOutput PushTask::update(const PushObservation& in) {
                 drive(t_.startup_advance_speed, hold_wz);
             }
             break;
-        case PushState::SCAN: {
-            commandFrame(0, now);
-            approach_forward_ = 0; // scans turn in place: the retreat bound restarts at the lock
-            const bool cue = cueCandidate();
-            const bool cand = candidate(in, now);
-            if (in.heading_valid && std::isfinite(in.heading_rad)) {
-                if (scan_last_valid_)
-                    scan_turn_acc_ += std::abs(wrapAngle(in.heading_rad - scan_last_heading_));
-                scan_last_heading_ = in.heading_rad;
-                scan_last_valid_ = true;
-            } else
-                scan_last_valid_ = false;
-            cv::Point2f weak_pt(0.f, 0.f);
-            bool weak_hold = false;
-            if (cand && !cue && scatter_ok && weakCandidate(in)) {
-                weak_pt = targetBody();
-                weak_hold =
-                    weak_pt.y >= t_.blind_scatter_min_y_m && weak_pt.y <= far_y &&
-                    std::abs(weak_pt.x) <= t_.blind_scatter_half_x_m &&
-                    std::abs(std::atan2(-weak_pt.x, weak_pt.y)) <= t_.blind_scatter_max_bearing_rad;
-            }
-            // A lock this far out is not trusted (class / position are off at this range): a group
-            // of several objects is enough to drive toward; once it is within
-            // blind_scatter_far_chase_m the normal decision takes over.
-            if (cand && !cue && !weak_hold && scatter_ok && approach_ok &&
-                std::isfinite(in.distance_m) && in.distance_m > t_.blind_scatter_far_chase_m) {
-                std::vector<cv::Point2f> pts = in.clutter_body;
-                pts.emplace_back(targetBody());
-                ord_extra.push_back(pts.back());
-                if (!clutter_fresh) {
-                    const cv::Point2f lock_pt = pts.back();
-                    pts.assign(1, lock_pt);
-                }
-                findBest(pts, far_y, t_.blind_scatter_far_radius_m);
-                // An ordinary supply that is being confirmed (confirm_frames) is not pre-empted by
-                // the shorter cluster count. The hold starts at the first held tick and ends after
-                // sweep_confirm_wait_us whatever the lock does (an id that flips every frame cannot
-                // hold the cluster back for ever); the opening burst drive is never held back.
-                const bool pending = t_.sweep_confirm_wait_us > 0 && confirmations_ > 0 &&
-                                     confirmations_ < t_.confirm_frames &&
-                                     targetKind(in.label) == TargetKind::ORDINARY &&
-                                     !(t_.first_burst && !burst_drive_used_);
-                if (best_n >= t_.blind_scatter_far_lock_min && best_d > t_.blind_scatter_max_y_m) {
-                    bool hold = false;
-                    if (pending) {
-                        if (!confirm_since_us_)
-                            confirm_since_us_ = now;
-                        hold = now - confirm_since_us_ < t_.sweep_confirm_wait_us;
-                    }
-                    if (hold) {
-                        far_seen_ = 0;
-                        reason_ = "sweep_defer_target_confirm";
-                    } else if (++far_seen_ >= t_.sweep_confirm) {
-                        far_seen_ = 0;
-                        confirm_since_us_ = 0;
-                        beginScatter(true, false, "blind_scatter_far_group");
-                        break;
-                    }
-                } else {
-                    far_seen_ = 0;
-                    confirm_since_us_ = 0;
-                }
-            } else if (t_.dense_no_lock && cand && !cue && !weak_hold &&
-                       (scatter_ok || scatter_multi_ok) && clutter_fresh &&
-                       std::isfinite(in.distance_m)) {
-                // Several objects together: do not lock one of them, push on and split the group
-                // (the committed sweep ignores the lock).
-                far_seen_ = 0;
-                confirm_since_us_ = 0;
-                std::vector<cv::Point2f> pts = in.clutter_body;
-                pts.emplace_back(targetBody());
-                ord_extra.push_back(pts.back());
-                // Lock only while few targets are in view: beyond lock_max_visible any pair that
-                // sits together is swept open-frame instead.
-                int visible_n = 0;
-                for (const auto& q : pts)
-                    if (std::isfinite(q.x) && std::isfinite(q.y) &&
-                        q.y >= t_.blind_scatter_min_y_m && q.y <= far_y)
-                        ++visible_n;
-                const bool multi =
-                    t_.lock_max_visible > 0 && visible_n > t_.lock_max_visible && scatter_multi_ok;
-                int g = 0;
-                if (multi)
-                    g = evalGroup(pts,
-                                  t_.lock_multi_group_min,
-                                  t_.lock_multi_group_min,
-                                  t_.lock_multi_radius_m);
-                const bool multi_hit = g != 0;
-                if (!g && scatter_ok)
-                    g = evalGroup(pts, t_.blind_scatter_min, t_.blind_scatter_far_min);
-                if (g) {
-                    if (++dense_seen_ < t_.sweep_confirm) {
-                        reason_ = "dense_group_confirm";
-                        break;
-                    }
-                    dense_seen_ = 0;
-                    beginScatter(g == 2,
-                                 true,
-                                 multi_hit ? (g == 2 ? "multi_visible_far" : "multi_visible_split")
-                                           : (g == 2 ? "dense_group_far" : "dense_group_split"));
-                    break;
-                }
-                dense_seen_ = 0;
-            } else {
-                far_seen_ = 0;
-                confirm_since_us_ = 0;
-                dense_seen_ = 0;
-            }
-            if ((!cand && !cue) || weak_hold) {
-                confirmations_ = 0;
-                target_id_ = -1;
-                cue_mode_ = false;
-                reason_ = scan_ok ? "searching_target" : "scan_path_blocked";
-                if (scan_ok && in.target_is_search_cue && clear_attempts_ >= t_.max_clear_attempts)
-                    reason_ = "cue_attempt_limit";
-                if (weak_hold)
-                    reason_ = "weak_target_scatter_wait";
-                if (unstick())
-                    break;
-                if (t_.visual_chase && !cue) {
-                    const bool seen = in.target_valid && in.target_id >= 0 &&
-                                      in.pixel_bearing_valid && std::isfinite(in.pixel_bearing) &&
-                                      in.pixel_confidence >= t_.visual_chase_min_conf &&
-                                      targetSelectable(in.label, first_) && !in.target_in_zone;
-                    if (seen) {
-                        ++vis_hits_;
-                        vis_miss_ = 0;
-                        vis_bearing_ = in.pixel_bearing;
-                        vis_last_seen_us_ = now;
-                    } else if (++vis_miss_ > t_.visual_chase_miss_frames) {
-                        vis_hits_ = 0;
-                        vis_chase_t0_ = 0;
-                    }
-                    if (vis_hits_ >= t_.visual_chase_frames &&
-                        now - vis_last_seen_us_ <= t_.visual_chase_hold_us &&
-                        now >= vis_cool_until_us_ && scan_ok) {
-                        if (!vis_chase_t0_)
-                            vis_chase_t0_ = now;
-                        if (now - vis_chase_t0_ > t_.visual_chase_budget_us) {
-                            vis_hits_ = 0;
-                            vis_chase_t0_ = 0;
-                            vis_cool_until_us_ = now + t_.visual_chase_cool_us;
-                        } else if (std::abs(vis_bearing_) > t_.rotate_in_place_rad) {
-                            reason_ = "visual_chase_turn";
-                            drive(0, t_.heading_gain * vis_bearing_);
-                            break;
-                        } else if (forward_ok) {
-                            reason_ = "visual_chase";
-                            drive(t_.visual_chase_speed,
-                                  std::abs(vis_bearing_) > t_.heading_deadband_rad
-                                      ? t_.heading_gain * vis_bearing_
-                                      : 0.f);
-                            break;
-                        }
-                    }
-                }
-                // Nothing pickable in view but other objects are: they may be wrapping the ordinary
-                // supplies. Plough through the densest group. A far / few-pixel ordinary sighting
-                // is not worth chasing either: it joins the group and is ploughed through.
-                if (scatter_ok) {
-                    if (!scatter_idle_since_us_)
-                        scatter_idle_since_us_ = now;
-                    const bool looked = weak_hold || scatter_count_ > 0 ||
-                                        scan_turn_acc_ >= t_.blind_scatter_first_turn_rad;
-                    const bool fresh =
-                        weak_hold || (looked && in.clutter_ts_us && now >= in.clutter_ts_us &&
-                                      now - in.clutter_ts_us <= t_.sweep_fresh_us);
-                    if (fresh &&
-                        now - scatter_idle_since_us_ >=
-                            (weak_hold ? t_.weak_scatter_wait_us : t_.blind_scatter_wait_us)) {
-                        std::vector<cv::Point2f> pts = in.clutter_body;
-                        if (weak_hold) {
-                            pts.push_back(weak_pt);
-                            ord_extra.push_back(weak_pt);
-                        }
-                        const int need_n = weak_hold ? 1 : t_.blind_scatter_min;
-                        const int g =
-                            evalGroup(pts, need_n, weak_hold ? 1 : t_.blind_scatter_far_min);
-                        if (g) {
-                            if (++scatter_seen_ < t_.sweep_confirm) {
-                                reason_ = "blind_scatter_confirm";
-                                break;
-                            }
-                            // far: too far for the rush budget, drive closer first, then the normal
-                            // trigger fires from the short range
-                            beginScatter(g == 2,
-                                         false,
-                                         g == 2 ? "blind_scatter_far_start"
-                                                : "blind_scatter_start");
-                            break;
-                        }
-                        scatter_seen_ = 0;
-                    }
-                }
-                if (t_.scan_sighting_hold && !cue && now >= vis_cool_until_us_) {
-                    const bool sighted =
-                        in.pixel_reason == "confirming_three_frames" ||
-                        in.pixel_reason == "pixel_ratio_locked" ||
-                        in.pixel_reason == "lock_grace_waiting" ||
-                        (vis_hits_ > 0 && now - vis_last_seen_us_ <= t_.visual_chase_hold_us);
-                    if (sighted)
-                        scan_hold_last_sight_us_ = now;
-                    if (!scan_hold_t0_ && sighted && now >= scan_hold_cool_until_us_)
-                        scan_hold_t0_ = now;
-                    if (scan_hold_t0_) {
-                        if (now - scan_hold_t0_ <= t_.scan_hold_max_us &&
-                            now - scan_hold_last_sight_us_ <= t_.scan_hold_lost_us) {
-                            reason_ = "scan_sighting_hold";
-                            drive(0, 0);
-                            break;
-                        }
-                        scan_hold_t0_ = 0;
-                        scan_hold_cool_until_us_ = now + t_.scan_hold_cool_us;
-                    }
-                }
+        case PushState::SCAN:
+        case PushState::LOST_SEARCH:
+        case PushState::MID_REACQUIRE:
+        case PushState::NEAR_REACQUIRE:
+        case PushState::SELECT_CARGO: {
+            SearchContext context;
+            context.now_us = now;
+            context.elapsed_us = elapsed;
+            context.scan_ok = scan_ok;
+            context.forward_ok = forward_ok;
+            context.scatter_ok = scatter_ok;
+            context.clutter_fresh = clutter_fresh;
+            context.scatter_multi_ok = scatter_multi_ok;
+            context.approach_ok = approach_ok;
+            context.mid_pitch = midPitch();
+            context.trip_empty = trip_.total() == 0;
+            context.sweep_open = sweep_open_;
+            context.first_ordinary = first_;
+            context.frame_raised = frame_raised_;
+            context.far_y = far_y;
+            context.pending = &pending_;
+            context.target_id = &target_id_;
+            context.label = &label_;
+            context.confirmations = &confirmations_;
+            context.cue_mode = &cue_mode_;
+            context.search_cue_id = &search_cue_id_;
+            context.capture_target_id = &capture_target_id_;
+            context.step = &step_;
+            context.phase_us = &phase_us_;
+            context.turned = &turned_;
+            context.heading_seen = &heading_seen_;
+            context.last_heading = &last_heading_;
+            context.lost_round = &lost_round_;
+            context.scatter_seen = &scatter_seen_;
+            context.near_failures = &near_failures_;
+            context.scan_turn_acc = &scan_turn_acc_;
+            context.scatter_count = &scatter_count_;
+            context.scatter_approach_n = &scatter_approach_n_;
+            context.clear_attempts = &clear_attempts_;
+            context.scatter_idle_since_us = &scatter_idle_since_us_;
+            context.burst_drive_used = &burst_drive_used_;
+            context.burst_swing_armed = &burst_swing_armed_;
+            context.approach_forward = &approach_forward_;
+            context.reason = &reason_;
+
+            SearchServices services;
+            services.candidate = [&](const PushObservation& obs, uint64_t at) {
+                return candidate(obs, at);
+            };
+            services.weak_candidate = [&](const PushObservation& obs) {
+                return weakCandidate(obs);
+            };
+            services.cue_candidate = [&] {
+                return cueCandidate();
+            };
+            services.target_body = [&] {
+                return targetBody();
+            };
+            services.find_best =
+                [&](const std::vector<cv::Point2f>& pts, float max_y, float radius) {
+                    findBest(pts, max_y, radius);
+                    return BestGroup{best_n, best_d};
+                };
+            services.eval_group =
+                [&](const std::vector<cv::Point2f>& pts, int need_n, int far_need, float radius) {
+                    return evalGroup(pts, need_n, far_need, radius);
+                };
+            services.add_ordinary_extra = [&](const cv::Point2f& pt) {
+                ord_extra.push_back(pt);
+            };
+            services.begin_scatter = [&](bool far, bool commit, const char* why) {
+                beginScatter(far, commit, why);
+            };
+            services.drive = [&](float vx, float wz) {
+                drive(vx, wz);
+            };
+            services.scan_spin = [&] {
                 scanSpin();
-                break;
-            }
-            scatter_idle_since_us_ = 0;
-            scatter_seen_ = 0;
-            if (confirmations_ + 1 >= t_.confirm_frames)
-                scatter_approach_n_ = 0;
-            if (target_id_ != in.target_id || label_ != in.label || cue_mode_ != cue) {
-                target_id_ = in.target_id;
-                label_ = in.label;
-                confirmations_ = 0;
-                cue_mode_ = cue;
-                if (cue) {
-                    search_cue_id_ = target_id_;
-                    capture_target_id_ = -1;
-                } else {
-                    capture_target_id_ = target_id_;
-                    search_cue_id_ = -1;
-                }
-            }
-            if (++confirmations_ >= t_.confirm_frames) {
-                burst_swing_armed_ =
-                    false; // a normal lock ends the opening: no fast swing later in the match
-                if (t_.demo_search_only) {
-                    failStop("demo_target_found");
-                } else
-                    enter(cue ? PushState::CUE_APPROACH : PushState::APPROACH,
-                          now,
-                          cue ? "search_cue_locked" : "target_locked");
-            }
+            };
+            services.unstick = [&] {
+                return unstick();
+            };
+            services.enter = [&](PushState next, uint64_t at, const char* why) {
+                enter(next, at, why);
+            };
+            services.fail_stop = [&](const char* why) {
+                failStop(why);
+            };
+            services.scan_after_clear = [&](const char* why) {
+                scanAfterClear(why);
+            };
+            services.command_frame = [&](uint8_t open, uint64_t at) {
+                commandFrame(open, at);
+            };
+            services.reject_search_cue = [&](uint64_t at) {
+                if (search_cue_id_ >= 0)
+                    rejected_[search_cue_id_] = at + t_.blacklist_us;
+            };
+            services.search_lost = [&] {
+                searchLost();
+            };
+
+            search_.update(state_, t_, in, context, services);
             break;
         }
         case PushState::SCATTER: {
@@ -2537,100 +2392,6 @@ PushOutput PushTask::update(const PushObservation& in) {
             }
             break;
         }
-        case PushState::LOST_SEARCH: {
-            approach_forward_ = 0;
-            // pitchWait above finishes FAR transition before wheels can turn.
-            if (step_ == 0) {
-                step_ = 1;
-                phase_us_ = now;
-                turned_ = 0;
-                heading_seen_ = false;
-            }
-            if ((!in.gripper_closed_observed && !sweep_open_) || !in.heading_valid ||
-                !std::isfinite(in.heading_rad)) { // spinning is allowed with the frame closed
-                                                  // (confirmed) or deliberately open
-                failStop("lost_search_feedback_missing");
-                break;
-            }
-            if (now - phase_us_ >= 20000000 || turned_ >= 2 * float(CV_PI)) {
-                // A FAR sweep misses cargo right in front of the jaw; stop, tilt to 20deg, sweep
-                // again.
-                if (!lost_round_ && midPitch()) {
-                    lost_round_ = 1;
-                    enter(PushState::LOST_SEARCH, now, "lost_search_mid_pitch");
-                    break;
-                }
-                if (t_.lost_search_rescan && frame_raised_ == 0 && trip_.total() == 0) {
-                    // Nothing found in two sweeps: go back to the normal SCAN (far pitch, blind
-                    // scatter) instead of idling for the rest of the match.
-                    lost_round_ = 0;
-                    target_id_ = -1;
-                    confirmations_ = 0;
-                    enter(PushState::SCAN, now, "lost_search_rescan");
-                    break;
-                }
-                failStop("lost_search_exhausted");
-                break;
-            }
-            if (heading_seen_)
-                turned_ += std::abs(wrapAngle(in.heading_rad - last_heading_));
-            last_heading_ = in.heading_rad;
-            heading_seen_ = true;
-            if (candidate(in, now)) {
-                if (target_id_ != in.target_id || label_ != in.label) {
-                    target_id_ = in.target_id;
-                    label_ = in.label;
-                    confirmations_ = 0;
-                }
-                if (++confirmations_ >= t_.confirm_frames) {
-                    if (lost_round_ && in.distance_m <= t_.track_near_m) {
-                        // Close cargo found at 20deg: keep this view instead of tilting back to
-                        // FAR.
-                        target_id_ = capture_target_id_ = -1;
-                        cue_mode_ = false;
-                        enter(PushState::MID_REACQUIRE, now, "lost_target_reacquired_mid");
-                        break;
-                    }
-                    if (!t_.enable_search_cues) {
-                        // 搜索线索关闭（演示模式）：CUE_APPROACH永远不会成立，重新找回后直接回到APPROACH。
-                        capture_target_id_ = target_id_;
-                        search_cue_id_ = -1;
-                        cue_mode_ = false;
-                        enter(PushState::APPROACH, now, "lost_target_reacquired");
-                        break;
-                    }
-                    search_cue_id_ = target_id_;
-                    capture_target_id_ = -1;
-                    cue_mode_ = true;
-                    enter(PushState::CUE_APPROACH, now, "lost_target_reacquired");
-                }
-                break; // stop while confirming a newly seen cargo candidate
-            }
-            target_id_ = -1;
-            confirmations_ = 0;
-            if (frame_raised_ == 0 && trip_.total() == 0 && scatter_ok &&
-                clutter_fresh) { // a group in view needs a sweep, not more spinning
-                const int g =
-                    evalGroup(in.clutter_body, t_.blind_scatter_min, t_.blind_scatter_far_min);
-                if (g) {
-                    if (++scatter_seen_ < t_.sweep_confirm) {
-                        reason_ = "lost_group_confirm";
-                        break;
-                    }
-                    scatter_seen_ = 0;
-                    beginScatter(g == 2, true, g == 2 ? "lost_group_far" : "lost_group_sweep");
-                    break;
-                }
-            }
-            scatter_seen_ = 0;
-            if (unstick())
-                break;
-            reason_ = scan_ok ? (lost_round_ ? "rotating_for_lost_target_mid"
-                                             : "rotating_for_lost_target")
-                              : "lost_search_turn_blocked";
-            scanSpin();
-            break;
-        }
         case PushState::CUE_APPROACH: {
             commandFrame(0, now);
             // First-trip green preempts only a search cue, never an active cargo batch.
@@ -2679,62 +2440,6 @@ PushOutput PushTask::update(const PushObservation& in) {
                 break;
             }
             steer(t_.cue_approach_speed, in.heading_error);
-            break;
-        }
-        case PushState::MID_REACQUIRE:
-        case PushState::NEAR_REACQUIRE: {
-            const bool mid = state_ == PushState::MID_REACQUIRE;
-            // Preserve an already open jaw across a camera change; never close blindly.
-            // Global pitchWait has completed. Give re-identification a full 3s at stable TRACK.
-            if (step_ == 0) {
-                step_ = 1;
-                phase_us_ = now;
-                confirmations_ = 0;
-            }
-            if (now - phase_us_ >= 3000000) {
-                if (frame_raised_ == 1) {
-                    failStop("open_jaw_reacquire_timeout");
-                    break;
-                }
-                if (t_.enable_lost_search) {
-                    searchLost();
-                    break;
-                }
-                ++near_failures_;
-                if (near_failures_ >= 2) {
-                    failStop("near_reacquire_failed_stop");
-                    break;
-                }
-                scanAfterClear("near_reacquire_retry_search");
-                break;
-            }
-            if (!candidate(in, now)) {
-                confirmations_ = 0;
-                reason_ = mid ? "mid_no_valid_cargo" : "near_no_valid_cargo";
-                break;
-            }
-            if (frame_raised_ == 1 && (!in.corridor_complete || in.corridor != pending_ ||
-                                       checkTrip(in.corridor, first_) != RuleVerdict::OK)) {
-                confirmations_ = 0;
-                reason_ = "near_open_jaw_batch_unconfirmed";
-                break;
-            }
-            if (!forward_ok) {
-                confirmations_ = 0;
-                reason_ = mid ? "mid_cargo_path_blocked" : "near_cargo_path_blocked";
-                break;
-            }
-            if (capture_target_id_ != in.target_id || label_ != in.label) {
-                capture_target_id_ = in.target_id;
-                label_ = in.label;
-                confirmations_ = 0;
-            }
-            if (++confirmations_ >= t_.confirm_frames) {
-                target_id_ = capture_target_id_;
-                enter(mid ? PushState::MID_APPROACH : PushState::APPROACH,
-                      now,
-                      mid ? "mid_cargo_reacquired" : "near_cargo_reacquired");
-            }
             break;
         }
         case PushState::MID_APPROACH: {
@@ -2959,30 +2664,6 @@ PushOutput PushTask::update(const PushObservation& in) {
                 }
             }
             steer(t_.approach_speed, in.heading_error);
-            break;
-        }
-        case PushState::SELECT_CARGO: {
-            commandFrame(0, now);
-            if (elapsed > t_.prepare_budget_us) {
-                if (search_cue_id_ >= 0)
-                    rejected_[search_cue_id_] = now + t_.blacklist_us;
-                scanAfterClear("no_eligible_cargo");
-                break;
-            }
-            if (!candidate(in, now)) {
-                confirmations_ = 0;
-                reason_ = "waiting_eligible_cargo";
-                break;
-            }
-            if (capture_target_id_ != in.target_id || label_ != in.label) {
-                capture_target_id_ = in.target_id;
-                label_ = in.label;
-                confirmations_ = 0;
-            }
-            if (++confirmations_ >= t_.confirm_frames) {
-                target_id_ = capture_target_id_;
-                enter(PushState::APPROACH, now, "cargo_locked");
-            }
             break;
         }
         case PushState::CUE_PREPARE: {

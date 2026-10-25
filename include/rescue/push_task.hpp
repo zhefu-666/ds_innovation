@@ -13,6 +13,7 @@
 #include "rescue/task/disperse_swing_stage.hpp"
 #include "rescue/task/disperse_rush_stage.hpp"
 #include "rescue/task/recovery_stage.hpp"
+#include "rescue/task/search_stage.hpp"
 #include <map>
 #include <string>
 
@@ -666,8 +667,7 @@ class PushTask {
     uint64_t frame_transaction_ = 0, attempt_started_ = 0;
     uint64_t inplace_since_us_ = 0,
              inplace_last_us_ =
-                 0;      // continuous in-place turn tracking (demo APPROACH/RUSH turn escalation)
-    int dense_seen_ = 0; // dense-group confirmation frames
+                 0; // continuous in-place turn tracking (demo APPROACH/RUSH turn escalation)
     int wire_last_ = -1;
     uint64_t wire_txn_ = 0; // wire-level target/transaction: only a real open<->close change is a
                             // new action for the MCU
@@ -743,22 +743,15 @@ class PushTask {
     bool burst_drive_used_ = false, burst_fast_ = false, burst_swing_armed_ = false,
          burst_swing_ = false; // first_burst: drive spent / this far drive is fast / swing waiting
                                // for the next near scatter / this scatter swings fast
-    int vis_hits_ = 0, vis_miss_ = 0;
-    uint64_t vis_chase_t0_ = 0, vis_cool_until_us_ = 0, vis_last_seen_us_ = 0;
-    float vis_bearing_ = 0;
-    uint64_t scan_hold_t0_ = 0, scan_hold_last_sight_us_ = 0, scan_hold_cool_until_us_ = 0;
-    int scatter_count_ = 0, scatter_seen_ = 0, far_seen_ = 0;
+    int scatter_count_ = 0, scatter_seen_ = 0;
     bool scatter_commit_ = false;
     uint64_t scatter_cool_until_us_ = 0, scatter_idle_since_us_ = 0;
-    float scatter_yaw_ = 0, scatter_range_ = 0, scatter_back_ = 0, scan_turn_acc_ = 0,
-          scan_last_heading_ = 0;
-    bool scan_last_valid_ = false;
+    float scatter_yaw_ = 0, scatter_range_ = 0, scatter_back_ = 0, scan_turn_acc_ = 0;
     float scan_mid_limit_ = 0;
     bool post_disperse_mid_ = false;
     bool disperse_small_ = false;
     int mid_clear_n_ = 0;
     int precheck_seen_ = 0, precheck_rejects_ = 0;
-    uint64_t confirm_since_us_ = 0;
     bool rush_stall_phase_ = false;
     int rush_stall_id_ = -1, rush_stall_samples_ = 0, rush_stall_obs_frames_ = 0;
     float rush_stall_ref_m_ = 0;
@@ -821,6 +814,7 @@ class PushTask {
     DisperseTurnStage disperse_turn_;
     DisperseSwingStage disperse_swing_;
     RecoveryStage recovery_;
+    SearchStage search_;
     // 假设模式：YOLO-pose粗略区域位姿锚定在里程系，视野丢失后用IMU航向+缩放后的指令位移继续推算。
     AnchoredZone zone_;
     float odo_ = 0, ratio_est_ = 0, ratio_odo_ = 0, last_imu_yaw_ = 0;
