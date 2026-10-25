@@ -1,4 +1,5 @@
 #include "rescue/app/runtime_config.hpp"
+#include "rescue/config/file_reference.hpp"
 #include "rescue/config/demo_policy.hpp"
 #include "rescue/config/task_calibration.hpp"
 #include <algorithm>
@@ -539,18 +540,20 @@ void mark(ResolvedRuntimeConfig& r,
 
 void readCalibrationAudit(ResolvedRuntimeConfig& r) {
     try {
-        cv::FileStorage f(r.request.task_calibration_file, cv::FileStorage::READ);
+        const auto reference = splitFileReference(r.request.task_calibration_file);
+        cv::FileStorage f(reference.file, cv::FileStorage::READ);
         if (!f.isOpened()) {
             r.calibration_audit.audit_error = "metadata_unavailable";
             return;
         }
+        const auto root = selectFileNode(f, reference.fragment);
         auto& a = r.calibration_audit;
-        a.schema_version = int(f["schema_version"]);
-        for (const auto& node : f.root())
+        a.schema_version = int(root["schema_version"]);
+        for (const auto& node : root)
             a.provided_fields.push_back(node.name());
         const auto text = [&](const char* key, std::string& value) {
-            if (f[key].isString())
-                f[key] >> value;
+            if (root[key].isString())
+                root[key] >> value;
         };
         text("version", a.version);
         text("status", a.status);
@@ -559,8 +562,8 @@ void readCalibrationAudit(ResolvedRuntimeConfig& r) {
         text("action_mapping_source", a.action_mapping_source);
         text("a6_done_settle_source", a.a6_done_settle_source);
         text("frame_view_matching_source", a.frame_view_matching_source);
-        if (f["pending"].isSeq())
-            for (const auto& value : f["pending"])
+        if (root["pending"].isSeq())
+            for (const auto& value : root["pending"])
                 if (value.isString())
                     a.pending.push_back(std::string(value));
         for (const char* key : {"measured",
@@ -570,8 +573,8 @@ void readCalibrationAudit(ResolvedRuntimeConfig& r) {
                                 "body_envelope_verified",
                                 "visual_acceptance_passed",
                                 "box_area_accepted"})
-            if (f[key].isInt())
-                a.verification_flags[key] = int(f[key]);
+            if (root[key].isInt())
+                a.verification_flags[key] = int(root[key]);
     } catch (const cv::Exception& e) {
         r.calibration_audit.audit_error = e.what();
     }

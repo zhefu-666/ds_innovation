@@ -80,7 +80,7 @@ if [[ "$cpu_set" != all ]]; then
   taskset -c "$cpu_set" true || { echo "CPU 核配置不可用：$cpu_set" >&2; exit 1; }
   cpu_launcher=(taskset -c "$cpu_set")
 fi
-demo_profile="$PWD/config/demo_20261008.assume.json"
+demo_profile="$PWD/config/project.json#/profiles/demo_assume"
 known_file="/tmp/rescue-demo-$(id -u)/known_frame.json"
 placeholder=0
 frame_done=0
@@ -101,17 +101,10 @@ PY
 }
 
 build_args() {
-  args=(--team blue --no-show
-    --model models/detect_int8_split_20261022.rknn --rknn-library benchmark_results/librknnrt.so
-    --pose-model models/zone_pose_int8_split_20261022.rknn
-    --parallel-infer --detect-core 1 --pose-core 2 --async-capture
-    --camera 0 --width 1280 --height 720 --fps 60
-    --calibration config/camera.mechanical_5_40.yaml --zone-geometry config/zone_geometry.json
-    --zone-color-calibration config/zone_color.field.json
-    --task-calibration config/frame_20261008.assume.json
+  args=(--config config/project.json
+    --team blue --no-show --parallel-infer --async-capture
     --controlled-empty-field --match-seconds 180
     --startup-advance-ms "$startup_ms" --startup-speed "$startup_speed" --scan-wz 1.6 --turn-wz .25
-    --allow-mechanical-pitch-model --pitch-presets 500,4000,4000
     --telemetry --telemetry-fps 30
     --hardware --imu --imu-port /dev/ttyUSB0 --imu-baud 115200 --port /dev/ttyACM0 --baud 115200
     --known-frame-angle "$known_angle" --known-frame-id "$known_id")
@@ -229,7 +222,7 @@ args+=(--auto-run)
 source tools/match/telemetry_bridge.sh
 cat <<'TXT'
 整场主程序：180 秒（超过 10 分钟自动停止），--auto-run 在实时预检通过后自动发 START；无 demo/assume 标志。
-方框几何 config/frame_20261008.assume.json 与机械俯仰模型均为临时假设，结果不构成验收。
+统一配置中的 frame.assume 与机械俯仰模型均为临时假设，结果不构成验收。
 Ctrl+C 或 match_ctl.py 可停止；零速发送以现场急停为准。
 TXT
 # 主程序整场只需 180 秒；超过 MATCH_MAX_RUN_S（默认 600 秒）仍未退出则发 SIGTERM（主程序会收尾停车），10 秒后仍在则 SIGKILL。

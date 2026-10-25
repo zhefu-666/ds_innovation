@@ -27,7 +27,7 @@ class DemoTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.profile = demo.load_profile(ROOT/'config/demo_20261007.json')
+        self.profile = demo.load_profile(str(ROOT/'config/project.json') + '#/profiles/demo_default')
         for key in ('binary', 'model', 'pose_model', 'rknn_library', 'camera_calibration', 'zone_geometry'):
             path = self.root/key;path.write_text('test fixture, not a live resource')
             self.profile[key] = str(path)

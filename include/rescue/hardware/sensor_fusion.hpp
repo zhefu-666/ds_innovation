@@ -13,19 +13,20 @@ struct SensorFusionConfig {
 };
 
 class SensorFusion {
-public:
+  public:
     explicit SensorFusion(SensorFusionConfig config = {});
-    void update(const SensorState &state);
-    const SensorState &state() const { return state_; }
+    void update(const SensorState& state);
+    const SensorState& state() const {
+        return state_;
+    }
     bool fresh(uint64_t now_us) const;
     bool emergencyStop(uint64_t now_us) const;
     bool tiltUnsafe() const;
-    MotionCommand protect(const MotionCommand &requested, uint64_t now_us);
+    MotionCommand protect(const MotionCommand& requested, uint64_t now_us);
 
-private:
+  private:
     SensorFusionConfig config_;
     SensorState state_;
-
 };
 
 } // namespace rescue

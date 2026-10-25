@@ -131,13 +131,16 @@ bool takesValue(const Field& field) {
 std::string absolutePath(const std::string& path, const fs::path& directory) {
     if (path.empty())
         return path;
-    const fs::path value(path);
+    const auto marker = path.find('#');
+    const std::string file = path.substr(0, marker);
+    const std::string fragment = marker == std::string::npos ? std::string{} : path.substr(marker);
+    const fs::path value(file);
     if (value.is_absolute())
-        return value.lexically_normal().string();
+        return value.lexically_normal().string() + fragment;
     if (directory.empty())
         throw std::runtime_error(
             "Cannot resolve relative path without an accessible working directory: " + path);
-    return (directory / value).lexically_normal().string();
+    return (directory / value).lexically_normal().string() + fragment;
 }
 
 [[noreturn]] void invalid(const std::string& key, const std::string& reason) {
@@ -265,7 +268,16 @@ std::vector<std::string> fileArguments(AppConfigOptions& options) {
                                               "models",
                                               "calibration",
                                               "behavior",
-                                              "runtime"};
+                                              "runtime",
+                                              "paths",
+                                              "profiles",
+                                              "frame",
+                                              "acceptance",
+                                              "task_calibration",
+                                              "zone_color",
+                                              "zone_geometry",
+                                              "model_registry",
+                                              "runtime_profiles"};
         for (const auto& item : root.items())
             if (!root_keys.count(item.key()))
                 invalid(item.key(), "is an unknown key");
@@ -280,6 +292,11 @@ std::vector<std::string> fileArguments(AppConfigOptions& options) {
             invalid("behavior_policy", "must be legacy_field_v1 or legacy_replay_v1");
         for (const auto& item : root.items()) {
             if (item.key() == "schema_version" || item.key() == "behavior_policy")
+                continue;
+            if (item.key() == "paths" || item.key() == "profiles" || item.key() == "frame" ||
+                item.key() == "acceptance" || item.key() == "task_calibration" ||
+                item.key() == "zone_color" || item.key() == "zone_geometry" ||
+                item.key() == "model_registry" || item.key() == "runtime_profiles")
                 continue;
             if (!item.value().is_object())
                 invalid(item.key(), "must be an object");

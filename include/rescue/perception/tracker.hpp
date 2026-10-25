@@ -15,13 +15,13 @@ struct TrackerConfig {
 };
 
 class NearestNeighborTracker {
-public:
+  public:
     explicit NearestNeighborTracker(TrackerConfig config = {});
-    std::vector<SegDetection> update(const std::vector<SegDetection> &detections,
+    std::vector<SegDetection> update(const std::vector<SegDetection>& detections,
                                      uint64_t timestamp_us);
     void reset();
 
-private:
+  private:
     struct Track {
         SegDetection detection;
         uint32_t lost_frames = 0;

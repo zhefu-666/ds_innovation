@@ -44,7 +44,7 @@ if [[ "$mode" == run && $site_clear -ne 1 ]]; then
   exit 2
 fi
 
-export RESCUE_DEMO_PROFILE="$base/../../config/demo_20261008.assume.json"
+export RESCUE_DEMO_PROFILE="$base/../../config/project.json#/profiles/demo_assume"
 [[ -f "$RESCUE_DEMO_PROFILE" ]] || { echo "缺少 profile: $RESCUE_DEMO_PROFILE" >&2; exit 1; }
 # 实际执行的二进制来自 profile，不再是运行包内的副本；这里只确认它会存在。
 demo_binary=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["binary"])' "$RESCUE_DEMO_PROFILE")

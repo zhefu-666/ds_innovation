@@ -19,10 +19,10 @@ python3 tools/match/check_socket.py
 python3 tools/camera_pitch/pitch_ctl.py prepare45 --timeout 5
 
 exec build-release/rescue_upper_host \
+  --config config/project.json \
   --hardware --no-show --telemetry \
   --team blue --imu --imu-port /dev/ttyUSB0 \
   --calibration config/camera.yaml \
   --model models/detect_fp.rknn \
   --pose-model-blue models/zone_pose_fp.rknn \
-  --task-calibration config/task_calibration.40_runtime.json \
   --startup-advance-ms 5000 --startup-speed 1 "$@"

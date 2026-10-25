@@ -13,13 +13,18 @@ struct ZoneGate {
     uint64_t max_age_us = 200000, max_prediction_age_us = 350000;
 };
 struct ZoneEstimate {
-    enum class Source { NONE, MULTI_POINT, TWO_POINT, PREDICTED };
+    enum class Source {
+        NONE,
+        MULTI_POINT,
+        TWO_POINT,
+        PREDICTED
+    };
     bool valid = false;
     Source source = Source::NONE;
     std::string zone_label, geometry_id, reason = "no_observation";
     uint64_t frame_id = 0, timestamp_us = 0, observed_us = 0;
     cv::Point2f origin_body_m; // zone origin in body ground frame: x right, y forward
-    float yaw_body_rad = 0; // p_body = R(yaw) p_zone + origin; CCW positive
+    float yaw_body_rad = 0;    // p_body = R(yaw) p_zone + origin; CCW positive
     std::vector<int> inlier_ids;
     float residual_m = std::numeric_limits<float>::infinity();
     float position_sigma_m = std::numeric_limits<float>::infinity();

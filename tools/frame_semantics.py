@@ -9,13 +9,16 @@ profiles remain rejected by the hardware launcher.
 """
 import json
 from pathlib import Path
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / 'config/frame_20261007.pending.json'
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'config'))
+from project import load_reference
+DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / 'config/project.json#/frame/pending'
 ANGLES = {'open': 0, 'close': 20}
 DONE_FLAG_NOTE = 'Legacy a6_semantics=done_flag is unsupported for the physical gripper'
 
 
 def load_mapping(path):
-    data = json.loads(Path(path).read_text())
+    data = load_reference(path, Path(__file__).resolve().parents[1])
     if data.get('action_mapping_verified') != 1:
         raise ValueError('A6 / physical action mapping has not been accepted')
     if data.get('a6_semantics') == 'done_flag':
