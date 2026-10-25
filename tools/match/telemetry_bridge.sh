@@ -37,7 +37,7 @@ PY
 if bridge_ready; then
   echo 'Foxglove bridge already running on 8765; reusing it.'
 else
-  python3 -u tools/remote_camera_telemetry/project_bridge.py 9>&- &
+  python3 -u tools/remote_camera_telemetry/project_bridge.py --fps 30 9>&- &
   bridge_pid=$!
   ready=0
   for ((i=0; i<30; ++i)); do

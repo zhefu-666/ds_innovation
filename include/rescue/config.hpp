@@ -25,7 +25,7 @@ struct Config {
     bool pitch_feedback = false; // O_RDONLY MCU receive; no actuator commands
     std::string detect_image;
     std::string rknn_library = "./benchmark_results/librknnrt.so";
-    std::string model_path = "./models/detect_fp.rknn";
+    std::string model_path = "./models/detect_int8_split_20261022.rknn";
     // Optional YOLOv8-pose safe-zone model (zone_left/zone_right, 4 kpts each), own RKNN context.
     std::string pose_model_path; // 通用模型；parseArgs 后为本次实际使用的模型路径。
     // 预留两版安全区模型接口：按己方颜色选择，仅路径不同，不分设置信度。
@@ -37,6 +37,7 @@ struct Config {
     float pose_keypoint_confidence = 0.5f; // 两版共用：per-keypoint visibility
     int detect_core_mask = -1;         // -1 leaves the runtime default; 0 auto, 1 core0, 2 core1, 4 core2
     int pose_core_mask = -1;
+    bool async_capture = false; // Latest-frame capture worker; opt in with --async-capture.
     bool parallel_inference = false;   // run detect and pose concurrently on separate contexts
     std::string uart_port = "/dev/ttyACM0"; // 下位机MCU（USB CDC）；IMU见imu_port
     std::string team = "blue"; // 暂定蓝色己方、红色对方；比赛时 --team red 可切换。

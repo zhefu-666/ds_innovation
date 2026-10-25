@@ -1,3 +1,4 @@
+#include "rescue/stage_audit.hpp"
 #include "rescue/telemetry_publisher.hpp"
 #include <nlohmann/json.hpp>
 #include <opencv2/imgproc.hpp>
@@ -64,6 +65,7 @@ void TelemetryPublisher::submit(const cv::Mat& frame,
     const PushOutput& output, uint64_t epoch_ns, uint64_t sequence, double loop_fps,
     double inference_ms, double capture_ms, const ImuSnapshot& imu,
     const DecisionTelemetry& decision) noexcept {
+    AuditScope audit("telemetry.submit_copy");
     try {
         const auto now = std::chrono::steady_clock::now();
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
@@ -102,12 +104,15 @@ void TelemetryPublisher::run() noexcept {
     }
 }
 void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
+    AuditScope worker_audit("telemetry.worker_total");
     const double scale = std::min(1.0, 640.0 / s.frame.cols);
     cv::Mat preview;
+    {AuditScope audit("telemetry.resize");
     cv::resize(s.frame, preview,
         cv::Size(std::max(1, static_cast<int>(std::lround(s.frame.cols * scale))),
                  std::max(1, static_cast<int>(std::lround(s.frame.rows * scale)))),
-        0, 0, cv::INTER_AREA);
+        0, 0, cv::INTER_AREA);}
+    AuditScope overlay_audit("telemetry.overlay");
     // Highlight the state machine's lock, never an unrelated current-frame candidate.
     const bool active=s.output.state!=PushState::WAIT_START && s.output.state!=PushState::SAFE_STOP;
     const int locked=active?s.output.target_id:-1;
@@ -134,9 +139,12 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
     const int top=std::min(26,std::max(0,preview.rows-25));
     cv::rectangle(preview,{0,top,preview.cols,std::min(25,preview.rows-top)},cv::Scalar(15,15,15),cv::FILLED);
     cv::putText(preview,tracking,{8,top+17},cv::FONT_HERSHEY_SIMPLEX,.48,color,1,cv::LINE_AA);
+    overlay_audit.finish();
     std::vector<unsigned char> jpeg;
+    {AuditScope audit("telemetry.jpeg_encode");
     if (!cv::imencode(".jpg", preview, jpeg, {cv::IMWRITE_JPEG_QUALITY, 70}))
-        throw std::runtime_error("JPEG encoding failed");
+        throw std::runtime_error("JPEG encoding failed");}
+    AuditScope metadata_audit("telemetry.metadata");
     cv::FileStorage f(".json", cv::FileStorage::WRITE | cv::FileStorage::MEMORY |
                                    cv::FileStorage::FORMAT_JSON);
     f << "version" << 1 << "sequence" << static_cast<double>(s.sequence)
@@ -326,6 +334,8 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
         document.at("config")["effective"] = *effective_config_;
         metadata = document.dump();
     }
+    metadata_audit.finish();
+    AuditScope file_audit("telemetry.atomic_write");
     if (metadata.size() > 1024 * 1024 || jpeg.size() > 8 * 1024 * 1024)
         throw std::runtime_error("Telemetry snapshot exceeds size limit");
     std::string name = config_.telemetry_file + ".XXXXXX";

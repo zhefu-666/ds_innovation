@@ -1,0 +1,17 @@
+[Unit]
+Description=Rescue match main (autostart on boot)
+After=multi-user.target network.target
+
+[Service]
+Type=simple
+User=cat
+WorkingDirectory=/home/cat/ds_innovation
+Environment=HOME=/home/cat
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/cat/ds_innovation/tools/match/match_autostart.sh
+Restart=no
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

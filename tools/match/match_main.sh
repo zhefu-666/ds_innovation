@@ -58,6 +58,14 @@ if [[ "$mode" == run && $site_clear -ne 1 ]]; then
 fi
 
 binary=${RESCUE_BINARY:-/home/cat/startup-fix-build/rescue_upper_host}
+# R1: CPUs 0..3 are A55; CPUs 4..7 are A76. Scope affinity to this child only.
+cpu_set=${RESCUE_CPUSET:-4-7}
+cpu_launcher=()
+if [[ "$cpu_set" != all ]]; then
+  command -v taskset >/dev/null || { echo '缺少 taskset，无法应用 CPU 核配置' >&2; exit 1; }
+  taskset -c "$cpu_set" true || { echo "CPU 核配置不可用：$cpu_set" >&2; exit 1; }
+  cpu_launcher=(taskset -c "$cpu_set")
+fi
 demo_profile="$PWD/config/demo_20261008.assume.json"
 known_file="/tmp/rescue-demo-$(id -u)/known_frame.json"
 placeholder=0
@@ -80,16 +88,17 @@ PY
 
 build_args() {
   args=(--team blue --no-show
-    --model models/detect_fp.rknn --rknn-library benchmark_results/librknnrt.so
-    --pose-model models/zone_pose_fp.rknn
-    --camera 0 --width 1280 --height 720 --fps 30
+    --model models/detect_int8_split_20261022.rknn --rknn-library benchmark_results/librknnrt.so
+    --pose-model models/zone_pose_int8_split_20261022.rknn
+    --parallel-infer --detect-core 1 --pose-core 2 --async-capture
+    --camera 0 --width 1280 --height 720 --fps 60
     --calibration config/camera.mechanical_5_40.yaml --zone-geometry config/zone_geometry.json
     --zone-color-calibration config/zone_color.field.json
     --task-calibration config/frame_20261008.assume.json
     --controlled-empty-field --match-seconds 180
     --startup-advance-ms "$startup_ms" --startup-speed "$startup_speed" --scan-wz 1.6 --turn-wz .25
     --allow-mechanical-pitch-model --pitch-presets 500,4000,4000
-    --telemetry
+    --telemetry --telemetry-fps 30
     --hardware --imu --imu-port /dev/ttyUSB0 --imu-baud 115200 --port /dev/ttyACM0 --baud 115200
     --known-frame-angle "$known_angle" --known-frame-id "$known_id")
   (( clear_neighbours )) && args+=(--clear-neighbours)
@@ -209,7 +218,8 @@ TXT
 max_run_s=${MATCH_MAX_RUN_S:-600}
 set +e
 start_s=$SECONDS
-timeout --signal=TERM --kill-after=10 "$max_run_s" stdbuf -oL -eL "$binary" "${args[@]}"
+echo "[CPU] affinity=$cpu_set; OpenCV threads=${RESCUE_OPENCV_THREADS:-1}"
+timeout --signal=TERM --kill-after=10 "$max_run_s" "${cpu_launcher[@]}" stdbuf -oL -eL "$binary" "${args[@]}"
 rc=$?
 elapsed_s=$((SECONDS - start_s))
 if [[ $rc -eq 124 || $rc -eq 137 ]]; then

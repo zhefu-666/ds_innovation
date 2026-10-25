@@ -58,7 +58,7 @@ void printUsage(const char *program) {
         << "  --zone-geometry P  Fixed landmark schema (default config/zone_geometry.json)\n"
         << "  --pitch-feedback   Open MCU feedback read-only for synchronized ground mapping\n"
         << "  --keypoints-file P Optional atomic same-frame landmark JSON (no box-derived points)\n"
-        << "  --model PATH        Detector model, default models/detect_fp.rknn\n"
+        << "  --model PATH        Detector model, default models/detect_hybrid_20261015.rknn\n"
         << "  --pose-model PATH   Safe-zone pose RKNN: zone_left=supply, zone_right=injured (4 kpts each); replaces --keypoints-file\n"
         << "  --pose-model-blue P Blue-team pose model override; same thresholds and output schema\n"
         << "  --pose-model-red P  Red-team pose model override; same thresholds and output schema\n"
@@ -66,6 +66,7 @@ void printUsage(const char *program) {
         << "  --pose-kpt-conf X   Safe-zone keypoint visibility threshold, default 0.5\n"
         << "  --detect-core N     RKNN core mask for detector (0 auto, 1, 2, 4)\n"
         << "  --pose-core N       RKNN core mask for pose (0 auto, 1, 2, 4)\n"
+        << "  --async-capture     Capture continuously on a latest-frame worker\n"
         << "  --parallel-infer    Run detector and pose concurrently\n"
         << "  --port PATH         MCU serial port, default /dev/ttyACM0\n"
         << "  --baud N            Baudrate, default 115200\n"
@@ -113,7 +114,7 @@ void printUsage(const char *program) {
         << "  --tof-stop-m X      ToF emergency-stop distance, default 0.18\n"
         << "  --imu-tilt-deg X    Body pitch/roll stop limit, default 12 (ground mapping uses its own tighter limit)\n"
         << "  --pitch-presets F,T,N  Calibrated FAR,TRACK,NEAR in 0.01 deg, default 500,500,4000\n"
-        << "                      (TX=calibration/100; RX=TX+40: defaults TX5,5,40 / RX45,45,80); needs -4000<=F<=T<=N<=4000\n"
+        << "                      (TX=calibration/100; RX=TX+120; TX saturates at +/-30; legacy near40 requires recalibration); needs -4000<=F<=T<=N<=4000\n"
         << "  --classes CSV       Raw model class names in tensor order\n"
         << "  --help              Show this help\n";
 }
@@ -206,6 +207,8 @@ Config parseArgs(int argc, char **argv) {
             config.detect_core_mask = std::stoi(needValue(arg));
         } else if (arg == "--pose-core") {
             config.pose_core_mask = std::stoi(needValue(arg));
+        } else if (arg == "--async-capture") {
+            config.async_capture = true;
         } else if (arg == "--parallel-infer") {
             config.parallel_inference = true;
         } else if (arg == "--port") {

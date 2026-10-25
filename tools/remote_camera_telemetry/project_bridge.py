@@ -94,7 +94,7 @@ class Source:
     def run(self):
         while not self.stop.is_set():
             self.poll()
-            self.stop.wait(0.05)
+            self.stop.wait(0.004)
 
     def snapshot(self):
         with self.lock:
@@ -282,7 +282,7 @@ def handler(source):
                             self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + str(len(jpeg)).encode() + b'\r\n\r\n' + jpeg + b'\r\n')
                             self.wfile.flush()
                             previous = stamp
-                        source.stop.wait(1 / source.fps)
+                        source.stop.wait(0.004)
                 except (OSError, socket.timeout):
                     pass
                 return

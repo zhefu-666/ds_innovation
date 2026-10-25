@@ -1,4 +1,5 @@
 #pragma once
+#include "rescue/stage_audit.hpp"
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -32,6 +33,8 @@ public:
         fcntl(fd_, F_SETFL, flags_);
     }
     void submit(std::string text) {
+        AuditScope audit("logs.enqueue");
+        if(auditQuietLogs)return;
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
         if (!lock.owns_lock() || text.size() > limit_ || bytes_ + text.size() > limit_) {
             ++dropped_; return;
@@ -48,6 +51,7 @@ private:
             { std::lock_guard<std::mutex> lock(mutex_);
               if (!queue_.empty()) { text = std::move(queue_.front()); bytes_ -= text.size(); queue_.pop_front(); } }
             if (text.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
+            AuditScope audit("logs.sink_write");
             size_t offset = 0;
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
             while (offset < text.size() && !stop_) {

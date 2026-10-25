@@ -6,7 +6,9 @@
 namespace rescue {
 // One RKNN context loaded through dlopen. Not thread-safe: each model is owned by
 // exactly one thread. Input is a square NHWC uint8 RGB image (mean/std embedded
-// at conversion); the single output is returned as an owned float32 [1,C,N] tensor.
+// at conversion). Returns an owned float32 [1,C,N] tensor. Runtime converts
+// each output independently; boxes/scores and four pose branches are reassembled
+// in channel order, interleaving pose x,y,visibility for each keypoint.
 class RknnModel {
 public:
     // core_mask: -1 leaves the runtime default; otherwise RKNN_NPU_CORE_* (0 auto, 1, 2, 4).

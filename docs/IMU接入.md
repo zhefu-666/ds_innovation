@@ -68,12 +68,6 @@ body_rpy  = q_body 的ZYX分解（roll/pitch/yaw）
 
 ## 使用
 
-```bash
-cd /home/cat/ds_innovation
-cmake -S . -B build-arm64-telemetry -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DRESCUE_ENABLE_TELEMETRY=ON
-cmake --build build-arm64-telemetry -j2
-./build-arm64-telemetry/rescue_imu_monitor /dev/ttyUSB0 115200 30
-```
 
 `fresh=1 numeric_ok=1` 表示有新鲜且数值有效的消息；退出码0表示结束时满足此条件，2表示未收到/过期/数值无效，1表示参数或串口错误。监视器限频打印，接收仍为设备原始频率。Ctrl+C退出。
 
@@ -89,9 +83,6 @@ python3 tools/remote_camera_telemetry/manage_project.py stop
 
 直接主程序入口：
 
-```bash
-./build-arm64-telemetry/rescue_upper_host --dry-run --no-show --telemetry --imu --imu-port /dev/ttyUSB0 --imu-baud 115200 --imu-timeout-ms 200
-```
 
 串口为8N1无流控、禁回显，只接收不写入指令，退出后保留115200原始模式。独占锁拒绝第二个本工具实例；启动前应退出其他串口阅读器。当前节点cat账号可访问，若权限变化使用合适串口组或sudo。
 
