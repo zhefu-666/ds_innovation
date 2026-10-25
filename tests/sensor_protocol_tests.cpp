@@ -1,8 +1,8 @@
-#include "rescue/uart_controller.hpp"
-#include "rescue/motion_link.hpp"
+#include "rescue/hardware/uart_controller.hpp"
+#include "rescue/hardware/motion_link.hpp"
 #include <cstring>
 #include <vector>
-#include "rescue/utils.hpp"
+#include "rescue/core/utils.hpp"
 #include <cassert>
 #include <fcntl.h>
 #include <cstdlib>

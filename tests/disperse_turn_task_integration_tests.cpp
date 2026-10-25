@@ -1,8 +1,8 @@
-#include "rescue/transport_rules.hpp"
-#include "rescue/types.hpp"
-#include "rescue/zone_estimate.hpp"
-#include "rescue/zone_dead_reckoning.hpp"
-#include "rescue/planner.hpp"
+#include "rescue/task/transport_rules.hpp"
+#include "rescue/core/types.hpp"
+#include "rescue/geometry/zone_estimate.hpp"
+#include "rescue/geometry/zone_dead_reckoning.hpp"
+#include "rescue/geometry/planner.hpp"
 #include "rescue/task/capture_verification_stage.hpp"
 #include "rescue/task/delivery_verification_stage.hpp"
 #include "rescue/task/release_retreat_stage.hpp"
@@ -28,7 +28,7 @@
 #if __has_include("rescue/task/disperse_rush_stage.hpp")
 #define RESCUE_HAS_RUSH_STAGE 1
 #endif
-#include "rescue/push_task.hpp"
+#include "rescue/task/push_task.hpp"
 #undef private
 
 namespace {

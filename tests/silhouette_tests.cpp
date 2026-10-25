@@ -1,4 +1,4 @@
-#include "rescue/silhouette.hpp"
+#include "rescue/perception/silhouette.hpp"
 #include <opencv2/imgproc.hpp>
 #include <cassert>
 #include <cmath>

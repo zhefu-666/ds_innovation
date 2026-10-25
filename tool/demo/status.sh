@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 base="$(cd -- "$(dirname -- "$0")" && pwd)"
-exec bash "$base/runtime/tools/demo/status.sh" "$@"
+exec bash "$base/../../tools/demo/status.sh" "$@"

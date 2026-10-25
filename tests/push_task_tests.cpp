@@ -1,10 +1,10 @@
 #include <array>
 #include <tuple>
-#include "rescue/transport_rules.hpp"
-#include "rescue/types.hpp"
-#include "rescue/zone_estimate.hpp"
-#include "rescue/zone_dead_reckoning.hpp"
-#include "rescue/planner.hpp"
+#include "rescue/task/transport_rules.hpp"
+#include "rescue/core/types.hpp"
+#include "rescue/geometry/zone_estimate.hpp"
+#include "rescue/geometry/zone_dead_reckoning.hpp"
+#include "rescue/geometry/planner.hpp"
 #include <map>
 #include <string>
 #include <sstream>
@@ -18,12 +18,12 @@
 #if __has_include("rescue/task/disperse_rush_stage.hpp")
 #define RESCUE_HAS_RUSH_STAGE 1
 #endif
-#include "rescue/push_task.hpp"
+#include "rescue/task/push_task.hpp"
 #undef private
-#include "rescue/capture_monitor.hpp"
-#include "rescue/config.hpp"
-#include "rescue/motion_readiness.hpp"
-#include "rescue/motion_watch.hpp"
+#include "rescue/perception/capture_monitor.hpp"
+#include "rescue/config/config.hpp"
+#include "rescue/control/motion_readiness.hpp"
+#include "rescue/control/motion_watch.hpp"
 #include <cassert>
 #include <algorithm>
 #include <cmath>

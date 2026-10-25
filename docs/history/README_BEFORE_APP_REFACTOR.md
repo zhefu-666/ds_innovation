@@ -61,8 +61,8 @@ ctest --test-dir build-arm64 --output-on-failure
 | `src/imu_adapter.cpp` | HI91快照→`SensorState`（车体坐标姿态），供`SensorFusion`倾斜停车与地面映射倾斜判断 |
 | `src/controller.cpp` | 历史抓取控制器，当前主入口不使用 |
 
-输入字段和接入边界参见 [USAGE_GUIDE.md](../../USAGE_GUIDE.md)。`config/rescue.yaml` 是配置参考，当前 CLI 不读取该文件。
+输入字段和接入边界参见 [USAGE_GUIDE.md](USAGE_GUIDE.md)。`config/rescue.yaml` 是配置参考，当前 CLI 不读取该文件。
 
-视觉模型契约、已实现能力及实车差距见 [VISION_INTEGRATION.md](../../VISION_INTEGRATION.md)。
+视觉模型契约、已实现能力及实车差距见 [VISION_INTEGRATION.md](VISION_INTEGRATION.md)。
 
 相机自动标定与人工测量步骤见 [标定工具说明](../../tools/camera_calibration/README.md)。

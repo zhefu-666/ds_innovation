@@ -1,6 +1,6 @@
-#include "rescue/pixel_selector.hpp"
-#include "rescue/multi_view_capture.hpp"
-#include "rescue/task_calibration.hpp"
+#include "rescue/perception/pixel_selector.hpp"
+#include "rescue/perception/multi_view_capture.hpp"
+#include "rescue/config/task_calibration.hpp"
 #include <cassert>
 #include <cmath>
 #include <iostream>

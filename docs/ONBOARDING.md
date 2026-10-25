@@ -1,7 +1,10 @@
 # 新接手快速上手指南
 
-验证日期：2026-10-24。适用于本机 `/home/jy/ds_innovation` 与车端
-`cat:/home/cat/ds_innovation-refactor-20261024` 这份对应快照。
+> **适用范围提醒**：本文件记录 2026-10-24 的实测快照，当时车端使用隔离目录
+> `/home/cat/ds_innovation-refactor-20261024`（现已不存在）与 `build-arm64-selfcontained/`。
+> 当前分支入口与目录见 [运行与调试](运行与调试.md)；下文的目录名和测试计数都属于那次快照，不要当作当前值。
+
+验证日期：2026-10-24。适用于本机 `/home/jy/ds_innovation` 与当时车端的对应快照。
 
 ## 1. 先看结论
 
@@ -54,7 +57,7 @@ ssh cat
 ```
 
 ```bash
-cd /home/cat/ds_innovation-refactor-20261024
+cd /home/cat/ds_innovation
 ```
 
 - 本机：x86，GCC 11.4、OpenCV 4.5.4，可进行无 RKNN 构建和离线测试。
@@ -77,7 +80,7 @@ cd /home/cat/ds_innovation-refactor-20261024
 ./build-onboarding-offline/rescue_upper_host --config config/runtime/push_replay.json
 ```
 
-车端将二进制换成 `build-arm64-selfcontained/rescue_upper_host`。输出中的 `vx/wz` 是算法计算值，
+车端将二进制换成 `build-arm64-consolidation-20261025/rescue_upper_host`（当时快照为 `build-arm64-selfcontained/`）。输出中的 `vx/wz` 是算法计算值，
 **不是实际车速，也不表示命令已发送**。
 
 正常结果：状态从搜索、接近、捕获，进入搬运、区域入口、交付核验，最终返回 `SCAN`，
@@ -153,13 +156,13 @@ ctest --test-dir build-arm64-selfcontained --output-on-failure
 静态入口检查不会打开设备；方框未确认时只显示占位配置，不得将占位值用于运动：
 
 ```bash
-tools/match/match_main_refactor.sh --check
+tools/match/match_main.sh --check
 ```
 
 `--status` 独占只读 MCU 串口，查看前应先停止预览和其他串口程序：
 
 ```bash
-tools/match/match_main_refactor.sh --status
+tools/match/match_main.sh --status
 ```
 
 导出最终配置，不加载模型、不开设备：
@@ -191,12 +194,12 @@ src/main.cpp
 | [src/app/config_loader.cpp](../src/app/config_loader.cpp) | 严格 runtime JSON、请求来源和 CLI 优先级 |
 | [src/app/runtime_config.cpp](../src/app/runtime_config.cpp) | 最终兼容参数、假设和导出 |
 | [src/app/perception_pipeline.cpp](../src/app/perception_pipeline.cpp) | 检测/姿态模型、共享 letterbox、并行推理 |
-| [src/rknn_model.cpp](../src/rknn_model.cpp)、[src/rknn_output_layout.cpp](../src/rknn_output_layout.cpp) | RKNN 后端及单/多输出布局归一化 |
+| [src/perception/rknn_model.cpp](../src/perception/rknn_model.cpp)、[src/perception/rknn_output_layout.cpp](../src/perception/rknn_output_layout.cpp) | RKNN 后端及单/多输出布局归一化 |
 | [src/app/observation_builder.cpp](../src/app/observation_builder.cpp) | 把感知与传感器变成任务观测 |
-| [src/push_task.cpp](../src/push_task.cpp) | 顶层任务协调，仍保留较多历史策略 |
+| [src/task/push_task.cpp](../src/task/push_task.cpp) | 顶层任务协调，仍保留较多历史策略 |
 | `src/task/` | 已提取的捕获、交付、退区、推入和清扫阶段 |
-| [include/rescue/push_task.hpp](../include/rescue/push_task.hpp) | `PushState`、观测与输出的核心契约 |
-| [src/uart_controller.cpp](../src/uart_controller.cpp)、[src/motion_link.cpp](../src/motion_link.cpp) | A6 协议、反馈与运动发送链路 |
+| [include/rescue/task/push_task.hpp](../include/rescue/task/push_task.hpp) | `PushState`、观测与输出的核心契约 |
+| [src/hardware/uart_controller.cpp](../src/hardware/uart_controller.cpp)、[src/hardware/motion_link.cpp](../src/hardware/motion_link.cpp) | A6 协议、反馈与运动发送链路 |
 | `tests/` | 合成观测、协议、阶段、配置和端到端回放测试 |
 
 正常搬运主链可概括为：
@@ -246,7 +249,7 @@ SCAN -> APPROACH -> PREPARE -> RUSH -> LOWER_FRAME
 4. 完成当前 RX120 姿态的真实标定，并现场确认方框物理状态，不直接扩大标定范围绕过门控。
 5. 审查并补齐当前 A6 状态映射的版本化基线，恢复完整 CTest。
 6. 在清场、急停可用、有人值守且现场确认后，才分别进行单机构、单俯仰、最小底盘动作验收。
-7. 最后才是单次搬运和 180 秒整场；`match_main_refactor.sh --run` 不是新手默认启动命令。
+7. 最后才是单次搬运和 180 秒整场；`match_main.sh --run` 不是新手默认启动命令。
 
 ## 8. 本次同步与留痕
 

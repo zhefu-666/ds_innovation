@@ -1,6 +1,6 @@
-#include "rescue/geometry_pipeline.hpp"
-#include "rescue/uart_controller.hpp"
-#include "rescue/imu_adapter.hpp"
+#include "rescue/geometry/geometry_pipeline.hpp"
+#include "rescue/hardware/uart_controller.hpp"
+#include "rescue/hardware/imu_adapter.hpp"
 #include <opencv2/imgproc.hpp>
 #include <cassert>
 #include <algorithm>

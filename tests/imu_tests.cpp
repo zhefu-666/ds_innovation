@@ -1,5 +1,5 @@
-#include "rescue/hipnuc_imu.hpp"
-#include "rescue/config.hpp"
+#include "rescue/hardware/hipnuc_imu.hpp"
+#include "rescue/config/config.hpp"
 #include <cassert>
 #include <cmath>
 #include <cstring>

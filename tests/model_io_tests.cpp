@@ -1,6 +1,6 @@
-#include "rescue/model_io.hpp"
-#include "rescue/perception_adapter.hpp"
-#include "rescue/zone_keypoints.hpp"
+#include "rescue/perception/model_io.hpp"
+#include "rescue/perception/perception_adapter.hpp"
+#include "rescue/perception/zone_keypoints.hpp"
 #include <cassert>
 #include <cmath>
 #include <limits>

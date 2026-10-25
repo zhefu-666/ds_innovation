@@ -1,4 +1,4 @@
-#include "rescue/rknn_output_layout.hpp"
+#include "rescue/perception/rknn_output_layout.hpp"
 #include <cassert>
 #include <cmath>
 #include <iostream>

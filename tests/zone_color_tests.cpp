@@ -1,4 +1,4 @@
-#include "rescue/zone_color.hpp"
+#include "rescue/perception/zone_color.hpp"
 #include <cassert>
 #include <iostream>
 using namespace rescue;

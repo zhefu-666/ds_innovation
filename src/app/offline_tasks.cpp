@@ -1,9 +1,9 @@
 #include "rescue/app/offline_tasks.hpp"
 #include "rescue/app/diagnostics.hpp"
 #include "rescue/app/perception_pipeline.hpp"
-#include "rescue/config.hpp"
-#include "rescue/geometry_pipeline.hpp"
-#include "rescue/zone_color.hpp"
+#include "rescue/config/config.hpp"
+#include "rescue/geometry/geometry_pipeline.hpp"
+#include "rescue/perception/zone_color.hpp"
 #include <opencv2/imgcodecs.hpp>
 #include <cmath>
 #include <iostream>

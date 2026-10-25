@@ -45,7 +45,6 @@ calibration_runs/
 
 # Demo deployment artifacts and local backups
 /backups_sync/
-/tool/demo/runtime/
 /tool/demo/backup-*/
 /tool/demo/logs/
 /tool/demo/view.lock
