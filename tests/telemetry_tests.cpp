@@ -1,4 +1,4 @@
-#include "rescue/telemetry_publisher.hpp"
+#include "rescue/telemetry/telemetry_publisher.hpp"
 #include "rescue/app/runtime_config.hpp"
 #include <nlohmann/json.hpp>
 #include <opencv2/imgcodecs.hpp>

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "rescue/push_task.hpp"
-#include "rescue/zone_keypoints.hpp"
+#include "rescue/task/push_task.hpp"
+#include "rescue/perception/zone_keypoints.hpp"
 #include <iostream>
 
 namespace rescue {

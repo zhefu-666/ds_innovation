@@ -57,7 +57,21 @@ if [[ "$mode" == run && $site_clear -ne 1 ]]; then
   exit 2
 fi
 
-binary=${RESCUE_BINARY:-/home/cat/startup-fix-build/rescue_upper_host}
+binary=${RESCUE_BINARY:-$PWD/build-arm64-consolidation-20261025/rescue_upper_host}
+binary_abs=$binary
+[[ "$binary_abs" == /* ]] || binary_abs="$PWD/$binary"
+
+# 任何设备动作之前打印运行身份，使 --check/--status 也能确认实际会被执行的二进制。
+print_identity() {
+  if [[ -x "$binary_abs" ]]; then
+    echo "[identity] binary=$binary_abs md5=$(md5sum "$binary_abs" | cut -d' ' -f1) mtime=$(date -Is -r "$binary_abs")"
+  else
+    local cands
+    cands=$(cd "$PWD" && ls -d build-*/ 2>/dev/null | tr '\n' ' ')
+    echo "[identity] binary=$binary_abs 不存在；仓库内构建目录：${cands:-无}" >&2
+  fi
+}
+print_identity
 # R1: CPUs 0..3 are A55; CPUs 4..7 are A76. Scope affinity to this child only.
 cpu_set=${RESCUE_CPUSET:-4-7}
 cpu_launcher=()
@@ -106,7 +120,11 @@ build_args() {
 }
 
 static_check() {
-  [[ -x "$binary" ]] || { echo "缺少主程序：$PWD/$binary" >&2; return 1; }
+  [[ -x "$binary_abs" ]] || {
+    echo "缺少主程序：$binary_abs" >&2
+    echo "用 RESCUE_BINARY=/path/to/rescue_upper_host 显式指定，或先在仓库内构建。" >&2
+    return 1
+  }
   resolve_known
   if [[ "$known_src" == none ]]; then
     if [[ "$mode" != check && ( "$frame" == keep || $frame_done -eq 1 ) ]]; then
@@ -118,8 +136,8 @@ static_check() {
   fi
   build_args
   echo "[check] 方框已知状态：angle=$known_angle id=$known_id ($known_src)"
-  echo "[check] $binary --check-config ${args[*]}"
-  "$binary" --check-config "${args[@]}"
+  echo "[check] $binary_abs --check-config ${args[*]}"
+  "$binary_abs" --check-config "${args[@]}"
 }
 
 live_id=
@@ -181,7 +199,7 @@ run_log="telemetry_logs/match-main-$(date +%Y%m%d-%H%M%S)-$$.log"
 echo "运行日志：$PWD/$run_log"
 exec > >(tee -a "$run_log") 2>&1
 echo "RUN_HEADER time=$(date -Is) host=$(hostname) git=$(git rev-parse --short HEAD 2>/dev/null || echo none) frame=$frame startup_ms=$startup_ms startup_speed=$startup_speed"
-echo "RUN_HEADER binary_md5=$(md5sum "$binary" | cut -d' ' -f1) script_md5=$(md5sum "$0" | cut -d' ' -f1)"
+echo "RUN_HEADER binary=$binary_abs md5=$(md5sum "$binary_abs" | cut -d' ' -f1) mtime=$(date -Is -r "$binary_abs") script_md5=$(md5sum "$0" | cut -d' ' -f1)"
 
 case "$frame" in
   open|close)
@@ -219,7 +237,7 @@ max_run_s=${MATCH_MAX_RUN_S:-600}
 set +e
 start_s=$SECONDS
 echo "[CPU] affinity=$cpu_set; OpenCV threads=${RESCUE_OPENCV_THREADS:-1}"
-timeout --signal=TERM --kill-after=10 "$max_run_s" "${cpu_launcher[@]}" stdbuf -oL -eL "$binary" "${args[@]}"
+timeout --signal=TERM --kill-after=10 "$max_run_s" "${cpu_launcher[@]}" stdbuf -oL -eL "$binary_abs" "${args[@]}"
 rc=$?
 elapsed_s=$((SECONDS - start_s))
 if [[ $rc -eq 124 || $rc -eq 137 ]]; then

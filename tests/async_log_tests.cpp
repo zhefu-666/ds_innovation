@@ -1,4 +1,4 @@
-#include "rescue/async_log.hpp"
+#include "rescue/core/async_log.hpp"
 #include <iostream>
 #include <stdexcept>
 int main() {

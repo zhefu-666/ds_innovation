@@ -1,6 +1,6 @@
 #include "rescue/app/runtime_config.hpp"
-#include "rescue/demo_policy.hpp"
-#include "rescue/task_calibration.hpp"
+#include "rescue/config/demo_policy.hpp"
+#include "rescue/config/task_calibration.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>

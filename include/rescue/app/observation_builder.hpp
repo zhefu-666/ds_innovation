@@ -1,13 +1,13 @@
 #pragma once
 
 #include "rescue/app/perception_pipeline.hpp"
-#include "rescue/capture_monitor.hpp"
-#include "rescue/geometry_pipeline.hpp"
-#include "rescue/hipnuc_imu.hpp"
-#include "rescue/multi_view_capture.hpp"
-#include "rescue/pixel_selector.hpp"
-#include "rescue/uart_controller.hpp"
-#include "rescue/zone_color.hpp"
+#include "rescue/perception/capture_monitor.hpp"
+#include "rescue/geometry/geometry_pipeline.hpp"
+#include "rescue/hardware/hipnuc_imu.hpp"
+#include "rescue/perception/multi_view_capture.hpp"
+#include "rescue/perception/pixel_selector.hpp"
+#include "rescue/hardware/uart_controller.hpp"
+#include "rescue/perception/zone_color.hpp"
 
 namespace rescue {
 struct ResolvedRuntimeConfig;

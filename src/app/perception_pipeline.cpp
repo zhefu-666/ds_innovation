@@ -1,6 +1,6 @@
 #include "rescue/app/perception_pipeline.hpp"
-#include "rescue/stage_audit.hpp"
-#include "rescue/utils.hpp"
+#include "rescue/core/stage_audit.hpp"
+#include "rescue/core/utils.hpp"
 #include <future>
 #include <stdexcept>
 

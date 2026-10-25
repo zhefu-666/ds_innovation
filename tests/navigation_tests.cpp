@@ -1,4 +1,4 @@
-#include "rescue/navigation_adapter.hpp"
+#include "rescue/geometry/navigation_adapter.hpp"
 #include <cassert>
 #include <cmath>
 #include <limits>

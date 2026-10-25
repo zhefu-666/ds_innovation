@@ -1,10 +1,14 @@
 # 最新相机范围修正
 
-以[PITCH_RANGE_20261007.md](PITCH_RANGE_20261007.md)为准：实测TX=-40..40偏移角，RX=0..80，RX=TX+40；框内观察TX40/RX80。
+> **当前协议以 [通信协议](docs/通信协议.md) 为准**（17 字节、CRC 覆盖 0..14、相机 -30..30/0=120°、夹爪 int8 ±5）。
+> 本文件按时间累积保留历史修订，下面各节的“以…为准”只在其自身日期内有效。
+
+
+以[PITCH_RANGE_20261007.md](docs/history/PITCH_RANGE_20261007.md)为准：实测TX=-40..40偏移角，RX=0..80，RX=TX+40；框内观察TX40/RX80。
 
 # 最新方框修订（2026-10-07）
 
-以 [FRAME_PROTOCOL_20261007.md](FRAME_PROTOCOL_20261007.md) 为准。TX第9字节已由0/1改为int8角度；当前+20抬起、0放下。A6暂保留二值格式，映射待电控确认。下面为历史说明。
+以 [FRAME_PROTOCOL_20261007.md](docs/history/FRAME_PROTOCOL_20261007.md) 为准。TX第9字节已由0/1改为int8角度；当前+20抬起、0放下。A6暂保留二值格式，映射待电控确认。下面为历史说明。
 
 ---
 
@@ -57,4 +61,4 @@ CRC 覆盖字节 **0..4**（不含帧尾），初值 0xFFFF，多项式 0xA001�
 
 `rescue_sensor_monitor [port] [baud] [seconds]` 现在仅监视A6执行器返回值、时间戳和有效性，不发送运动命令，不是HiPNUC驱动。
 
-独立HiPNUC接收现已实现：见 [HIPNUC_IMU.md](HIPNUC_IMU.md)。使用 `rescue_imu_monitor` 读取 `/dev/ttyUSB0`；本文件描述的 `rescue_sensor_monitor` 仍只用于 `/dev/ttyACM0` 上的A6执行器反馈，两者不能混用。
+独立HiPNUC接收现已实现：见 [IMU 接入](docs/IMU接入.md)。使用 `rescue_imu_monitor` 读取 `/dev/ttyUSB0`；本文件描述的 `rescue_sensor_monitor` 仍只用于 `/dev/ttyACM0` 上的A6执行器反馈，两者不能混用。

@@ -1,4 +1,4 @@
-#include "rescue/demo_policy.hpp"
+#include "rescue/config/demo_policy.hpp"
 #include <cassert>
 #include <iostream>
 using namespace rescue;
