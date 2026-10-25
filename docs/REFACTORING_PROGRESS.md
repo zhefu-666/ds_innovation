@@ -25,7 +25,7 @@
 | R2 新配置与模式 | 严格 JSON schema v1；文件到显式 CLI 的请求优先级；两种版本化兼容策略；组合校验；导出与运行身份 | 新的最终参数优先级、严格/受控/实验策略的独立语义及部署迁移 |
 | R3 入口拆分 | 16 行 main；Runtime、PerceptionPipeline、ObservationBuilder、离线分派及诊断边界；最终配置接入遥测 | 完整观测采样点回放、真实推理/循环延迟、硬件异常退出的现场验收；预检和部分记录仍由 Runtime 管理 |
 | R4 阶段迁移 | VERIFY_CAPTURE、VERIFY_DELIVERY、BACK_OUT 判定、ENTER 现场推入与严格进区分支、兜底退区决策、搜索与接近、清扫状态机、共享清扫账本、单转、往复摆动、冲入与外侧避障摆动规划、盲扫聚集选择、假设搬运视觉接近、搬运区域搜索与敌方规避、盲扫触发门均已提取；各批均有独立单测和原/新顶层结果对照 | GATE 的其余复用与零散恢复分支；共享边界仍需逐批拆分，R4 未完成 |
-| R5 入口与历史整理 | 当前架构与运行指南；修正 README；归档 README 旧段（`README_DEV_REFERENCE_20261025`）；八份带日期文档移入 `docs/history/` 并修复全部引用；入口统一打印二进制路径与 md5；删除冻结运行包 `tool/demo/runtime` 与失效的 `match_main_refactor.sh` | 在用部署脚本的实机切换、实车入口检查、剩余历史文档归档与死配置项清理 |
+| R5 入口与历史整理 | 当前架构与运行指南；修正 README；归档 README 旧段（`README_DEV_REFERENCE_20261025`）；八份带日期文档移入 `docs/history/` 并修复全部引用；入口统一打印二进制路径与 md5；删除冻结演示运行包与失效的 `match_main_refactor.sh` | 在用部署脚本的实机切换、实车入口检查、剩余历史文档归档与死配置项清理 |
 
 ## 可运行入口
 
@@ -459,6 +459,6 @@ ctest --test-dir /tmp/ds-innovation-r4-refactor-20261020 --output-on-failure -R 
 | `tools/match/match_main.sh` | `RESCUE_BINARY` 或 `/home/cat/startup-fix-build/rescue_upper_host` | 保留静态检查、框反向准备动作、相机归位和启动顺序；外部二进制来源尚未确认 |
 | `tools/match/start_capture_scan.sh`、`start_controlled_empty_field.sh`、`start_hardware_blue.sh` | `build-camera-offset-20261007/rescue_upper_host` | 旧构建目录不能假定包含本轮重构 |
 | `tools/demo/demo.py` | 指定演示 profile 的 `binary` | profile 还包含资源与准备/验收信息，不是新的 runtime schema |
-| `tool/demo/demo_oneclick.sh` | `tool/demo/runtime/bin/rescue_upper_host` | 运行包入口，不能仅按名称与 tools/demo 判重删除 |
+| `tools/demo/demo_oneclick.sh` | 指定演示 profile 的 `binary` | 与 `tools/demo/demo.py` 共用统一演示入口，不再维护独立运行包 |
 
 历史 Controller 没有加入当前 CMake 构建；当前 main 没有调用它。暂不删除其他入口和历史资源，后续应先确认实际用户、部署包和脚本引用，再逐项迁移。
