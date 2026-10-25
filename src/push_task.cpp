@@ -92,8 +92,7 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     heading_seen_ = false;
     track_close_ = false;
     last_range_ = std::numeric_limits<float>::infinity();
-    retreat_origin_valid_ = false;
-    retreat_mode_ = 0;
+    recovery_.reset();
     assume_blind_ = false;
     unstick_step_ = 0;
     prelower_us_ = 0;
@@ -4368,85 +4367,42 @@ PushOutput PushTask::update(const PushObservation& in) {
                 step_ = 1;
                 phase_us_ = now;
             }
-            if (retreat_mode_ < 2 && observed_zone) {
-                retreat_mode_ = 1;
-                retreat_zone_us_ = now;
+            RecoveryContext context;
+            context.now_us = now;
+            context.elapsed_us = elapsed;
+            context.since_step_us = now - phase_us_;
+            context.travel_m = travel_;
+            context.approach_forward_m = approach_forward_;
+            context.motion_ratio = motionRatio();
+            context.corridor_retreat = corridor_retreat_;
+            context.observed_zone = observed_zone;
+            context.retreat_safe = in.retreat_safe;
+            context.heading_valid = in.heading_valid;
+            context.heading_rad = in.heading_rad;
+            context.lost_hold = state_ == PushState::LOST_HOLD;
+            if (observed_zone) {
+                context.zone_origin = in.zone_estimate.bodyToZone({0, 0});
+                context.zone_forward = in.zone_estimate.bodyToZone({0, 1}) - context.zone_origin;
+                context.zone_geometry_id = in.zone_estimate.geometry_id;
             }
-            // A corridor veto holds nothing, so it need not wait long for zone geometry before
-            // backing off blind.
-            const uint64_t blind_wait = corridor_retreat_
-                                            ? std::min<uint64_t>(t_.blind_retreat_wait_us, 200000)
-                                            : t_.blind_retreat_wait_us;
-            if (retreat_mode_ == 0 ? now - phase_us_ >= blind_wait
-                                   : retreat_mode_ == 1 && now - retreat_zone_us_ >= blind_wait) {
-                // No zone geometry at FAR: back off blind instead of standing on the objects.
-                // travel_ keeps any measured reversing already done in this phase.
-                if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
-                    fail("retreat_unverified_no_heading");
-                    break;
-                }
-                if (retreat_mode_ == 0)
-                    travel_ = 0;
-                retreat_mode_ = 2;
-                retreat_heading_ = in.heading_rad;
-            }
-            if (retreat_mode_ == 2) {
-                const float limit =
-                    corridor_retreat_
-                        ? std::min(t_.corridor_back_m * motionRatio(),
-                                   .85f * t_.back_speed * float(t_.retreat_budget_us) / 1e6f)
-                        : std::min(t_.abort_back_m, approach_forward_);
-                if (corridor_retreat_ && !in.retreat_safe && travel_ < limit) {
-                    scanAfterClear("corridor_back_off_unsafe");
-                    break;
-                }
-                if (travel_ >= limit) {
-                    if (state_ != PushState::LOST_HOLD)
-                        blacklist(now);
-                    scanAfterClear("blind_retreat_complete");
-                    break;
-                }
-                if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
-                    fail("blind_retreat_heading_missing");
-                    break;
-                }
-                if (std::abs(wrapAngle(in.heading_rad - retreat_heading_)) >
-                    t_.blind_retreat_yaw_rad) {
-                    fail("blind_retreat_heading_drift");
-                    break;
-                }
-                if (elapsed > t_.retreat_budget_us) {
-                    fail("retreat_unverified");
-                    break;
-                }
-                reason_ = "blind_retreat";
-                drive(-t_.back_speed, 0);
+            const auto recovery = recovery_.update(t_, context);
+            if (recovery.outcome == RecoveryOutcome::Fault) {
+                fail(recovery.reason.c_str());
                 break;
             }
-            if (observed_zone && !retreat_origin_valid_) {
-                retreat_origin_zone_ = in.zone_estimate.bodyToZone({0, 0});
-                retreat_forward_zone_ = in.zone_estimate.bodyToZone({0, 1}) - retreat_origin_zone_;
-                retreat_geometry_id_ = in.zone_estimate.geometry_id;
-                retreat_origin_valid_ = true;
-            }
-            const bool measured = retreat_origin_valid_ && observed_zone &&
-                                  in.zone_estimate.geometry_id == retreat_geometry_id_;
-            const float back = measured
-                                   ? -(in.zone_estimate.bodyToZone({0, 0}) - retreat_origin_zone_)
-                                          .dot(retreat_forward_zone_)
-                                   : 0;
-            if (measured && back >= (corridor_retreat_ ? t_.corridor_back_m : t_.abort_back_m)) {
-                if (state_ != PushState::LOST_HOLD)
+            if (recovery.outcome == RecoveryOutcome::Scan) {
+                if (recovery.blacklist)
                     blacklist(now);
-                scanAfterClear("");
+                scanAfterClear(recovery.reason.c_str());
                 break;
             }
-            if (elapsed > t_.retreat_budget_us) {
-                fail("retreat_unverified");
-                break;
+            if (recovery.reset_travel)
+                travel_ = 0;
+            if (recovery.outcome == RecoveryOutcome::Reverse) {
+                if (!recovery.reason.empty())
+                    reason_ = recovery.reason;
+                drive(recovery.vx, 0);
             }
-            if (measured)
-                drive(-t_.back_speed, 0);
             break;
         }
         case PushState::WAIT_START:

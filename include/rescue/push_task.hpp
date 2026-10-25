@@ -12,6 +12,7 @@
 #include "rescue/task/disperse_turn_stage.hpp"
 #include "rescue/task/disperse_swing_stage.hpp"
 #include "rescue/task/disperse_rush_stage.hpp"
+#include "rescue/task/recovery_stage.hpp"
 #include <map>
 #include <string>
 
@@ -819,6 +820,7 @@ class PushTask {
     DisperseRushStage disperse_rush_;
     DisperseTurnStage disperse_turn_;
     DisperseSwingStage disperse_swing_;
+    RecoveryStage recovery_;
     // 假设模式：YOLO-pose粗略区域位姿锚定在里程系，视野丢失后用IMU航向+缩放后的指令位移继续推算。
     AnchoredZone zone_;
     float odo_ = 0, ratio_est_ = 0, ratio_odo_ = 0, last_imu_yaw_ = 0;
@@ -838,15 +840,10 @@ class PushTask {
     cv::Point2f drop_centre_zone_;
     bool heading_seen_ = false;
     int lost_round_ = 0; // LOST_SEARCH: 0 FAR sweep, 1 intermediate (20deg) sweep for close cargo
-    bool retreat_origin_valid_ = false;
     bool corridor_retreat_ = false;
     int corridor_retries_ =
-        0;                 // LOST_HOLD reused as a no-blacklist back-off from a blocked corridor
-    int retreat_mode_ = 0; // 0 undecided, 1 zone-measured, 2 blind (dead reckoning + IMU heading)
-    uint64_t retreat_zone_us_ = 0;
-    float retreat_heading_ = 0, approach_forward_ = 0; // forward commanded since the trip started
-    cv::Point2f retreat_origin_zone_, retreat_forward_zone_;
-    std::string retreat_geometry_id_;
+        0; // LOST_HOLD reused as a no-blacklist back-off from a blocked corridor
+    float approach_forward_ = 0; // forward commanded since the trip started
     std::vector<RejectedBearing> rejected_bearings_;
     std::map<int, uint64_t> rejected_; // primary track id -> blacklist expiry
 
