@@ -1,4 +1,5 @@
 #include "rescue/geometry/zone_geometry.hpp"
+#include "rescue/config/file_reference.hpp"
 #include <opencv2/core/persistence.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -17,11 +18,13 @@ std::array<cv::Point3f,6> ZoneGeometry::objectPoints() const {
     return {{{-w/2,0,0},{0,0,0},{w/2,0,0},{-w/2,d,0},{0,d,0},{w/2,d,0}}};
 }
 ZoneGeometry ZoneGeometry::load(const std::string& file, const std::string& label) {
-    cv::FileStorage f(file,cv::FileStorage::READ);
-    if (!f.isOpened() || int(f["schema_version"])!=1 || !f["zones"].isSeq())
+    const auto reference = splitFileReference(file);
+    cv::FileStorage f(reference.file,cv::FileStorage::READ);
+    const auto root = selectFileNode(f, reference.fragment);
+    if (!f.isOpened() || int(root["schema_version"])!=1 || !root["zones"].isSeq())
         throw std::runtime_error("Invalid zone geometry schema");
     ZoneGeometry out; int matches=0;
-    for (const auto& n:f["zones"]) {
+    for (const auto& n:root["zones"]) {
         if (std::string(n["label"])!=label) continue;
         ++matches;out.label=label;out.id=std::string(n["geometry_id"]);
         out.width_m=float(n["inner_width_m"]);out.depth_m=float(n["inner_depth_m"]);

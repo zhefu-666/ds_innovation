@@ -1,27 +1,30 @@
 #include <algorithm>
+#include "rescue/config/file_reference.hpp"
 #include "rescue/config/task_calibration.hpp"
 #include <opencv2/core.hpp>
 #include <cmath>
 #include <stdexcept>
 namespace rescue {
 TaskCalibration loadTaskCalibration(const std::string& path,TaskTuning tuning,int width,int height,bool search_only) {
-    cv::FileStorage f(path,cv::FileStorage::READ);
-    if(f.isOpened() && int(f["schema_version"])==2) {
-        const auto gate=[&](const char* key){if(!f[key].isInt() || int(f[key])!=1)throw std::runtime_error(std::string("Mechanical calibration pending: ")+key);};
+    const auto reference = splitFileReference(path);
+    cv::FileStorage f(reference.file,cv::FileStorage::READ);
+    const auto root = selectFileNode(f, reference.fragment);
+    if(f.isOpened() && int(root["schema_version"])==2) {
+        const auto gate=[&](const char* key){if(!root[key].isInt() || int(root[key])!=1)throw std::runtime_error(std::string("Mechanical calibration pending: ")+key);};
         for(const char* key:{"coordinate_transform_verified","action_mapping_verified","body_envelope_verified"})gate(key);
         if(!search_only){gate("capture_stop_verified");gate("visual_acceptance_passed");}
         TaskCalibration r;r.task=tuning;r.task.require_multi_view=true;
-        f["version"]>>r.version;if(r.version.empty())throw std::runtime_error("Missing mechanical configuration version");
-        if(int(f["image_width"])!=width||int(f["image_height"])!=height||width<=0||height<=0)throw std::runtime_error("Mechanical image size mismatch");
-        const auto n=[&](const char* key){auto node=f[key];if(!node.isInt()&&!node.isReal())throw std::runtime_error(std::string("Missing mechanical number: ")+key);float v=float(node);if(!std::isfinite(v))throw std::runtime_error("Nonfinite geometry");return v;};
-        std::string semantics;if(!f["a6_semantics"].empty())f["a6_semantics"]>>semantics;
+        root["version"]>>r.version;if(r.version.empty())throw std::runtime_error("Missing mechanical configuration version");
+        if(int(root["image_width"])!=width||int(root["image_height"])!=height||width<=0||height<=0)throw std::runtime_error("Mechanical image size mismatch");
+        const auto n=[&](const char* key){auto node=root[key];if(!node.isInt()&&!node.isReal())throw std::runtime_error(std::string("Missing mechanical number: ")+key);float v=float(node);if(!std::isfinite(v))throw std::runtime_error("Nonfinite geometry");return v;};
+        std::string semantics;if(!root["a6_semantics"].empty())root["a6_semantics"]>>semantics;
         if(semantics=="done_flag"){
             // TEMP_ASSUMPTION: byte 1 is a completion flag for either target; open/close comes from sent targets.
             r.a6_done_flag=true;r.a6_done_settle_ms=int(n("a6_done_settle_ms"));
-            if(!f["a6_done_settle_ms"].isInt()||r.a6_done_settle_ms<100||r.a6_done_settle_ms>3000)throw std::runtime_error("a6_done_settle_ms must be integer 100..3000");
+            if(!root["a6_done_settle_ms"].isInt()||r.a6_done_settle_ms<100||r.a6_done_settle_ms>3000)throw std::runtime_error("a6_done_settle_ms must be integer 100..3000");
         }else if(!semantics.empty()&&semantics!="state_mapping")throw std::runtime_error("Unknown a6_semantics");
         else{
-        if(!f["a6_open_state"].isInt()||!f["a6_close_state"].isInt())throw std::runtime_error("A6 states must be integers");
+        if(!root["a6_open_state"].isInt()||!root["a6_close_state"].isInt())throw std::runtime_error("A6 states must be integers");
         r.feedback_open=int(n("a6_open_state"));r.feedback_close=int(n("a6_close_state"));
         if(r.feedback_open<0||r.feedback_open>1||r.feedback_close<0||r.feedback_close>1||r.feedback_open==r.feedback_close)throw std::runtime_error("Invalid A6 mapping");
         }
@@ -46,11 +49,11 @@ TaskCalibration loadTaskCalibration(const std::string& path,TaskTuning tuning,in
         if(r.robot_swept_radius_m<std::hypot(std::max({r.body_envelope[0],r.body_envelope[1],r.body_envelope[5]}),std::max({r.body_envelope[2],r.body_envelope[3],r.body_envelope[4]/2})))throw std::runtime_error("Insufficient swept radius");
         r.task.closed_front_y_m=r.body_envelope[0];r.capture.mouth_y_m=far;r.capture.corridor_half_width_m=r.body_envelope[4]/2+margin;
         r.capture.image_height_px=height;
-        if(search_only){r.box_area_accepted=int(f["box_area_accepted"])==1;return r;}
-        std::string matching;if(!f["frame_view_matching"].empty())f["frame_view_matching"]>>matching;
+        if(search_only){r.box_area_accepted=int(root["box_area_accepted"])==1;return r;}
+        std::string matching;if(!root["frame_view_matching"].empty())root["frame_view_matching"]>>matching;
         if(matching=="image_polygon")r.frame_view_image_polygon=true;
         else if(!matching.empty()&&matching!="body_ground")throw std::runtime_error("Unknown frame_view_matching");
-        const auto views=f["frame_views"];
+        const auto views=root["frame_views"];
         if(!views.isSeq()||views.size()<2||views.size()>3)throw std::runtime_error("Need two or three independent frame views");
         for(const auto& v:views){FrameView view;const int pitch=int(v["pitch_cdeg"]);
             if(!v["pitch_cdeg"].isInt()||pitch < -4000||pitch>4000||int(v["calibrated"])!=1||int(v["fully_observable"])!=1)throw std::runtime_error("Uncalibrated frame view");
@@ -68,24 +71,24 @@ TaskCalibration loadTaskCalibration(const std::string& path,TaskTuning tuning,in
         r.task.enable_search_cues=false;r.task.enable_short_push=false;r.task.startup_advance_us=0;
         r.task.attempt_budget_us=60000000;r.task.approach_limit_m=.30f;r.task.retreat_limit_m=.20f;
         r.task.max_speed=.10f;r.task.approach_speed=.10f;r.task.rush_speed=.05f;
-        r.box_area_accepted=int(f["box_area_accepted"])==1;
+        r.box_area_accepted=int(root["box_area_accepted"])==1;
         return r;
     }
-    if(!f.isOpened() || int(f["schema_version"])!=1 || int(f["measured"])!=1)
+    if(!f.isOpened() || int(root["schema_version"])!=1 || int(root["measured"])!=1)
         throw std::runtime_error("Task calibration must be schema_version=1 and measured=1");
     const auto number=[&](const char* key){
-        const auto n=f[key];
+        const auto n=root[key];
         if(n.empty() || (!n.isInt()&&!n.isReal()))throw std::runtime_error(std::string("Missing task calibration: ")+key);
         const float v=float(n);
         if(!std::isfinite(v) || v<=0 || v>2)throw std::runtime_error(std::string("Invalid measured length: ")+key);
         return v;
     };
-    if(int(f["image_width"])!=width || int(f["image_height"])!=height || width<=0 || height<=0)
+    if(int(root["image_width"])!=width || int(root["image_height"])!=height || width<=0 || height<=0)
         throw std::runtime_error("Task calibration image size mismatch");
     TaskCalibration result;result.task=tuning;result.capture.holding.clear();result.capture.image_height_px=height;
     result.task.hold_center_y_m=number("hold_center_y_m");result.task.mouth_y_m=number("mouth_y_m");
-    if(!f["grasp_trigger_y_m"].empty())result.task.grasp_trigger_y_m=number("grasp_trigger_y_m");
-    if(!f["injured_hold_center_y_m"].empty())result.task.injured_hold_center_y_m=number("injured_hold_center_y_m");
+    if(!root["grasp_trigger_y_m"].empty())result.task.grasp_trigger_y_m=number("grasp_trigger_y_m");
+    if(!root["injured_hold_center_y_m"].empty())result.task.injured_hold_center_y_m=number("injured_hold_center_y_m");
     else result.task.injured_hold_center_y_m=result.task.hold_center_y_m;
     if(result.task.mouth_y_m<=result.task.hold_center_y_m ||
        result.task.mouth_y_m<=result.task.injured_hold_center_y_m ||
@@ -93,16 +96,16 @@ TaskCalibration loadTaskCalibration(const std::string& path,TaskTuning tuning,in
         throw std::runtime_error("Gripper geometry order is invalid");
     result.capture.corridor_half_width_m=number("corridor_half_width_m");
     result.capture.mouth_y_m=result.task.mouth_y_m; // objects clearly beyond it are not held
-    if(!f["closed_front_y_m"].empty())result.task.closed_front_y_m=number("closed_front_y_m");
+    if(!root["closed_front_y_m"].empty())result.task.closed_front_y_m=number("closed_front_y_m");
     result.load_radius_m=number("load_radius_m");
-    if(!f["robot_swept_radius_m"].empty()) result.robot_swept_radius_m=number("robot_swept_radius_m");
-    if(!f["load_half_width_m"].empty() || !f["load_half_depth_m"].empty()) {
+    if(!root["robot_swept_radius_m"].empty()) result.robot_swept_radius_m=number("robot_swept_radius_m");
+    if(!root["load_half_width_m"].empty() || !root["load_half_depth_m"].empty()) {
         result.load_half_width_m=number("load_half_width_m");
         result.load_half_depth_m=number("load_half_depth_m");
         if(std::hypot(result.load_half_width_m,result.load_half_depth_m)>result.load_radius_m+.0001f)
             throw std::runtime_error("Load radius must enclose the rectangular footprint");
     }
-    if(!f["body_front_m"].empty()) {
+    if(!root["body_front_m"].empty()) {
         const char* keys[]={"body_front_m","body_rear_m","body_left_m","body_right_m","open_width_m","open_front_m"};
         for(int i=0;i<6;++i)result.body_envelope[i]=number(keys[i]);
         const float front=std::max(result.body_envelope[0],result.body_envelope[5]);
@@ -110,7 +113,7 @@ TaskCalibration loadTaskCalibration(const std::string& path,TaskTuning tuning,in
         if(std::hypot(std::max(front,result.body_envelope[1]),side)>result.robot_swept_radius_m)
             throw std::runtime_error("Body/open jaw exceeds rotation envelope");
     }
-    const auto views=f["holding_views"];
+    const auto views=root["holding_views"];
     if(!views.isSeq() || views.empty())throw std::runtime_error("Missing measured holding_views");
     bool near=false;
     for(const auto& v:views) {

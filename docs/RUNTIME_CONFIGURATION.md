@@ -3,13 +3,14 @@
 The application accepts one strict JSON runtime configuration:
 
 ```sh
-./build/rescue_upper_host --config config/runtime/preview.json
-./build/rescue_upper_host --config config/runtime/preview.json --fps 30
-./build/rescue_upper_host --config config/runtime/preview.json --dump-config /tmp/effective_config.json
-./build/rescue_upper_host --config config/runtime/preview.json --dump-config -
+./build/rescue_upper_host --config config/project.json
+./build/rescue_upper_host --config config/project.json --fps 30
+./build/rescue_upper_host --config config/project.json --dump-config /tmp/effective_config.json
+./build/rescue_upper_host --config config/project.json --dump-config -
 ```
 
 `--config` and `--dump-config` each accept one file path and may appear only once.
+`project.json` 还可把资源内嵌在同一 JSON 中，使用 `project.json#/task_calibration/runtime` 这类 JSON 片段引用；命令行仍可覆盖统一文件中的运行字段。
 Use `--dump-config -` for pure JSON on stdout, with diagnostics on stderr.
 `--dump-config` requests an export from the application after legacy resolution;
 `-` selects standard output instead of a file.

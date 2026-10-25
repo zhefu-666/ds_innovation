@@ -4,6 +4,24 @@ project(rescue_upper_host LANGUAGES CXX)
 
 include(CTest)
 
+# Explicit developer targets; never rewrite source files during a normal build.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    set(RESCUE_FORMAT_PYTHON "${Python3_EXECUTABLE}")
+else()
+    set(RESCUE_FORMAT_PYTHON python3)
+endif()
+add_custom_target(format-check
+    COMMAND "${RESCUE_FORMAT_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/format_code.py" --check
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Checking project C/C++ formatting"
+    VERBATIM)
+add_custom_target(format
+    COMMAND "${RESCUE_FORMAT_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/format_code.py" --fix
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Formatting project C/C++ sources"
+    VERBATIM)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -452,6 +470,11 @@ if(BUILD_TESTING)
     target_link_libraries(rescue_controlled_field_tests PRIVATE ${OpenCV_LIBS})
     target_compile_options(rescue_controlled_field_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_controlled_field_tests COMMAND rescue_controlled_field_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME rescue_project_config_check COMMAND rescue_upper_host --config
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/project.json --check-config)
 endif()
 
 if(BUILD_TESTING)

@@ -9,6 +9,7 @@ import math
 import os
 import re
 from pathlib import Path
+
 import shlex
 import signal
 import socket
@@ -20,6 +21,8 @@ import time
 import threading
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools' / 'config'))
+from project import load_reference, reference_exists, reference_path, split_reference
 ACTIONS = ('recognize', 'search', 'carry', 'open', 'close', 'camera', 'frame-status',
            'move-forward', 'move-backward', 'turn-left', 'turn-right',
            'commission-open', 'commission-close', 'stop', 'status', 'web', 'replay', 'preflight')
@@ -30,7 +33,7 @@ DEFAULT_RUNTIME = Path('/tmp') / ('rescue-demo-' + str(os.getuid()))
 
 
 def json_file(path):
-    value = json.loads(Path(path).read_text())
+    value = load_reference(path, ROOT)
     if not isinstance(value, dict):
         raise ValueError('Expected a JSON object: ' + str(path))
     return value
@@ -45,11 +48,28 @@ def load_profile(path):
     profile = json_file(path)
     if profile.get('schema_version') != 1:
         raise ValueError('Unsupported demo profile version')
-    for key in ('binary', 'frame_config', 'acceptance'):
-        profile[key] = str(rooted(ROOT, profile[key]))
-    resources = rooted(ROOT, profile['resource_root'])
-    for key in ('model', 'pose_model', 'rknn_library', 'camera_calibration', 'zone_geometry'):
+    profile_file, _ = split_reference(path, ROOT)
+    base = profile_file.parent
+    resources = rooted(base, profile.get('resource_root', '..'))
+    def ref_base(value):
+        # Legacy profiles used repository-relative config/... paths; project profiles
+        # use paths relative to config/project.json and JSON-pointer fragments.
+        return ROOT if not Path(str(value).split('#', 1)[0]).is_absolute() and str(value).split('#', 1)[0].startswith('config/') else base
+    profile['binary'] = str(rooted(base if 'resource_root' not in profile else resources, profile['binary']))
+    for key in ('frame_config', 'acceptance'):
+        profile[key] = reference_path(profile[key], ref_base(profile[key]))
+    for key in ('model', 'pose_model', 'rknn_library'):
         profile[key] = str(rooted(resources, profile[key]))
+    camera_value = profile['camera_calibration']
+    if '#' in str(camera_value):
+        camera_value = load_reference(camera_value, base)
+        camera_base = base
+    else:
+        camera_base = resources
+    profile['camera_calibration'] = str(rooted(camera_base, camera_value))
+    zone_value = profile['zone_geometry']
+    profile['zone_geometry'] = (reference_path(zone_value, base) if '#' in str(zone_value)
+                                else str(rooted(resources, zone_value)))
     if profile['team'] not in ('blue', 'red'):
         raise ValueError('team must be blue or red')
     return profile
@@ -210,16 +230,16 @@ def make_plan(args, p):
         if known is None:
             issues.append('done_flag：未知方框当前角度；先用本脚本 open/close，或给 --known-frame-angle/--known-frame-id')
     for key in required:
-        if not Path(p[key]).is_file():
+        if not reference_exists(p[key], ROOT):
             issues.append('缺少文件 %s: %s' % (key, p[key]))
     mapped_action = action in WHEELS | DECISIONS | {'open', 'close', 'camera'} and not args.preview
-    if mapped_action and Path(p['frame_config']).is_file():
+    if mapped_action and reference_exists(p['frame_config'], ROOT):
         issues += mapping_issues(p)
         if action in DECISIONS:
             frame_data = json_file(p['frame_config'])
             if frame_data.get('box_area_accepted') != 1:
                 issues.append('当前检测模型为box模式；尚未明确接受检测框占比')
-    if mapped_action and Path(p['acceptance']).is_file():
+    if mapped_action and reference_exists(p['acceptance'], ROOT):
         issues += acceptance_issues(p, action)
     return {'action': action, 'seconds': seconds, 'command': command, 'native_check': native_check,
             'issues': issues, 'runtime': runtime, 'known': known}
@@ -416,7 +436,7 @@ def run(args, p, plan):
 def parser():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('action', choices=ACTIONS)
-    ap.add_argument('--profile', default=os.environ.get('RESCUE_DEMO_PROFILE',str(ROOT/'config/demo_20261007.json')))
+    ap.add_argument('--profile', default=os.environ.get('RESCUE_DEMO_PROFILE',str(ROOT/'config/project.json') + '#/profiles/demo_default'))
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument('--run', action='store_true', help='执行本脚本的动作；默认仅检查')
     mode.add_argument('--preview', action='store_true', help='寻找只读预览：相机+IMU+MCU RX，无TX')

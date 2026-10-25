@@ -8,6 +8,10 @@
 
 新增参数、六点标注规范、无硬件回放和真实标定要求见 [阶段 0/1 实现说明](docs/history/STAGE01_IMPLEMENTATION.md)。
 
+### 统一配置
+
+当前运行参数和演示/标定 profile 集中在 `config/project.json`。主程序使用 `--config config/project.json`；嵌入资源用 JSON 片段引用，例如 `project.json#/task_calibration/runtime`、`project.json#/zone_geometry`。演示 profile 通过 `RESCUE_DEMO_PROFILE=config/project.json#/profiles/demo_default` 选择。两个 OpenCV 相机矩阵仍保留为 `config/camera.yaml` 和 `config/camera.mechanical_5_40.yaml`。
+
 ## 1. 获取代码
 
 ```bash
@@ -136,7 +140,7 @@ cmake -S . -B build-offline -DCMAKE_BUILD_TYPE=Release \
 cmake --build build-offline -j4
 ctest --test-dir build-offline --output-on-failure
 ./build-offline/rescue_upper_host --config config/runtime/push_replay.json
-./build-offline/rescue_upper_host --config config/runtime/preview.json --dump-config /tmp/effective_config.json
+./build-offline/rescue_upper_host --config config/project.json --dump-config /tmp/effective_config.json
 ```
 
 `--dump-config -` 将纯 JSON 写入标准输出，诊断写入标准错误；导出后直接退出，不初始化模型、相机或串口。`--check-config` 另行校验静态标定，不能证明现场条件已满足。关闭 RKNN 的二进制不能加载 `.rknn` 模型。

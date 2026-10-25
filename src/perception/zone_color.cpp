@@ -1,4 +1,5 @@
 #include "rescue/core/stage_audit.hpp"
+#include "rescue/config/file_reference.hpp"
 #include "rescue/perception/zone_color.hpp"
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
@@ -18,25 +19,27 @@ ZoneColorResult previewBlueZoneDefault(ZoneColorResult result,
     return result;
 }
 ZoneColorConfig ZoneColorConfig::load(const std::string& path) {
-    cv::FileStorage f(path, cv::FileStorage::READ);
+    const auto reference = splitFileReference(path);
+    cv::FileStorage f(reference.file, cv::FileStorage::READ);
+    const auto root = selectFileNode(f, reference.fragment);
     ZoneColorConfig c;
-    if (!f.isOpened() || int(f["schema_version"]) != 1 || int(f["measured"]) != 1)
+    if (!f.isOpened() || int(root["schema_version"]) != 1 || int(root["measured"]) != 1)
         throw std::runtime_error("Zone color calibration must be measured, schema_version=1");
     for (const char* key :
          {"saturation_min", "value_min", "min_pixels", "min_fraction", "max_other_fraction"})
-        if (f[key].empty() || (!f[key].isInt() && !f[key].isReal()))
+        if (root[key].empty() || (!root[key].isInt() && !root[key].isReal()))
             throw std::runtime_error(std::string("Missing zone color threshold: ") + key);
-    c.saturation_min = int(f["saturation_min"]);
-    c.value_min = int(f["value_min"]);
-    c.min_pixels = int(f["min_pixels"]);
-    c.min_fraction = float(f["min_fraction"]);
-    c.max_other_fraction = float(f["max_other_fraction"]);
-    if (!f["min_coloured_fraction"].empty())
-        c.min_coloured_fraction = float(f["min_coloured_fraction"]);
-    if (!f["expand_x"].empty())
-        c.expand_x = float(f["expand_x"]);
-    if (!f["expand_near"].empty())
-        c.expand_near = float(f["expand_near"]);
+    c.saturation_min = int(root["saturation_min"]);
+    c.value_min = int(root["value_min"]);
+    c.min_pixels = int(root["min_pixels"]);
+    c.min_fraction = float(root["min_fraction"]);
+    c.max_other_fraction = float(root["max_other_fraction"]);
+    if (!root["min_coloured_fraction"].empty())
+        c.min_coloured_fraction = float(root["min_coloured_fraction"]);
+    if (!root["expand_x"].empty())
+        c.expand_x = float(root["expand_x"]);
+    if (!root["expand_near"].empty())
+        c.expand_near = float(root["expand_near"]);
     if (c.saturation_min < 1 || c.saturation_min > 255 || c.value_min < 1 || c.value_min > 255 ||
         c.min_pixels < 50 || !std::isfinite(c.min_fraction) || c.min_fraction < .5 ||
         c.min_fraction > 1 || !std::isfinite(c.max_other_fraction) || c.max_other_fraction < 0 ||
