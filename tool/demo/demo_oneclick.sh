@@ -44,9 +44,11 @@ if [[ "$mode" == run && $site_clear -ne 1 ]]; then
   exit 2
 fi
 
-export RESCUE_DEMO_PROFILE="$base/runtime/config/demo_20261008.assume.json"
+export RESCUE_DEMO_PROFILE="$base/../../config/demo_20261008.assume.json"
 [[ -f "$RESCUE_DEMO_PROFILE" ]] || { echo "缺少 profile: $RESCUE_DEMO_PROFILE" >&2; exit 1; }
-[[ -x "$base/runtime/bin/rescue_upper_host" ]] || { echo '缺少可执行的 runtime/bin/rescue_upper_host' >&2; exit 1; }
+# 实际执行的二进制来自 profile，不再是运行包内的副本；这里只确认它会存在。
+demo_binary=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["binary"])' "$RESCUE_DEMO_PROFILE")
+[[ -x "$demo_binary" ]] || { echo "缺少可执行的主程序：$demo_binary（见 $RESCUE_DEMO_PROFILE 的 binary 字段）" >&2; exit 1; }
 for f in view_stop.sh frame_close.sh frame_open.sh camera.sh web.sh carry_once.sh stop.sh logs/grab_stream.py; do
   [[ -e "$base/$f" ]] || { echo "缺少 $f" >&2; exit 1; }
 done
@@ -62,7 +64,7 @@ run_dir="logs/run${run_no}"
 ports_up() { ss -ltn 2>/dev/null | grep -q ':8080 ' && ss -ltn 2>/dev/null | grep -q ':18765 '; }
 
 echo "profile : $RESCUE_DEMO_PROFILE"
-echo "binary  : $(md5sum runtime/bin/rescue_upper_host | cut -c1-12)  runtime/bin/rescue_upper_host"
+echo "binary  : $(md5sum "$demo_binary" | cut -c1-12)  $demo_binary"
 echo "目标    : $target"
 echo "日志目录: $run_dir   时长: ${seconds}s   关开框: $([[ $frame_cycle -eq 1 ]] && echo 是 || echo 否)"
 echo "网页桥  : $(ports_up && echo 已在运行 || echo 未运行，--run 时自动启动)"
