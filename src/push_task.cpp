@@ -1,4 +1,5 @@
 #include "rescue/push_task.hpp"
+#include "rescue/task/disperse_cluster_stage.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1241,80 +1242,15 @@ PushOutput PushTask::update(const PushObservation& in) {
                             : t_.blind_scatter_max_y_m;
     const bool clutter_fresh =
         in.clutter_ts_us && now >= in.clutter_ts_us && now - in.clutter_ts_us <= t_.sweep_fresh_us;
-    int best_n = 0;
-    cv::Point2f best_c(0.f, 0.f);
-    float best_d = 0.f;
-    std::vector<cv::Point2f>
-        ord_extra; // lock / weak points appended to a cluster list: they count as ordinary supplies
-    const auto isOrdinary = [&](const cv::Point2f& q) {
-        for (const auto& o : in.clutter_ordinary)
-            if (o.x == q.x && o.y == q.y)
-                return true;
-        for (const auto& o : ord_extra)
-            if (o.x == q.x && o.y == q.y)
-                return true;
-        return false;
-    };
+    DisperseClusterPlanner cluster;
     const auto findBest = [&](const std::vector<cv::Point2f>& pts, float max_y, float radius) {
-        best_n = 0;
-        best_c = cv::Point2f(0.f, 0.f);
-        best_d = 0.f;
-        float best_score = -1e9f;
-        for (const auto& p : pts) {
-            if (!std::isfinite(p.x) || !std::isfinite(p.y) || p.y < t_.blind_scatter_min_y_m ||
-                p.y > max_y || std::abs(p.x) > t_.blind_scatter_half_x_m ||
-                std::abs(std::atan2(-p.x, p.y)) > t_.blind_scatter_max_bearing_rad)
-                continue;
-            int n = 0, n_ord = 0;
-            cv::Point2f sum(0.f, 0.f);
-            for (const auto& q : pts) {
-                if (!std::isfinite(q.x) || !std::isfinite(q.y) || cv::norm(q - p) > radius)
-                    continue;
-                ++n;
-                sum += q;
-                if (isOrdinary(q))
-                    ++n_ord;
-            }
-            if (t_.blind_scatter_need_ordinary && n_ord == 0)
-                continue; // injured / dangerous only: nothing worth ploughing
-            const cv::Point2f c = sum * (1.f / float(n));
-            const float d = float(cv::norm(c));
-            const float score =
-                float(n) -
-                2.f * std::abs(std::atan2(
-                          -c.x, c.y)); // dense, but the one nearest straight ahead wins close calls
-            if (score > best_score || (score == best_score && d < best_d)) {
-                best_n = n;
-                best_c = c;
-                best_d = d;
-                best_score = score;
-            }
-        }
+        return cluster.findBest(t_, in, pts, max_y, radius);
     };
-    // 0: none, 1: group inside the short window (sweep now), 2: group farther out (drive closer
-    // first)
     const auto evalGroup = [&](const std::vector<cv::Point2f>& pts,
                                int need_n,
                                int far_need,
                                float short_radius = -1.f) {
-        if (need_n > 1)
-            need_n += sweep_esc;
-        if (far_need > 1)
-            far_need += sweep_esc;
-        findBest(pts,
-                 t_.blind_scatter_max_y_m,
-                 short_radius > 0.f ? short_radius : t_.disperse_radius_m);
-        if (best_n >= need_n)
-            return 1;
-        if (far_y > t_.blind_scatter_max_y_m) { // long range: positions are coarse, a wider radius
-                                                // still counts as one group
-            findBest(pts, far_y, t_.blind_scatter_far_radius_m);
-            if (best_n >= far_need && best_d > t_.blind_scatter_max_y_m)
-                return 2; // a wide-radius group inside the short window is left to the normal
-                          // trigger
-        }
-        best_n = 0;
-        return 0;
+        return cluster.evalGroup(t_, in, pts, need_n, far_need, far_y, sweep_esc, short_radius);
     };
     // commit: the sweep ignores a locked ordinary supply (it sits inside the group, or the lock was
     // just lost)
@@ -1322,6 +1258,8 @@ PushOutput PushTask::update(const PushObservation& in) {
         target_id_ = -1;
         confirmations_ = 0;
         cue_mode_ = false;
+        const cv::Point2f best_c = cluster.bestCentre();
+        const float best_d = cluster.bestDistance();
         scatter_yaw_ = wrapAngle(in.heading_rad + std::atan2(-best_c.x, best_c.y));
         scatter_range_ = best_d;
         scatter_far_ = far;
@@ -1732,15 +1670,15 @@ PushOutput PushTask::update(const PushObservation& in) {
             };
             services.find_best =
                 [&](const std::vector<cv::Point2f>& pts, float max_y, float radius) {
-                    findBest(pts, max_y, radius);
-                    return BestGroup{best_n, best_d};
+                    const auto best = findBest(pts, max_y, radius);
+                    return BestGroup{best.n, best.d};
                 };
             services.eval_group =
                 [&](const std::vector<cv::Point2f>& pts, int need_n, int far_need, float radius) {
                     return evalGroup(pts, need_n, far_need, radius);
                 };
             services.add_ordinary_extra = [&](const cv::Point2f& pt) {
-                ord_extra.push_back(pt);
+                cluster.addOrdinaryExtra(pt);
             };
             services.begin_scatter = [&](bool far, bool commit, const char* why) {
                 beginScatter(far, commit, why);
@@ -1989,15 +1927,15 @@ PushOutput PushTask::update(const PushObservation& in) {
             };
             services.find_best =
                 [&](const std::vector<cv::Point2f>& pts, float max_y, float radius) {
-                    findBest(pts, max_y, radius);
-                    return SweepBest{best_n, best_d};
+                    const auto best = findBest(pts, max_y, radius);
+                    return SweepBest{best.n, best.d};
                 };
             services.eval_group =
                 [&](const std::vector<cv::Point2f>& pts, int need, int far_need, float radius) {
                     return evalGroup(pts, need, far_need, radius);
                 };
             services.add_ordinary_extra = [&](const cv::Point2f& pt) {
-                ord_extra.push_back(pt);
+                cluster.addOrdinaryExtra(pt);
             };
             services.clear_rejected = [&] {
                 rejected_.clear();

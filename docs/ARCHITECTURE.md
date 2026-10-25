@@ -1,6 +1,6 @@
 # 当前应用架构
 
-本说明描述配置、入口、捕获与交付核验、释放后退区、现场推入决策、共享清扫账本、单转、往复摆动以及冲入与外侧避障摆动规划阶段提取后的实现。`PushTask` 的 `VERIFY_CAPTURE`、`VERIFY_DELIVERY` 分别委托给独立的 `CaptureVerificationStage`、`DeliveryVerificationStage`，`ReleaseRetreatStage` 管理释放后先退再推的私有历史及 `BACK_OUT` 决策，`PushInStage` 管理 `ENTER` 的现场推入分支，`SweepLedger` 管理跨清扫触发点的计时、次数和等待，`DisperseTurnStage` 管理清扫中单次转向的观察、转向、框口复核和可选直推，`DisperseSwingStage` 管理往复摆动、归中及附加趟判定，`DisperseRushStage` 管理冲入判定与外侧障碍摆动规划，`RecoveryStage` 管理兜底退区决策，`SearchStage` 管理搜索与接近，`SweepStage` 管理清扫状态机，`EnterStage` 管理严格进区判定。清扫触发/收尾、`RAISE_RELEASE` 的反馈门控和公共运动许可仍在顶层，既有策略与状态名保持原样；R4 尚未完成，其余阶段按 `REFACTORING_PLAN.md` 逐批推进。
+本说明描述配置、入口、捕获与交付核验、释放后退区、现场推入决策、共享清扫账本、单转、往复摆动以及冲入与外侧避障摆动规划阶段提取后的实现。`PushTask` 的 `VERIFY_CAPTURE`、`VERIFY_DELIVERY` 分别委托给独立的 `CaptureVerificationStage`、`DeliveryVerificationStage`，`ReleaseRetreatStage` 管理释放后先退再推的私有历史及 `BACK_OUT` 决策，`PushInStage` 管理 `ENTER` 的现场推入分支，`SweepLedger` 管理跨清扫触发点的计时、次数和等待，`DisperseTurnStage` 管理清扫中单次转向的观察、转向、框口复核和可选直推，`DisperseSwingStage` 管理往复摆动、归中及附加趟判定，`DisperseRushStage` 管理冲入判定与外侧障碍摆动规划，`RecoveryStage` 管理兜底退区决策，`SearchStage` 管理搜索与接近，`SweepStage` 管理清扫状态机，`EnterStage` 管理严格进区判定，`DisperseClusterPlanner` 管理盲扫聚集选择。清扫触发/收尾、`RAISE_RELEASE` 的反馈门控和公共运动许可仍在顶层，既有策略与状态名保持原样；R4 尚未完成，其余阶段按 `REFACTORING_PLAN.md` 逐批推进。
 
 ```mermaid
 flowchart TD
@@ -195,7 +195,7 @@ MID_APPROACH 的非补给清扫也可能启用单转，但父层的单转相机�
 | `clearTrip()` | 不调用阶段重置；父层清共享清扫动作阶段 | 阶段全部私有历史 |
 | PILE 建立下一轮冲入 | 仅调用 `clearConfirmation()` | 当前阶段及其余历史；冲入完成后 `begin()` 按旧路径重设 |
 
-清扫触发与结束策略仍在顶层。冲入与外侧障碍规划、往复摆动与附加趟判定、兜底退区、搜索与接近、清扫状态机及严格进区判定已在后续批次独立提取，见下文各节。
+清扫触发与结束策略仍在顶层。冲入与外侧障碍规划、往复摆动与附加趟判定、兜底退区、搜索与接近、清扫状态机、严格进区判定及盲扫聚集选择已在后续批次独立提取，见下文各节。
 
 ## 往复摆动与归中边界
 
@@ -247,6 +247,14 @@ MID_APPROACH 的非补给清扫也可能启用单转，但父层的单转相机�
 当前兼容版本仍在观测内部保留部分原算法常量、无进展放宽和日志节流；它们不是 schema v1 的可调项。严格策略、完整观测记录回放、其余阶段私有状态和脚本迁移仍需后续验收。本地合成测试不覆盖真实模型耗时、现场传感器时序或实车结果。前批 [cat 主机验证](validation/CAT_HOST_20261020.md) 覆盖 ARM64 构建、真实 RKNN SDK 和保存图片；本轮 [相机短跑](validation/CAT_CAMERA_20261020.md) 只使用已有 R4-six 二进制，无串口输出，不能代替传感器、机构或实车验收。
 
 本轮发现主机 EXT4 数据丢失告警、C++ 前端包摘要不符、tmpfs 输入非预期变化和多次编译器内部错误，已停止新批 ARM/相机验收；详见 [异常记录](validation/CAT_SWING_20261020.md)。后续已用官方签名精确版本包确认 `cc1plus` 的 7 字节差异，补齐 ignored 模型/运行库及启动资源备份；用户暂时无法现场操作，主机尚未离线恢复，详见 [完整性与恢复记录](validation/CAT_INTEGRITY_20261020.md)。主机恢复后必须从可信源码重新验证，不能把本机阶段回归或旧 ARM 结果视作新批部署资格。
+
+## 盲扫聚集选择
+
+`DisperseClusterPlanner` 承担原先内联在 `update()` 的 `isOrdinary`/`findBest`/`evalGroup` 三个 lambda：在聚类点中挑选最密集且最朝向正前方的组，并决定触发短窗清扫还是先靠近。所有状态都是每 tick 的：父层在每次 `update()` 中按值构造一个规划器，`ord_extra`、最优数量、中心与距离都不跨帧保留，与原局部变量生命周期一致。
+
+`findBest()` 保留原筛选与打分：跳过非有限点、近/远距离窗口外、横向半宽外和方位角外的点；以 `radius` 内的点计数求质心，分数为 `n - 2*|bearing|`，同分时取更近的质心。配置 `blind_scatter_need_ordinary` 时，组内必须有普通物资点，`clutter_ordinary` 与父层追加的锁定/弱检测点都计入。`evalGroup()` 保留原规则：`need_n`/`far_need` 大于 1 时按清扫升级数递增，短窗未达标且远窗启用时改用 `blind_scatter_far_radius_m` 再试，命中远组才返回 2，其余返回 0 并清除最优组。
+
+父层仍负责所有写操作：`beginScatter()` 通过 `bestCentre()`/`bestDistance()` 读取保留的组，清扫方向、距离、冷却、账本开始与状态切换都留在顶层；`SearchStage`/`SweepStage` 通过既有服务回调注入 `find_best`、`eval_group`、`add_ordinary_extra`，调用顺序不变。
 
 ## 严格进区阶段
 
