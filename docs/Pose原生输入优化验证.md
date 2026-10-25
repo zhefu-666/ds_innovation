@@ -1,6 +1,6 @@
 # Pose 原生 FP16 输入优化（2026-10-18）
 
-远端：cat@192.168.1.121:/home/cat/ds_innovation。修改 src/perception/rknn_model.cpp，已编译正式 build-school-competition/rescue_upper_host。
+远端：cat@192.168.1.121:/home/cat/ds_innovation。修改 src/perception/rknn_model.cpp，已编译正式 build-release/rescue_upper_host。
 
 ## 实现与适用边界
 

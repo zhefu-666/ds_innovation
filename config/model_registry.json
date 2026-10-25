@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-26",
+  "models": [
+    {
+      "file": "models/detect_fp.rknn",
+      "role": "detector",
+      "status": "active",
+      "sha256": "db6ef05746699792028de7514420abf07e56cb4f2d8d6eabb1d1233bd25b4966"
+    },
+    {
+      "file": "models/detect_hybrid_20261015.rknn",
+      "role": "detector",
+      "status": "active",
+      "sha256": "3d3a2d8a586fb2fe0ccfd08d7eee35e588ff75c1f0f9f94679e5cae6ac50b6d6"
+    },
+    {
+      "file": "models/detect_int8_split_20261022.rknn",
+      "role": "detector",
+      "status": "active",
+      "sha256": "1bffb403efb6b516a4c1e5a44d0b95945a173be447d442dd28a4eed3168b90f9"
+    },
+    {
+      "file": "models/zone_pose_fp.rknn",
+      "role": "pose",
+      "status": "active",
+      "sha256": "fb60b26d4390f37df6b6826647a4025018204576c3c75665c86bca88c7d50b12"
+    },
+    {
+      "file": "models/zone_pose_int8_split_20261022.rknn",
+      "role": "pose",
+      "status": "active",
+      "sha256": "54b9420a0c6be709ad1594bd2ffdce394fe18759ef5e0a31441a805ce5f4b3e2"
+    },
+    {
+      "file": "models/detect_int8.rknn",
+      "role": "detector",
+      "status": "archived_candidate",
+      "sha256": "6a04f4126e6103f4dced6851581e4b5bf774e93cf4588c021bec286ffa4da3ab",
+      "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/detect_int8.rknn"
+    },
+    {
+      "file": "models/detect_int8_20261014.rknn",
+      "role": "detector",
+      "status": "archived_candidate",
+      "sha256": "a4b64b0cbb813499e4311cb5058d3b3690518bff51b622675e4a24f963942d3d",
+      "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/detect_int8_20261014.rknn"
+    },
+    {
+      "file": "models/zone_pose_red_v2_fp.rknn",
+      "role": "pose",
+      "status": "archived_candidate",
+      "sha256": "878c510995bf3aba012f9311ff02f3eaadf68fb37a9762b4fb2d2be783b71863",
+      "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_red_v2_fp.rknn"
+    },
+    {
+      "file": "models/zone_pose_v3_int8.rknn",
+      "role": "pose",
+      "status": "archived_candidate",
+      "sha256": "68194965028a1653eab7d48d764e2a565e790d3aa2095fd5652d6d29e528fdad",
+      "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_v3_int8.rknn"
+    }
+  ]
+}

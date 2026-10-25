@@ -57,7 +57,7 @@ if [[ "$mode" == run && $site_clear -ne 1 ]]; then
   exit 2
 fi
 
-binary=${RESCUE_BINARY:-$PWD/build-arm64-consolidation-20261025/rescue_upper_host}
+binary=${RESCUE_BINARY:-$PWD/build-release/rescue_upper_host}
 binary_abs=$binary
 [[ "$binary_abs" == /* ]] || binary_abs="$PWD/$binary"
 

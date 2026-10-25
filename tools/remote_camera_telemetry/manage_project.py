@@ -14,7 +14,7 @@ from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
 LOGS = ROOT / 'telemetry_logs'
-BINARY = ROOT / 'build-arm64-telemetry/rescue_upper_host'
+BINARY = ROOT / 'build-release/rescue_upper_host'
 BRIDGE = ROOT / 'tools/remote_camera_telemetry/project_bridge.py'
 
 
@@ -56,7 +56,7 @@ def start(extra):
     if tracked():
         raise RuntimeError('Project preview is already running; use status or stop first')
     if not BINARY.is_file():
-        raise RuntimeError('Build build-arm64-telemetry with RESCUE_ENABLE_TELEMETRY=ON first')
+        raise RuntimeError('Build build-release with RESCUE_ENABLE_TELEMETRY=ON first')
     # Refuse to replace an existing service, or to open a second copy of the camera.
     for port in (8080, 8765):
         with socket.socket() as sock:

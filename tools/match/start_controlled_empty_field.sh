@@ -7,7 +7,7 @@ case "$mode" in
   *) echo 'Usage: start_controlled_empty_field.sh [--check|--preview|--run|--auto-run]' >&2; exit 2 ;;
 esac
 if (( $# > 1 )); then echo 'Only one mode is accepted.' >&2; exit 2; fi
-binary=build-camera-offset-20261007/rescue_upper_host
+binary=build-release/rescue_upper_host
 common=(--controlled-empty-field --search-cues --team blue --no-show
   --calibration config/camera.yaml --model models/detect_fp.rknn
   --pose-model-blue models/zone_pose_fp.rknn

@@ -101,17 +101,17 @@ v4l2-ctl --list-devices
 带主程序遥测的构建：
 
 ```bash
-cmake -S . -B build-arm64-telemetry \
+cmake -S . -B build-release \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_TESTING=ON \
   -DRESCUE_ENABLE_TELEMETRY=ON
-cmake --build build-arm64-telemetry -j4
+cmake --build build-release -j4
 ```
 
 运行测试：
 
 ```bash
-ctest --test-dir build-arm64-telemetry --output-on-failure
+ctest --test-dir build-release --output-on-failure
 python3 tools/remote_camera_telemetry/test_project_bridge.py
 ```
 
@@ -153,7 +153,7 @@ python3 tools/remote_camera_telemetry/manage_project.py start
 默认启动内容：
 
 ```text
-主程序：build-arm64-telemetry/rescue_upper_host --dry-run --no-show --telemetry
+主程序：build-release/rescue_upper_host --dry-run --no-show --telemetry
 Foxglove：0.0.0.0:8765
 网页：0.0.0.0:8080
 ```
@@ -210,7 +210,7 @@ python3 tools/remote_camera_telemetry/project_bridge.py
 
 ```bash
 . .venv-telemetry/bin/activate
-./build-arm64-telemetry/rescue_upper_host \
+./build-release/rescue_upper_host \
   --dry-run --no-show --telemetry
 ```
 

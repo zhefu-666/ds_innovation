@@ -51,3 +51,9 @@ calibration_runs/
 
 # Local pre-change archives (e.g. protocol-20261023)
 /backups/
+# Local tool state and editor/backup leftovers
+/.tools/
+*.bak
+*.bak-*
+*.orig
+*.rej
