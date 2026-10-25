@@ -7,6 +7,7 @@
 #include "rescue/task/capture_verification_stage.hpp"
 #include "rescue/task/delivery_verification_stage.hpp"
 #include "rescue/task/release_retreat_stage.hpp"
+#include "rescue/task/enter_stage.hpp"
 #include "rescue/task/push_in_stage.hpp"
 #include "rescue/task/sweep_ledger.hpp"
 #include "rescue/task/disperse_turn_stage.hpp"
@@ -799,6 +800,7 @@ class PushTask {
     DeliveryVerificationStage delivery_verification_;
     ReleaseRetreatStage release_retreat_;
     PushInStage push_in_;
+    EnterStage enter_;
     SweepLedger sweep_ledger_;
     DisperseRushStage disperse_rush_;
     DisperseTurnStage disperse_turn_;

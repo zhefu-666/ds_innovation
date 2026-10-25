@@ -2732,38 +2732,39 @@ PushOutput PushTask::update(const PushObservation& in) {
                     drive(push.vx, push.wz);
                 break;
             }
-            if (!zoneOk(in)) {
-                if (lostTarget()) {
-                    if (carryLogic())
-                        enter(PushState::RAISE_RELEASE, now, "assumed_drop_point_zone_lost");
-                    else
-                        enter(PushState::ABORT_DROP, now, "zone_lost");
-                }
-                break;
+            EnterContext context;
+            context.elapsed_us = elapsed;
+            context.zone_ok = zoneOk(in);
+            // lostTarget() advances the parent's missed-frame counter: it must only run when the
+            // zone is unusable, exactly as the inline branch did.
+            if (!context.zone_ok)
+                context.lost_target = lostTarget();
+            context.carry = carryLogic();
+            context.drop_locked = drop_locked_;
+            context.drop_centre_y = drop_centre_zone_.y;
+            if (context.zone_ok) {
+                const auto& z = in.zone_estimate;
+                context.hold = z.bodyToZone({0, holdCenter()});
+                context.half_x = halfX();
+                context.zone_yaw = z.yaw_body_rad;
             }
-            misses_ = 0;
-            const auto& z = in.zone_estimate;
-            const cv::Point2f hold = z.bodyToZone({0, holdCenter()});
-            const float lateral = hold.x - halfX();
             if (in.delivery_observed)
                 delivery_seen_ = true;
-            // One leading object crossing the line must not strand the second object.
-            // Advance the conservative load envelope to the locked drop position;
-            // actual credited inventory is checked only after backing out.
-            if (hold.y >= (drop_locked_ ? drop_centre_zone_.y : t_.deposit_y_m)) {
-                enter(PushState::RAISE_RELEASE, now, "enclosed_load_at_drop");
-                break;
+            const auto strict = enter_.update(t_, context);
+            if (strict.reset_misses)
+                misses_ = 0;
+            switch (strict.outcome) {
+                case EnterOutcome::RaiseRelease:
+                    enter(PushState::RAISE_RELEASE, now, strict.reason);
+                    break;
+                case EnterOutcome::AbortDrop:
+                    enter(PushState::ABORT_DROP, now, strict.reason);
+                    break;
+                case EnterOutcome::Continue:
+                    if (strict.drive)
+                        drive(strict.vx, strict.wz);
+                    break;
             }
-            if (std::abs(lateral) > t_.enter_lateral_m) {
-                enter(PushState::ABORT_DROP, now, "enter_lateral");
-                break;
-            }
-            if (elapsed > t_.enter_budget_us) {
-                enter(PushState::ABORT_DROP, now, "enter_timeout");
-                break;
-            }
-            drive(t_.enter_speed,
-                  t_.heading_gain * wrapAngle(z.yaw_body_rad) + t_.lateral_gain * lateral);
             break;
         }
         case PushState::BACK_OUT: {

@@ -1,6 +1,6 @@
 # 当前应用架构
 
-本说明描述配置、入口、捕获与交付核验、释放后退区、现场推入决策、共享清扫账本、单转、往复摆动以及冲入与外侧避障摆动规划阶段提取后的实现。`PushTask` 的 `VERIFY_CAPTURE`、`VERIFY_DELIVERY` 分别委托给独立的 `CaptureVerificationStage`、`DeliveryVerificationStage`，`ReleaseRetreatStage` 管理释放后先退再推的私有历史及 `BACK_OUT` 决策，`PushInStage` 管理 `ENTER` 的现场推入分支，`SweepLedger` 管理跨清扫触发点的计时、次数和等待，`DisperseTurnStage` 管理清扫中单次转向的观察、转向、框口复核和可选直推，`DisperseSwingStage` 管理往复摆动、归中及附加趟判定，`DisperseRushStage` 管理冲入判定与外侧障碍摆动规划。清扫触发/收尾、`RAISE_RELEASE` 的反馈门控、严格 `ENTER` 和公共运动许可仍在顶层，既有策略与状态名保持原样；R4 尚未完成，其余阶段按 `REFACTORING_PLAN.md` 逐批推进。
+本说明描述配置、入口、捕获与交付核验、释放后退区、现场推入决策、共享清扫账本、单转、往复摆动以及冲入与外侧避障摆动规划阶段提取后的实现。`PushTask` 的 `VERIFY_CAPTURE`、`VERIFY_DELIVERY` 分别委托给独立的 `CaptureVerificationStage`、`DeliveryVerificationStage`，`ReleaseRetreatStage` 管理释放后先退再推的私有历史及 `BACK_OUT` 决策，`PushInStage` 管理 `ENTER` 的现场推入分支，`SweepLedger` 管理跨清扫触发点的计时、次数和等待，`DisperseTurnStage` 管理清扫中单次转向的观察、转向、框口复核和可选直推，`DisperseSwingStage` 管理往复摆动、归中及附加趟判定，`DisperseRushStage` 管理冲入判定与外侧障碍摆动规划，`RecoveryStage` 管理兜底退区决策，`SearchStage` 管理搜索与接近，`SweepStage` 管理清扫状态机，`EnterStage` 管理严格进区判定。清扫触发/收尾、`RAISE_RELEASE` 的反馈门控和公共运动许可仍在顶层，既有策略与状态名保持原样；R4 尚未完成，其余阶段按 `REFACTORING_PLAN.md` 逐批推进。
 
 ```mermaid
 flowchart TD
@@ -23,6 +23,8 @@ flowchart TD
     Retreat --> Task
     Task --> PushIn[PushInStage: 现场推入 / 对齐 / 卡停补推 / 有序事件]
     PushIn --> Task
+    Task --> Enter[EnterStage: 严格进区判定 / 横向与预算门控 / 进区运动]
+    Enter --> Task
     Task --> Sweep[SweepLedger: 清扫链 / 次数与时间预算 / 间隔 / 重新观察等待]
     Sweep --> Task
     Task --> Turn[DisperseTurnStage: 单转观察 / 转向 / 框口复核 / 可选直推]
@@ -99,7 +101,7 @@ ObservationBuilder 借用 Runtime 创建的 GeometryPipeline、相机标定、�
 
 ## 释放后退区阶段
 
-`ReleaseRetreatStage` 独占先退再推模式 `prepush_`、起始持有位置深度 `start_hold_y_`、释放后区内确认计数和上次货物时间戳。`RAISE_RELEASE` 确认释放后通过 `beginReleaseBackOff()` 开始该模式；`PushInStage` 判定卡停补推后，顶层通过 `beginRepushBackOff()` 开始补推前后退。`BACK_OUT` 在机构反馈通过后调用退区阶段；现场推入、对齐与卡停判定由推入阶段处理，严格 `ENTER` 仍由顶层执行。
+`ReleaseRetreatStage` 独占先退再推模式 `prepush_`、起始持有位置深度 `start_hold_y_`、释放后区内确认计数和上次货物时间戳。`RAISE_RELEASE` 确认释放后通过 `beginReleaseBackOff()` 开始该模式；`PushInStage` 判定卡停补推后，顶层通过 `beginRepushBackOff()` 开始补推前后退。`BACK_OUT` 在机构反馈通过后调用退区阶段；现场推入、对齐与卡停判定由推入阶段处理。
 
 阶段显式读取配置，以及经过时间、已行驶距离、当前严格区域观测、入口是否退出、锚定区域是否可用、当前持有深度、目标后退距离、运动比例、盲退标记、共享补推次数和目标半区位置。货物输入 `ReleasedCargoEvidence` 包含父层跟踪后得到的可见性、定位标记、裁切标记、后沿坐标和时间戳。阶段不保留输入引用，私有历史按值持有。
 
@@ -120,7 +122,7 @@ ObservationBuilder 借用 Runtime 创建的 GeometryPipeline、相机标定、�
 
 ## 现场推入阶段
 
-`PushInStage` 只接收 `ENTER` 中 `carryLogic() && !assume_pushed_` 的分支；`carryLogic()` 为 `assume_all_safe || field_carry`。严格推入，以及现场路径中已经标记推入完成后的原分支，继续由父层处理。父层先通过公共相机门控、闭框命令与反馈，再调用 `trackCargo()`，使用已有几何函数构造输入，随后调用阶段。阶段不更新跟踪器、不读取设备，也不直接切换顶层状态。
+`PushInStage` 只接收 `ENTER` 中 `carryLogic() && !assume_pushed_` 的分支；`carryLogic()` 为 `assume_all_safe || field_carry`。现场路径中已经标记推入完成后的原分支继续由父层处理；严格进区判定由 `EnterStage` 处理。父层先通过公共相机门控、闭框命令与反馈，再调用 `trackCargo()`，使用已有几何函数构造输入，随后调用阶段。阶段不更新跟踪器、不读取设备，也不直接切换顶层状态。
 
 阶段按值独占以下私有字段：
 
@@ -193,7 +195,7 @@ MID_APPROACH 的非补给清扫也可能启用单转，但父层的单转相机�
 | `clearTrip()` | 不调用阶段重置；父层清共享清扫动作阶段 | 阶段全部私有历史 |
 | PILE 建立下一轮冲入 | 仅调用 `clearConfirmation()` | 当前阶段及其余历史；冲入完成后 `begin()` 按旧路径重设 |
 
-清扫触发与结束策略、搜索接近、严格 ENTER 或其余恢复动作仍在顶层。冲入与外侧障碍规划、往复摆动与附加趟判定已在后续批次独立提取，见下两节。
+清扫触发与结束策略仍在顶层。冲入与外侧障碍规划、往复摆动与附加趟判定、兜底退区、搜索与接近、清扫状态机及严格进区判定已在后续批次独立提取，见下文各节。
 
 ## 往复摆动与归中边界
 
@@ -245,3 +247,11 @@ MID_APPROACH 的非补给清扫也可能启用单转，但父层的单转相机�
 当前兼容版本仍在观测内部保留部分原算法常量、无进展放宽和日志节流；它们不是 schema v1 的可调项。严格策略、完整观测记录回放、其余阶段私有状态和脚本迁移仍需后续验收。本地合成测试不覆盖真实模型耗时、现场传感器时序或实车结果。前批 [cat 主机验证](validation/CAT_HOST_20261020.md) 覆盖 ARM64 构建、真实 RKNN SDK 和保存图片；本轮 [相机短跑](validation/CAT_CAMERA_20261020.md) 只使用已有 R4-six 二进制，无串口输出，不能代替传感器、机构或实车验收。
 
 本轮发现主机 EXT4 数据丢失告警、C++ 前端包摘要不符、tmpfs 输入非预期变化和多次编译器内部错误，已停止新批 ARM/相机验收；详见 [异常记录](validation/CAT_SWING_20261020.md)。后续已用官方签名精确版本包确认 `cc1plus` 的 7 字节差异，补齐 ignored 模型/运行库及启动资源备份；用户暂时无法现场操作，主机尚未离线恢复，详见 [完整性与恢复记录](validation/CAT_INTEGRITY_20261020.md)。主机恢复后必须从可信源码重新验证，不能把本机阶段回归或旧 ARM 结果视作新批部署资格。
+
+## 严格进区阶段
+
+`EnterStage` 处理 `ENTER` 中 `carryLogic() && !assume_pushed_` 之外的分支，即观察已确认持有货物后的进区判定：区域内持有中心越过投放线、横向偏差超限、进区超时，以及区域失效后的分派。父层先完成相机门控与闭框反馈，再调用阶段；阶段不读取设备、不执行运动许可检查，也不直接切换顶层状态。
+
+阶段输入 `EnterContext` 显式提供阶段经过时间、区域是否可用、父层已判定的目标丢失标记、是否处于假设搬运、是否已锁定投放点及其纵坐标、机体持有的中心点在区域坐标下的位置、目标半区位置和进区航向误差。`EnterResult` 返回类型化结果 `Continue`/`RaiseRelease`/`AbortDrop`、原有原因串、是否复位父层漏帧计数，以及可选的进区速度与角速度。
+
+判定顺序与旧实现一致：区域不可用时先看目标是否已丢失（否则当帧不动），丢失后在假设搬运下转入 `RAISE_RELEASE` 并记 `assumed_drop_point_zone_lost`，否则转入 `ABORT_DROP` 并记 `zone_lost`；区域可用时先复位漏帧计数，再依次比较投放线、横向偏差和进区预算。投放线使用锁定投放点纵坐标（未锁定时取配置目标），比较保留 `>=`；横向偏差取绝对值并保留严格 `>`；预算比较保留严格 `>`。三项均未触发时输出 `enter_speed` 与 `heading_gain *wrapAngle(z) + lateral_gain * lateral` 的角速度，由父层经公共运动许可后执行。
