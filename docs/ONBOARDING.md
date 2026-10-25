@@ -153,13 +153,13 @@ ctest --test-dir build-arm64-selfcontained --output-on-failure
 静态入口检查不会打开设备；方框未确认时只显示占位配置，不得将占位值用于运动：
 
 ```bash
-tools/match/match_main_refactor.sh --check
+tools/match/match_main.sh --check
 ```
 
 `--status` 独占只读 MCU 串口，查看前应先停止预览和其他串口程序：
 
 ```bash
-tools/match/match_main_refactor.sh --status
+tools/match/match_main.sh --status
 ```
 
 导出最终配置，不加载模型、不开设备：
@@ -246,7 +246,7 @@ SCAN -> APPROACH -> PREPARE -> RUSH -> LOWER_FRAME
 4. 完成当前 RX120 姿态的真实标定，并现场确认方框物理状态，不直接扩大标定范围绕过门控。
 5. 审查并补齐当前 A6 状态映射的版本化基线，恢复完整 CTest。
 6. 在清场、急停可用、有人值守且现场确认后，才分别进行单机构、单俯仰、最小底盘动作验收。
-7. 最后才是单次搬运和 180 秒整场；`match_main_refactor.sh --run` 不是新手默认启动命令。
+7. 最后才是单次搬运和 180 秒整场；`match_main.sh --run` 不是新手默认启动命令。
 
 ## 8. 本次同步与留痕
 

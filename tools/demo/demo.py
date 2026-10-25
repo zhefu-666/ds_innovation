@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -338,7 +339,15 @@ def interrupt(signum, _frame):
     raise Interrupted('收到停止信号 ' + str(signum))
 
 
+def _file_md5(path):
+    try:
+        return hashlib.md5(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return 'unavailable'
+
+
 def child_run(command, seconds, lines=None):
+    print(f"[identity] binary={command[0]} md5={_file_md5(command[0])}", flush=True)
     process = subprocess.Popen(command, cwd=ROOT, start_new_session=True,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     def forward():
