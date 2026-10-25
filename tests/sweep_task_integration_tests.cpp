@@ -82,21 +82,26 @@ struct Rig {
 
     void seed(PushState state) {
         task.enter(state, input.now_us, "seed_sweep");
-        if (state == PushState::APPROACH) task.approach_pitch_ = task.t_.track_pitch_cdeg;
+        if (state == PushState::APPROACH)
+            task.approach_pitch_ = task.t_.track_pitch_cdeg;
         task.last_us_ = input.now_us;
         task.last_vx_ = task.last_wz_ = 0;
         const auto pitch = task.desiredPitch();
-        if (pitch != kCameraPitchInvalid) task.pitch_cmd_ = pitch;
+        if (pitch != kCameraPitchInvalid)
+            task.pitch_cmd_ = pitch;
         task.pitch_wait_us_ = input.now_us;
         input.camera_pitch_cdeg = task.pitch_cmd_;
     }
 
     void refresh() {
-        if (fresh_clutter) input.clutter_ts_us = input.now_us;
-        if (!input.upright_body.empty()) input.upright_ts_us = input.now_us;
+        if (fresh_clutter)
+            input.clutter_ts_us = input.now_us;
+        if (!input.upright_body.empty())
+            input.upright_ts_us = input.now_us;
         if (auto_camera) {
             const auto pitch = task.desiredPitch();
-            if (pitch != kCameraPitchInvalid) input.camera_pitch_cdeg = pitch;
+            if (pitch != kCameraPitchInvalid)
+                input.camera_pitch_cdeg = pitch;
         }
     }
 
@@ -130,7 +135,9 @@ struct Rig {
         input.heading_error = 0;
     }
 
-    void noTarget() { input.target_valid = false; }
+    void noTarget() {
+        input.target_valid = false;
+    }
 
     uint64_t nearStart() {
         group(.3f);
@@ -162,7 +169,8 @@ struct Rig {
     }
 
     void toSwing() {
-        if (task.sweep_phase_ == 0) tick();
+        if (task.sweep_phase_ == 0)
+            tick();
         assert(task.sweep_phase_ == 4);
         task.travel_ = task.sweep_travel0_ + task.disperse_rush_m_ * task.motionRatio() + .001f;
         task.last_vx_ = 0;
@@ -174,7 +182,8 @@ struct Rig {
     void finishSwing() {
         assert(task.sweep_phase_ == 5);
         const auto origin = task.sweep_yaw0_;
-        const auto magnitude = task.disperse_small_ ? task.t_.mid_neighbour_clear_turn_rad : task.t_.disperse_turn_rad;
+        const auto magnitude =
+            task.disperse_small_ ? task.t_.mid_neighbour_clear_turn_rad : task.t_.disperse_turn_rad;
         input.heading_rad = origin + task.disperse_sign_ * magnitude;
         tick();
         input.heading_rad = origin;
@@ -199,10 +208,13 @@ struct Rig {
         input.heading_rad = task.t_.turn_min_rad + .01f;
         tick();
         assert(output.state == PushState::SCAN && !task.fault_);
-        assert(task.sweepDone() == 0 && task.sweepSpentUs(input.now_us) == 0 && !task.sweepChainOpen());
+        assert(task.sweepDone() == 0 && task.sweepSpentUs(input.now_us) == 0 &&
+               !task.sweepChainOpen());
     }
 
-    void stationary() const { assert(output.motion.vx_mps == 0 && output.motion.wz_rps == 0); }
+    void stationary() const {
+        assert(output.motion.vx_mps == 0 && output.motion.wz_rps == 0);
+    }
 
     void report(const char* test) const {
         std::cout << "case=" << test << " state=" << PushTask::name(output.state)
@@ -213,7 +225,8 @@ struct Rig {
                   << " vx=" << output.motion.vx_mps << " wz=" << output.motion.wz_rps
                   << " frame=" << int(output.motion.gripper_offset)
                   << " pitch=" << output.motion.camera_pitch_cdeg
-                  << " scatter_count=" << task.scatter_count_ << " far=" << task.scatter_far_ << '\n';
+                  << " scatter_count=" << task.scatter_count_ << " far=" << task.scatter_far_
+                  << '\n';
     }
 };
 
@@ -224,7 +237,8 @@ void chainAccounting() {
         const auto spent = rig.task.sweepSpentUs(end);
         rig.report("near_swing_closes_and_counts_once");
         rig.input.clutter_body.clear();
-        for (int index = 0; index < 3; ++index) rig.tick();
+        for (int index = 0; index < 3; ++index)
+            rig.tick();
         assert(rig.task.sweepDone() == 1 && rig.task.sweepSpentUs(rig.input.now_us) == spent);
         assert(!rig.task.sweepChainOpen());
         rig.report("closed_chain_never_recounts");
@@ -235,12 +249,14 @@ void chainAccounting() {
         rig.tick();
         rig.group(.3f);
         rig.tick();
-        assert(rig.output.state == PushState::SCATTER && rig.output.reason == "blind_scatter_near_group");
+        assert(rig.output.state == PushState::SCATTER &&
+               rig.output.reason == "blind_scatter_near_group");
         assert(rig.task.sweepSpentUs(rig.input.now_us) == rig.input.now_us - start);
         rig.report("far_to_near_reentry_keeps_active_start");
         rig.toSwing();
         rig.finishSwing();
-        assert(rig.task.sweepDone() == 1 && rig.task.sweepSpentUs(rig.input.now_us) == rig.input.now_us - start);
+        assert(rig.task.sweepDone() == 1 &&
+               rig.task.sweepSpentUs(rig.input.now_us) == rig.input.now_us - start);
         rig.report("far_and_near_form_one_counted_chain");
     }
     {
@@ -266,14 +282,16 @@ void chainAccounting() {
         rig.group(.3f);
         const auto near_start = paused + parameters.sweep_chain_link_us;
         rig.at(near_start);
-        assert(rig.output.state == PushState::SCATTER && rig.task.sweepSpentUs(rig.input.now_us) == active_far);
+        assert(rig.output.state == PushState::SCATTER &&
+               rig.task.sweepSpentUs(rig.input.now_us) == active_far);
         rig.at(original_start + parameters.sweep_op_budget_us);
         assert(rig.output.state == PushState::SCATTER && rig.task.sweepChainOpen());
         rig.report("linked_chain_retains_operation_deadline_at_equality");
         rig.at(original_start + parameters.sweep_op_budget_us + 1);
         assert(rig.output.state == PushState::SCAN && rig.output.reason == "sweep_op_timeout");
         assert(rig.task.sweepDone() == 0 && !rig.task.sweepChainOpen());
-        assert(rig.task.sweepSpentUs(rig.input.now_us) == active_far + rig.input.now_us - near_start);
+        assert(rig.task.sweepSpentUs(rig.input.now_us) ==
+               active_far + rig.input.now_us - near_start);
         rig.report("linked_chain_excludes_pause_but_keeps_wall_deadline");
     }
     {
@@ -283,12 +301,14 @@ void chainAccounting() {
         const auto start = rig.nearStart();
         rig.target();
         rig.tick();
-        assert(rig.output.state == PushState::SCAN && rig.output.reason == "blind_scatter_target_seen");
+        assert(rig.output.state == PushState::SCAN &&
+               rig.output.reason == "blind_scatter_target_seen");
         assert(rig.task.sweepDone() == 0 && !rig.task.sweepChainOpen());
         assert(rig.task.sweepSpentUs(rig.input.now_us) == rig.input.now_us - start);
         rig.noTarget();
         rig.tick();
-        assert(rig.output.state == PushState::SCATTER && rig.output.reason == "blind_scatter_start");
+        assert(rig.output.state == PushState::SCATTER &&
+               rig.output.reason == "blind_scatter_start");
         rig.report("unswung_target_exit_leaves_group_gap_open");
     }
     {
@@ -298,7 +318,8 @@ void chainAccounting() {
         rig.nearStart();
         rig.input.heading_valid = false;
         rig.tick();
-        assert(rig.output.state == PushState::SCAN && rig.output.reason == "blind_scatter_no_heading");
+        assert(rig.output.state == PushState::SCAN &&
+               rig.output.reason == "blind_scatter_no_heading");
         assert(rig.task.sweepDone() == 0 && !rig.task.sweepChainOpen());
         rig.input.heading_valid = true;
         rig.tick();
@@ -310,14 +331,17 @@ void chainAccounting() {
 void budgetsAndGaps() {
     for (bool match : {false, true}) {
         auto parameters = tuning();
-        if (match) parameters.sweep_match_budget_us = 200000;
-        else parameters.sweep_time_budget_us = 200000;
+        if (match)
+            parameters.sweep_match_budget_us = 200000;
+        else
+            parameters.sweep_time_budget_us = 200000;
         Rig rig(parameters);
         const auto start = rig.nearStart();
         rig.at(start + 199999);
         assert(rig.output.state == PushState::SCATTER && rig.task.sweepChainOpen());
         rig.at(start + 200000);
-        assert(rig.output.state == PushState::SCAN && rig.output.reason == "sweep_budget_exhausted");
+        assert(rig.output.state == PushState::SCAN &&
+               rig.output.reason == "sweep_budget_exhausted");
         assert(rig.task.sweepSpentUs(rig.input.now_us) == 200000 && rig.task.sweepDone() == 0);
         rig.stationary();
         rig.report(match ? "match_budget_cuts_at_equality" : "trip_time_budget_cuts_at_equality");
@@ -346,7 +370,8 @@ void budgetsAndGaps() {
         rig.stationary();
         rig.input.camera_pitch_stable = true;
         rig.at(start + 250000);
-        assert(rig.output.state == PushState::SCAN && rig.output.reason == "sweep_budget_exhausted");
+        assert(rig.output.state == PushState::SCAN &&
+               rig.output.reason == "sweep_budget_exhausted");
         assert(rig.task.sweepSpentUs(rig.input.now_us) == 250000 && !rig.task.sweepChainOpen());
         rig.report("pitch_wait_delays_budget_exit_without_pausing_time");
     }
@@ -404,7 +429,8 @@ void approachAndMidSweeps() {
         assert(rig.output.reason == "sweep_upright_back");
         rig.input.heading_rad = 0;
         rig.tick();
-        assert(rig.output.state == PushState::APPROACH && rig.output.reason == "sweep_upright_done");
+        assert(rig.output.state == PushState::APPROACH &&
+               rig.output.reason == "sweep_upright_done");
         assert(rig.task.sweepDone() == 1 && !rig.task.sweepChainOpen());
         assert(rig.task.sweepSpentUs(rig.input.now_us) == rig.input.now_us - start);
         rig.report("approach_upright_swing_counts_and_compensates_phase");
@@ -442,8 +468,10 @@ void approachAndMidSweeps() {
         assert(rig.output.reason == "mid_neighbour_clear" && rig.task.sweepChainOpen());
         rig.toSwing();
         rig.finishSwing();
-        assert(rig.output.state == PushState::MID_REACQUIRE && rig.output.reason == "mid_neighbour_clear_done");
-        assert(rig.task.sweepDone() == 1 && rig.task.sweepSpentUs(rig.input.now_us) == rig.input.now_us - start);
+        assert(rig.output.state == PushState::MID_REACQUIRE &&
+               rig.output.reason == "mid_neighbour_clear_done");
+        assert(rig.task.sweepDone() == 1 &&
+               rig.task.sweepSpentUs(rig.input.now_us) == rig.input.now_us - start);
         rig.report("mid_neighbour_swing_uses_same_ledger");
     }
     {
@@ -483,11 +511,13 @@ void approachAndMidSweeps() {
         rig.fresh_clutter = false;
         rig.input.clutter_ts_us = 0;
         rig.tick();
-        assert(rig.output.state == PushState::MID_REACQUIRE && rig.output.reason == "sweep_observation_lost");
+        assert(rig.output.state == PushState::MID_REACQUIRE &&
+               rig.output.reason == "sweep_observation_lost");
         assert(rig.task.sweepDone() == 1 && !rig.task.sweepChainOpen());
         const auto spent = rig.task.sweepSpentUs(rig.input.now_us);
         rig.tick();
-        assert(rig.output.reason == "sweep_reobserve" && rig.task.sweepSpentUs(rig.input.now_us) == spent);
+        assert(rig.output.reason == "sweep_reobserve" &&
+               rig.task.sweepSpentUs(rig.input.now_us) == spent);
         rig.stationary();
         rig.report("mid_observation_loss_closes_before_local_clear");
     }
@@ -541,7 +571,8 @@ void observationAndLifecycle() {
         rig.input.run = true;
         rig.input.clutter_body.clear();
         rig.tick();
-        assert(rig.output.state == PushState::SCAN && rig.output.reason == "resume" && rig.task.sweepChainOpen());
+        assert(rig.output.state == PushState::SCAN && rig.output.reason == "resume" &&
+               rig.task.sweepChainOpen());
         rig.tick();
         assert(!rig.task.sweepChainOpen() && rig.task.sweepDone() == 1);
         assert(rig.task.sweepSpentUs(rig.input.now_us) == rig.input.now_us - start);
@@ -586,7 +617,8 @@ void observationAndLifecycle() {
         rig.input.reset = true;
         rig.tick();
         assert(rig.output.state == PushState::WAIT_START && !rig.task.sweepChainOpen());
-        assert(rig.task.sweepDone() == 0 && rig.task.sweepSpentUs(rig.input.now_us) == 0 && !rig.task.fault_);
+        assert(rig.task.sweepDone() == 0 && rig.task.sweepSpentUs(rig.input.now_us) == 0 &&
+               !rig.task.fault_);
         rig.input.reset = false;
         rig.seed(PushState::SCAN);
         rig.tick();

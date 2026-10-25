@@ -47,15 +47,25 @@ struct Fixture {
         observation.gripper_feedback_open = 1;
     }
 
-    DeliveryVerificationResult update(uint64_t elapsed_us, uint64_t frame_id = 1,
-                                      uint64_t cargo_timestamp = 0) {
+    DeliveryVerificationResult
+    update(uint64_t elapsed_us, uint64_t frame_id = 1, uint64_t cargo_timestamp = 0) {
         observation.now_us = clock_base + elapsed_us;
         observation.zone_estimate.frame_id = frame_id;
-        if (cargo_timestamp) observation.cargo_ts_us = cargo_timestamp;
-        return stage.update(observation, tuning,
-                            {elapsed_us, trip, baseline, baseline_other, geometry_id,
-                             observed_zone, half_x, half_injured,
-                             tracked_cargo_has_fix, repush_count}, cargo);
+        if (cargo_timestamp)
+            observation.cargo_ts_us = cargo_timestamp;
+        return stage.update(observation,
+                            tuning,
+                            {elapsed_us,
+                             trip,
+                             baseline,
+                             baseline_other,
+                             geometry_id,
+                             observed_zone,
+                             half_x,
+                             half_injured,
+                             tracked_cargo_has_fix,
+                             repush_count},
+                            cargo);
     }
 
     void field(bool assume = false) {
@@ -86,8 +96,11 @@ struct Fixture {
     }
 };
 
-void expect(const DeliveryVerificationResult& result, DeliveryVerificationOutcome outcome,
-            int credited = 0, bool visual = false, const std::string& reason = "") {
+void expect(const DeliveryVerificationResult& result,
+            DeliveryVerificationOutcome outcome,
+            int credited = 0,
+            bool visual = false,
+            const std::string& reason = "") {
     CHECK(result.outcome == outcome);
     CHECK(result.credited == credited);
     CHECK(result.visual == visual);
@@ -100,8 +113,7 @@ void independentInventoryFramesAndStableWindow() {
     expect(fixture.update(100100, 10), DeliveryVerificationOutcome::Continue);
     expect(fixture.update(200100, 11), DeliveryVerificationOutcome::Continue);
     expect(fixture.update(300099, 12), DeliveryVerificationOutcome::Continue);
-    expect(fixture.update(300100, 12), DeliveryVerificationOutcome::Complete,
-           1, true, "delivered");
+    expect(fixture.update(300100, 12), DeliveryVerificationOutcome::Complete, 1, true, "delivered");
 
     Fixture duplicates;
     for (const uint64_t elapsed : {100ULL, 150000ULL, 300100ULL, 500000ULL}) {
@@ -111,16 +123,22 @@ void independentInventoryFramesAndStableWindow() {
     Fixture nonmonotonic;
     expect(nonmonotonic.update(100, 1), DeliveryVerificationOutcome::Continue);
     expect(nonmonotonic.update(150000, 2), DeliveryVerificationOutcome::Continue);
-    expect(nonmonotonic.update(300100, 1), DeliveryVerificationOutcome::Complete,
-           1, true, "delivered");
+    expect(nonmonotonic.update(300100, 1),
+           DeliveryVerificationOutcome::Complete,
+           1,
+           true,
+           "delivered");
 
     Fixture initial_zero;
     initial_zero.tuning.delivery_frames = 1;
     expect(initial_zero.update(100, 0), DeliveryVerificationOutcome::Continue);
     expect(initial_zero.update(300100, 0), DeliveryVerificationOutcome::Continue);
     expect(initial_zero.update(400000, 1), DeliveryVerificationOutcome::Continue);
-    expect(initial_zero.update(700000, 1), DeliveryVerificationOutcome::Complete,
-           1, true, "delivered");
+    expect(initial_zero.update(700000, 1),
+           DeliveryVerificationOutcome::Complete,
+           1,
+           true,
+           "delivered");
 }
 
 void changedDeltaRestartsTheStableWindow() {
@@ -132,8 +150,7 @@ void changedDeltaRestartsTheStableWindow() {
     fixture.observation.zone_supply_count = fixture.baseline + 2;
     expect(fixture.update(200000, 3), DeliveryVerificationOutcome::Continue);
     expect(fixture.update(499999, 4), DeliveryVerificationOutcome::Continue);
-    expect(fixture.update(500000, 4), DeliveryVerificationOutcome::Complete,
-           2, true, "delivered");
+    expect(fixture.update(500000, 4), DeliveryVerificationOutcome::Complete, 2, true, "delivered");
 }
 
 void inventoryEvidenceGatesResetConfirmation() {
@@ -144,26 +161,50 @@ void inventoryEvidenceGatesResetConfirmation() {
         expect(fixture.update(150000, 2), DeliveryVerificationOutcome::Continue);
         const auto valid = fixture.observation;
         switch (invalid_gate) {
-        case 0: fixture.observed_zone = false; break;
-        case 1: fixture.observation.zone_estimate.geometry_id = "other-geometry"; break;
-        case 2: fixture.observation.zone_inventory_complete = false; break;
-        case 3: fixture.observation.zone_counts_valid = false; break;
-        case 4: fixture.observation.zone_supply_count = -1; break;
-        case 5: fixture.observation.zone_injured_count = -1; break;
-        case 6: ++fixture.observation.zone_injured_count; break;
-        case 7: fixture.observation.zone_supply_count = fixture.baseline; break;
-        case 8: fixture.observation.zone_supply_count = fixture.baseline + 2; break;
-        case 9: fixture.observation.gripper_done = false; break;
-        case 10: fixture.observation.gripper_feedback_open = 0; break;
-        case 11: fixture.observation.zone_estimate.origin_body_m = {}; break;
+            case 0:
+                fixture.observed_zone = false;
+                break;
+            case 1:
+                fixture.observation.zone_estimate.geometry_id = "other-geometry";
+                break;
+            case 2:
+                fixture.observation.zone_inventory_complete = false;
+                break;
+            case 3:
+                fixture.observation.zone_counts_valid = false;
+                break;
+            case 4:
+                fixture.observation.zone_supply_count = -1;
+                break;
+            case 5:
+                fixture.observation.zone_injured_count = -1;
+                break;
+            case 6:
+                ++fixture.observation.zone_injured_count;
+                break;
+            case 7:
+                fixture.observation.zone_supply_count = fixture.baseline;
+                break;
+            case 8:
+                fixture.observation.zone_supply_count = fixture.baseline + 2;
+                break;
+            case 9:
+                fixture.observation.gripper_done = false;
+                break;
+            case 10:
+                fixture.observation.gripper_feedback_open = 0;
+                break;
+            case 11:
+                fixture.observation.zone_estimate.origin_body_m = {};
+                break;
         }
         expect(fixture.update(300100, 3), DeliveryVerificationOutcome::Continue);
         fixture.observation = valid;
         fixture.observed_zone = true;
         expect(fixture.update(350000, 4), DeliveryVerificationOutcome::Continue);
         expect(fixture.update(649999, 5), DeliveryVerificationOutcome::Continue);
-        expect(fixture.update(650000, 5), DeliveryVerificationOutcome::Complete,
-               1, true, "delivered");
+        expect(
+            fixture.update(650000, 5), DeliveryVerificationOutcome::Complete, 1, true, "delivered");
     }
 }
 
@@ -174,8 +215,11 @@ void partialDeliveryAndTheCorrectHalf() {
         partial.tuning.assume_all_safe = assumed_mode;
         expect(partial.update(100, 1), DeliveryVerificationOutcome::Continue);
         expect(partial.update(150000, 2), DeliveryVerificationOutcome::Continue);
-        expect(partial.update(300100, 3), DeliveryVerificationOutcome::Complete,
-               1, true, "partial_delivery");
+        expect(partial.update(300100, 3),
+               DeliveryVerificationOutcome::Complete,
+               1,
+               true,
+               "partial_delivery");
     }
 
     Fixture injured;
@@ -186,14 +230,16 @@ void partialDeliveryAndTheCorrectHalf() {
     injured.observation.zone_injured_count = injured.baseline + 1;
     expect(injured.update(100, 1), DeliveryVerificationOutcome::Continue);
     expect(injured.update(150000, 2), DeliveryVerificationOutcome::Continue);
-    expect(injured.update(300100, 3), DeliveryVerificationOutcome::Complete,
-           1, true, "delivered");
+    expect(injured.update(300100, 3), DeliveryVerificationOutcome::Complete, 1, true, "delivered");
 
     Fixture fleeting;
     fleeting.observation.zone_supply_count = fleeting.baseline;
     fleeting.observation.delivery_observed = true;
     expect(fleeting.update(fleeting.tuning.delivery_budget_us + 1),
-           DeliveryVerificationOutcome::Complete, 0, false, "delivery_unverified");
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivery_unverified");
 }
 
 void strictTimeoutBoundaries() {
@@ -203,8 +249,11 @@ void strictTimeoutBoundaries() {
         if (elapsed <= fixture.tuning.delivery_budget_us) {
             expect(fixture.update(elapsed), DeliveryVerificationOutcome::Continue);
         } else {
-            expect(fixture.update(elapsed), DeliveryVerificationOutcome::Complete,
-                   0, false, "delivery_unverified");
+            expect(fixture.update(elapsed),
+                   DeliveryVerificationOutcome::Complete,
+                   0,
+                   false,
+                   "delivery_unverified");
         }
     }
 
@@ -212,21 +261,30 @@ void strictTimeoutBoundaries() {
     expect(stable_late.update(100, 1), DeliveryVerificationOutcome::Continue);
     expect(stable_late.update(150000, 2), DeliveryVerificationOutcome::Continue);
     expect(stable_late.update(stable_late.tuning.delivery_budget_us + 1, 3),
-           DeliveryVerificationOutcome::Complete, 1, true, "delivered");
+           DeliveryVerificationOutcome::Complete,
+           1,
+           true,
+           "delivered");
 
     Fixture rush_only;
     rush_only.tuning.field_rush = true;
     rush_only.observed_zone = false;
     rush_only.fixedCargo();
     expect(rush_only.update(rush_only.tuning.delivery_budget_us + 1, 1, 100),
-           DeliveryVerificationOutcome::Complete, 0, false, "delivery_unverified");
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivery_unverified");
     CHECK(rush_only.stage.insideCount() == 0);
 
     Fixture empty;
     empty.trip = {};
     empty.observed_zone = false;
     expect(empty.update(empty.tuning.delivery_budget_us + 1),
-           DeliveryVerificationOutcome::Complete, 0, false, "delivered");
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivered");
 }
 
 void noFixFarViewAndTimeouts() {
@@ -238,31 +296,43 @@ void noFixFarViewAndTimeouts() {
     CHECK(field.stage.farView());
     expect(field.update(7000000), DeliveryVerificationOutcome::Continue);
     CHECK(field.stage.farView());
-    expect(field.update(7000001), DeliveryVerificationOutcome::Complete,
-           0, false, "delivery_unverified");
+    expect(field.update(7000001),
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivery_unverified");
     CHECK(!field.stage.farView());
 
     Fixture assumed;
     assumed.field(true);
     assumed.trip = inventory(2);
-    expect(assumed.update(7000001), DeliveryVerificationOutcome::Complete,
-           2, false, "delivered_unverified");
+    expect(assumed.update(7000001),
+           DeliveryVerificationOutcome::Complete,
+           2,
+           false,
+           "delivered_unverified");
 
     Fixture longer_delivery_budget;
     longer_delivery_budget.field();
     longer_delivery_budget.tuning.assume_verify_fix_wait_us = 100;
     longer_delivery_budget.tuning.delivery_budget_us = 200;
     expect(longer_delivery_budget.update(200), DeliveryVerificationOutcome::Continue);
-    expect(longer_delivery_budget.update(201), DeliveryVerificationOutcome::Complete,
-           0, false, "delivery_unverified");
+    expect(longer_delivery_budget.update(201),
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivery_unverified");
 
     Fixture insufficient_fix;
     insufficient_fix.field();
     insufficient_fix.fix(2);
     expect(insufficient_fix.update(1), DeliveryVerificationOutcome::Continue);
     expect(insufficient_fix.update(7000000), DeliveryVerificationOutcome::Continue);
-    expect(insufficient_fix.update(7000001), DeliveryVerificationOutcome::Complete,
-           0, false, "delivery_unverified");
+    expect(insufficient_fix.update(7000001),
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivery_unverified");
 }
 
 void lateFixStartsOneStickyBudget() {
@@ -275,8 +345,11 @@ void lateFixStartsOneStickyBudget() {
     CHECK(fixture.stage.farView());
     fixture.observation.vref_valid = false;
     expect(fixture.update(8500000), DeliveryVerificationOutcome::Continue);
-    expect(fixture.update(8500001), DeliveryVerificationOutcome::Complete,
-           0, false, "delivery_unverified");
+    expect(fixture.update(8500001),
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivery_unverified");
 
     Fixture subsequent_fix;
     subsequent_fix.field();
@@ -285,8 +358,11 @@ void lateFixStartsOneStickyBudget() {
     // The original vfix gate deliberately does not check the reference timestamp.
     subsequent_fix.observation.vref_zone.timestamp_us = 0;
     expect(subsequent_fix.update(2500100), DeliveryVerificationOutcome::Continue);
-    expect(subsequent_fix.update(2500101), DeliveryVerificationOutcome::Complete,
-           0, false, "delivery_unverified");
+    expect(subsequent_fix.update(2500101),
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivery_unverified");
 }
 
 void visualEvidenceIsIndependentOfCredit() {
@@ -298,10 +374,13 @@ void visualEvidenceIsIndependentOfCredit() {
         expect(fixture.update(100, 1, 100), DeliveryVerificationOutcome::Continue);
         expect(fixture.update(200, 2, 101), DeliveryVerificationOutcome::Continue);
         const auto result = fixture.update(300, 3, 102);
-        expect(result, DeliveryVerificationOutcome::Complete,
-               assumed ? 2 : 0, true, assumed ? "delivered_visual" : "delivery_unverified");
-        CHECK(result.events ==
-              "[CARGO_ZONE] event=verify half=supply rear_x=-0.150 rear_y=0.020 fix=1 repush=0 in=3 out=0\n");
+        expect(result,
+               DeliveryVerificationOutcome::Complete,
+               assumed ? 2 : 0,
+               true,
+               assumed ? "delivered_visual" : "delivery_unverified");
+        CHECK(result.events == "[CARGO_ZONE] event=verify half=supply rear_x=-0.150 rear_y=0.020 "
+                               "fix=1 repush=0 in=3 out=0\n");
     }
 
     Fixture timestamp;
@@ -314,8 +393,11 @@ void visualEvidenceIsIndependentOfCredit() {
     CHECK(duplicate.events.empty());
     CHECK(timestamp.stage.insideCount() == 1);
     expect(timestamp.update(300, 3, 101), DeliveryVerificationOutcome::Continue);
-    expect(timestamp.update(400, 4, 102), DeliveryVerificationOutcome::Complete,
-           0, true, "delivery_unverified");
+    expect(timestamp.update(400, 4, 102),
+           DeliveryVerificationOutcome::Complete,
+           0,
+           true,
+           "delivery_unverified");
 }
 
 void visualThresholdUsesTrackedCargoFix() {
@@ -325,10 +407,14 @@ void visualThresholdUsesTrackedCargoFix() {
     historical_no_fix.tuning.assume_img_verify_obs = 5;
     historical_no_fix.fixedCargo();
     for (uint64_t frame = 1; frame < 5; ++frame) {
-        expect(historical_no_fix.update(frame, frame, frame), DeliveryVerificationOutcome::Continue);
+        expect(historical_no_fix.update(frame, frame, frame),
+               DeliveryVerificationOutcome::Continue);
     }
-    expect(historical_no_fix.update(5, 5, 5), DeliveryVerificationOutcome::Complete,
-           0, true, "delivery_unverified");
+    expect(historical_no_fix.update(5, 5, 5),
+           DeliveryVerificationOutcome::Complete,
+           0,
+           true,
+           "delivery_unverified");
 
     Fixture historical_fix;
     historical_fix.field();
@@ -338,9 +424,9 @@ void visualThresholdUsesTrackedCargoFix() {
     expect(historical_fix.update(2, 2, 2), DeliveryVerificationOutcome::Continue);
     const auto result = historical_fix.update(3, 3, 3);
     expect(result, DeliveryVerificationOutcome::Complete, 0, true, "delivery_unverified");
-    CHECK(result.events ==
-          "[CARGO_ZONE] event=verify_img frac=0.50 clipped=0 in=3 out=0\n"
-          "[CARGO_ZONE] event=verify half=supply rear_x=-0.150 rear_y=0.020 fix=0 repush=0 in=3 out=0\n");
+    CHECK(result.events == "[CARGO_ZONE] event=verify_img frac=0.50 clipped=0 in=3 out=0\n"
+                           "[CARGO_ZONE] event=verify half=supply rear_x=-0.150 rear_y=0.020 fix=0 "
+                           "repush=0 in=3 out=0\n");
 }
 
 void visualThresholdsAndMissingSamples() {
@@ -397,9 +483,10 @@ void outsideEvidenceAndRepushBudget() {
     expect(retry, DeliveryVerificationOutcome::Repush, 0, false, "assumed_verify_repush");
     CHECK(repush.stage.insideCount() == 0 && repush.stage.outsideCount() == 0);
     CHECK(!repush.stage.farView());
-    CHECK(retry.events ==
-          "[CARGO_ZONE] event=verify half=supply rear_x=-0.150 rear_y=-0.020 fix=1 repush=1 in=0 out=2\n"
-          "[CARGO_ZONE] event=verify_outside_repush half=supply rear_x=-0.150 rear_y=-0.020 fix=1 repush=2 in=0 out=0\n");
+    CHECK(retry.events == "[CARGO_ZONE] event=verify half=supply rear_x=-0.150 rear_y=-0.020 fix=1 "
+                          "repush=1 in=0 out=2\n"
+                          "[CARGO_ZONE] event=verify_outside_repush half=supply rear_x=-0.150 "
+                          "rear_y=-0.020 fix=1 repush=2 in=0 out=0\n");
 
     Fixture exhausted;
     exhausted.field();
@@ -410,8 +497,11 @@ void outsideEvidenceAndRepushBudget() {
     expect(exhausted.update(200, 2, 2), DeliveryVerificationOutcome::Continue);
     CHECK(exhausted.stage.outsideCount() == 2);
     exhausted.cargo.available = false;
-    expect(exhausted.update(8000000), DeliveryVerificationOutcome::Complete,
-           0, false, "delivery_unverified");
+    expect(exhausted.update(8000000),
+           DeliveryVerificationOutcome::Complete,
+           0,
+           false,
+           "delivery_unverified");
 
     Fixture other_inside;
     other_inside.field();
@@ -421,9 +511,10 @@ void outsideEvidenceAndRepushBudget() {
     other_inside.cargo.other_inside = true;
     const auto done = other_inside.update(200, 2, 2);
     expect(done, DeliveryVerificationOutcome::Complete, 0, true, "delivery_unverified");
-    CHECK(done.events ==
-          "[CARGO_ZONE] event=verify half=supply rear_x=-0.150 rear_y=-0.020 fix=1 repush=0 in=0 out=2\n"
-          "[CARGO_ZONE] event=verify_other_inside half=supply rear_x=-0.150 rear_y=-0.020 fix=1 repush=0 in=0 out=2\n");
+    CHECK(done.events == "[CARGO_ZONE] event=verify half=supply rear_x=-0.150 rear_y=-0.020 fix=1 "
+                         "repush=0 in=0 out=2\n"
+                         "[CARGO_ZONE] event=verify_other_inside half=supply rear_x=-0.150 "
+                         "rear_y=-0.020 fix=1 repush=0 in=0 out=2\n");
 }
 
 void localResetMethodsPreserveOtherEvidence() {
@@ -444,8 +535,11 @@ void localResetMethodsPreserveOtherEvidence() {
     new_baseline.stage.resetInventoryEvidence();
     expect(new_baseline.update(300100, 2), DeliveryVerificationOutcome::Continue);
     expect(new_baseline.update(600099, 3), DeliveryVerificationOutcome::Continue);
-    expect(new_baseline.update(600100, 3), DeliveryVerificationOutcome::Complete,
-           1, true, "delivered");
+    expect(new_baseline.update(600100, 3),
+           DeliveryVerificationOutcome::Complete,
+           1,
+           true,
+           "delivered");
 
     Fixture visual;
     visual.field();
@@ -469,8 +563,11 @@ void clearTripPreservesInventoryAndCargoTimestamp() {
     expect(inventory_history.update(150000, 2), DeliveryVerificationOutcome::Continue);
     expect(inventory_history.update(200000, 3), DeliveryVerificationOutcome::Continue);
     inventory_history.stage.clearTrip();
-    expect(inventory_history.update(300100, 3), DeliveryVerificationOutcome::Complete,
-           1, true, "delivered");
+    expect(inventory_history.update(300100, 3),
+           DeliveryVerificationOutcome::Complete,
+           1,
+           true,
+           "delivered");
 
     Fixture visual_history;
     visual_history.field();

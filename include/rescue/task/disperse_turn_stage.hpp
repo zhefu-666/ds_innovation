@@ -14,9 +14,22 @@ struct DisperseTurnContext {
     float cap_positive = 99, cap_negative = 99;
 };
 
-enum class DisperseTurnPhase { Idle, Look, Turn, Push, FrameCheck };
-enum class DisperseTurnOutcome { Continue, Complete };
-enum class DisperseTurnMotion { None, Turn, Push };
+enum class DisperseTurnPhase {
+    Idle,
+    Look,
+    Turn,
+    Push,
+    FrameCheck
+};
+enum class DisperseTurnOutcome {
+    Continue,
+    Complete
+};
+enum class DisperseTurnMotion {
+    None,
+    Turn,
+    Push
+};
 
 struct DisperseTurnResult {
     DisperseTurnOutcome outcome = DisperseTurnOutcome::Continue;
@@ -30,16 +43,28 @@ struct DisperseTurnResult {
 };
 
 class DisperseTurnStage {
-public:
+  public:
     void begin(bool enabled);
-    void cancel() { phase_ = DisperseTurnPhase::Idle; }
-    void clearConfirmation() { clear_count_ = 0; }
-    bool active() const { return phase_ != DisperseTurnPhase::Idle; }
-    bool needsFrameView() const { return phase_ == DisperseTurnPhase::FrameCheck; }
-    DisperseTurnPhase phase() const { return phase_; }
+    void cancel() {
+        phase_ = DisperseTurnPhase::Idle;
+    }
+    void clearConfirmation() {
+        clear_count_ = 0;
+    }
+    bool active() const {
+        return phase_ != DisperseTurnPhase::Idle;
+    }
+    bool needsFrameView() const {
+        return phase_ == DisperseTurnPhase::FrameCheck;
+    }
+    DisperseTurnPhase phase() const {
+        return phase_;
+    }
     // The parent confirms frame readiness and applies progress events before motion.
-    DisperseTurnResult update(const PushObservation&, const TaskTuning&, const DisperseTurnContext&);
-private:
+    DisperseTurnResult
+    update(const PushObservation&, const TaskTuning&, const DisperseTurnContext&);
+
+  private:
     DisperseTurnPhase phase_ = DisperseTurnPhase::Idle;
     int clear_count_ = 0;
     float direction_ = 1;

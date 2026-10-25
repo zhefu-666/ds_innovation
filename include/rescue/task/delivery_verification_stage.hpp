@@ -30,7 +30,11 @@ struct DeliveryCargoEvidence {
     bool other_inside = false;
 };
 
-enum class DeliveryVerificationOutcome { Continue, Repush, Complete };
+enum class DeliveryVerificationOutcome {
+    Continue,
+    Repush,
+    Complete
+};
 
 struct DeliveryVerificationResult {
     DeliveryVerificationOutcome outcome = DeliveryVerificationOutcome::Continue;
@@ -41,19 +45,28 @@ struct DeliveryVerificationResult {
 };
 
 class DeliveryVerificationStage {
-public:
-    DeliveryVerificationResult update(const PushObservation&, const TaskTuning&,
-                                      const DeliveryVerificationContext&, const DeliveryCargoEvidence&);
+  public:
+    DeliveryVerificationResult update(const PushObservation&,
+                                      const TaskTuning&,
+                                      const DeliveryVerificationContext&,
+                                      const DeliveryCargoEvidence&);
     // Legacy lifecycle: phase entry clears confirmations, while a new gate baseline
     // clears the inventory window. Pause and repush retain the remaining evidence.
     void resetConfirmations();
     void resetInventoryEvidence();
     void clearVisualCounts();
     void clearTrip();
-    bool farView() const { return far_view_; }
-    int insideCount() const { return inside_; }
-    int outsideCount() const { return outside_; }
-private:
+    bool farView() const {
+        return far_view_;
+    }
+    int insideCount() const {
+        return inside_;
+    }
+    int outsideCount() const {
+        return outside_;
+    }
+
+  private:
     int confirmations_ = 0, delta_ = 0;
     uint64_t frame_ = 0, stable_since_us_ = 0;
     int inside_ = 0, outside_ = 0;

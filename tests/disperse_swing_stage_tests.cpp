@@ -11,19 +11,25 @@ using namespace rescue;
 
 namespace {
 void check(bool condition, const char* expression, int line) {
-    if (!condition) throw std::runtime_error("line " + std::to_string(line) + ": " + expression);
+    if (!condition)
+        throw std::runtime_error("line " + std::to_string(line) + ": " + expression);
 }
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
-void expectEvent(const DisperseSwingResult& result, DisperseSwingOutcome outcome, bool restart = false) {
+void expectEvent(const DisperseSwingResult& result,
+                 DisperseSwingOutcome outcome,
+                 bool restart = false) {
     CHECK(result.outcome == outcome);
     CHECK(result.restart_clock == restart);
     CHECK(!result.motion_requested && result.vx == 0 && result.direction == 0 && !result.fast);
     CHECK(result.reason == nullptr);
 }
 
-void expectMotion(const DisperseSwingResult& result, float vx, float direction,
-                  const char* reason, bool fast = false) {
+void expectMotion(const DisperseSwingResult& result,
+                  float vx,
+                  float direction,
+                  const char* reason,
+                  bool fast = false) {
     CHECK(result.outcome == DisperseSwingOutcome::Continue && !result.restart_clock);
     CHECK(result.motion_requested && result.vx == vx && result.direction == direction);
     CHECK(result.fast == fast);
@@ -49,7 +55,8 @@ struct Fixture {
 
     DisperseSwingResult update() {
         const auto result = stage.update(tuning, context);
-        if (result.restart_clock) context.sweep_start_us = context.now_us;
+        if (result.restart_clock)
+            context.sweep_start_us = context.now_us;
         return result;
     }
 
@@ -157,7 +164,8 @@ void creepingStopsAtTheScaledDistanceAndNeverOccursWhileCentring() {
         f.context.small = small;
         f.context.motion_ratio = 2;
         f.context.sweep_travel_m = 4;
-        const float limit = (small ? f.tuning.mid_neighbour_clear_creep_m : f.tuning.disperse_swing_creep_m) * 2;
+        const float limit =
+            (small ? f.tuning.mid_neighbour_clear_creep_m : f.tuning.disperse_swing_creep_m) * 2;
         f.context.travel_m = 4 + limit - .001f;
         expectMotion(f.update(), f.tuning.disperse_swing_vx, 1, "disperse_swing");
         f.context.travel_m = 4 + limit;
@@ -234,12 +242,15 @@ void burstAndApproachFastPreserveReasonsAndSmallException() {
                 f.context.approach_fast = approach;
                 f.context.small = small;
                 const bool fast = burst || (approach && !small);
-                expectMotion(f.update(), f.tuning.disperse_swing_vx, 1,
-                             burst ? "first_burst_swing" : "disperse_swing", fast);
+                expectMotion(f.update(),
+                             f.tuning.disperse_swing_vx,
+                             1,
+                             burst ? "first_burst_swing" : "disperse_swing",
+                             fast);
                 f.finishSwing();
                 f.context.heading_rad = .25f;
-                expectMotion(f.update(), 0, -1,
-                             burst ? "first_burst_centre" : "disperse_centre", fast);
+                expectMotion(
+                    f.update(), 0, -1, burst ? "first_burst_centre" : "disperse_centre", fast);
             }
         }
     }

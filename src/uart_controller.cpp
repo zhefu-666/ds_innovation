@@ -22,30 +22,30 @@ namespace {
 
 speed_t baudToTermios(int baudrate) {
     switch (baudrate) {
-    case 9600:
-        return B9600;
-    case 19200:
-        return B19200;
-    case 38400:
-        return B38400;
-    case 57600:
-        return B57600;
-    case 115200:
-        return B115200;
-    case 230400:
-        return B230400;
-    case 460800:
-        return B460800;
-    case 921600:
-        return B921600;
-    default:
-        throw std::runtime_error("Unsupported baudrate: " + std::to_string(baudrate));
+        case 9600:
+            return B9600;
+        case 19200:
+            return B19200;
+        case 38400:
+            return B38400;
+        case 57600:
+            return B57600;
+        case 115200:
+            return B115200;
+        case 230400:
+            return B230400;
+        case 460800:
+            return B460800;
+        case 921600:
+            return B921600;
+        default:
+            throw std::runtime_error("Unsupported baudrate: " + std::to_string(baudrate));
     }
 }
 
 } // namespace
 
-bool SensorPacketParser::consume(uint8_t byte, uint64_t received_us, ActuatorFeedback &state) {
+bool SensorPacketParser::consume(uint8_t byte, uint64_t received_us, ActuatorFeedback& state) {
     // 字节间隔超过100ms，丢弃残帧。
     if (last_byte_us_ && (received_us < last_byte_us_ || received_us - last_byte_us_ > 100000))
         buffer_.clear();
@@ -56,11 +56,13 @@ bool SensorPacketParser::consume(uint8_t byte, uint64_t received_us, ActuatorFee
             buffer_.erase(buffer_.begin());
             continue;
         }
-        if (buffer_.size() < SensorPacket::kSize) return false;
+        if (buffer_.size() < SensorPacket::kSize)
+            return false;
         SensorPacket packet;
         std::memcpy(&packet, buffer_.data(), sizeof(packet));
-        if (UARTController::calculateCRC16(buffer_.data(), 0,
-                static_cast<uint8_t>(offsetof(SensorPacket, crc16) - 1)) != packet.crc16 ||
+        if (UARTController::calculateCRC16(
+                buffer_.data(), 0, static_cast<uint8_t>(offsetof(SensorPacket, crc16) - 1)) !=
+                packet.crc16 ||
             packet.newline != SensorPacket::kNewline) {
             // CRC或帧尾不符：丢弃1字节重新找帧头。
             buffer_.erase(buffer_.begin());
@@ -84,9 +86,9 @@ UARTController::~UARTController() {
     closePort();
 }
 
-void UARTController::initUART(const std::string &port, int baudrate,
-                              bool dry_run, bool auto_run) {
-    if (running_ || fd_ >= 0) throw std::runtime_error("UART already initialized");
+void UARTController::initUART(const std::string& port, int baudrate, bool dry_run, bool auto_run) {
+    if (running_ || fd_ >= 0)
+        throw std::runtime_error("UART already initialized");
     feedback_only_ = false;
     port_ = port;
     baudrate_ = baudrate;
@@ -109,17 +111,32 @@ void UARTController::initUART(const std::string &port, int baudrate,
     std::cout << "UART connected: " << port_ << "@" << baudrate_ << "bps\n";
 }
 
-void UARTController::initFeedbackOnly(const std::string &port, int baudrate) {
-    if (running_ || fd_ >= 0) throw std::runtime_error("UART already initialized");
-    port_ = port; baudrate_ = baudrate; dry_run_ = false; feedback_only_ = true;
-    { std::lock_guard<std::mutex> guard(io_mutex_); actuator_feedback_ = {}; pitch_history_.clear(); }
-    openPort(); running_ = true;
-    try { reader_ = std::thread(&UARTController::readLoop, this); }
-    catch (...) { running_ = false; closePort(); throw; }
+void UARTController::initFeedbackOnly(const std::string& port, int baudrate) {
+    if (running_ || fd_ >= 0)
+        throw std::runtime_error("UART already initialized");
+    port_ = port;
+    baudrate_ = baudrate;
+    dry_run_ = false;
+    feedback_only_ = true;
+    {
+        std::lock_guard<std::mutex> guard(io_mutex_);
+        actuator_feedback_ = {};
+        pitch_history_.clear();
+    }
+    openPort();
+    running_ = true;
+    try {
+        reader_ = std::thread(&UARTController::readLoop, this);
+    } catch (...) {
+        running_ = false;
+        closePort();
+        throw;
+    }
 }
 FrameSensors UARTController::feedbackAt(uint64_t capture_us) const {
     std::lock_guard<std::mutex> guard(io_mutex_);
-    if (!running_) return {};
+    if (!running_)
+        return {};
     return pitch_history_.at(capture_us);
 }
 void UARTController::closePort() {
@@ -171,10 +188,12 @@ std::array<int, 2> UARTController::servoAngles() const {
 namespace {
 // 超过200ms无有效帧，返回无效快照；保留原始值但不将其当成新动作确认。
 ActuatorFeedback freshFeedback(ActuatorFeedback state) {
-    const auto now_us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-        Clock::now().time_since_epoch()).count());
+    const auto now_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch())
+            .count());
     if (state.timestamp_us == 0 || now_us < state.timestamp_us ||
-        now_us - state.timestamp_us > 200000) state.valid = false;
+        now_us - state.timestamp_us > 200000)
+        state.valid = false;
     return state;
 }
 } // namespace
@@ -184,11 +203,12 @@ ActuatorFeedback UARTController::latestActuatorFeedback() const {
     return freshFeedback(actuator_feedback_);
 }
 
-void UARTController::publishActuatorFeedback(const ActuatorFeedback &state) {
+void UARTController::publishActuatorFeedback(const ActuatorFeedback& state) {
     std::lock_guard<std::mutex> guard(io_mutex_);
     if (state.valid && state.timestamp_us != 0 &&
         state.timestamp_us >= actuator_feedback_.timestamp_us) {
-        actuator_feedback_ = state; pitch_history_.add(state);
+        actuator_feedback_ = state;
+        pitch_history_.add(state);
     }
 }
 
@@ -212,23 +232,29 @@ bool UARTController::syncGripperActionId(std::chrono::milliseconds timeout) {
         const auto fb = latestActuatorFeedback();
         if (fb.valid) {
             std::lock_guard<std::mutex> guard(io_mutex_);
-            if (gripper_sent_) return true; // 已经开始发送，编号由发送序列决定
+            if (gripper_sent_)
+                return true; // 已经开始发送，编号由发送序列决定
             // 下位机未随上位机重启：接管其当前编号和夹爪状态，保持该状态不算新动作，状态变化才用编号+1。
             if (done_flag_) {
                 // 完成位不能区分开闭：只接受与操作者记录一致的编号且上一动作已完成，再采用已知角度。
                 gripper_synced_ = fb.gripper_action_id == known_id_ && fb.gripper_open == 1;
-                if(!gripper_synced_) return false;
+                if (!gripper_synced_)
+                    return false;
                 gripper_action_id_ = fb.gripper_action_id;
                 gripper_target_ = static_cast<int16_t>(known_angle_);
                 return true;
             }
             gripper_action_id_ = fb.gripper_action_id;
-            gripper_synced_ = feedback_open_>=0 && (fb.gripper_open == feedback_open_ || fb.gripper_open == feedback_close_);
-            if(!gripper_synced_) return false;
-            gripper_target_ = fb.gripper_open == feedback_open_ ? frameAngle(FrameAction::Open) : frameAngle(FrameAction::Close);
+            gripper_synced_ = feedback_open_ >= 0 && (fb.gripper_open == feedback_open_ ||
+                                                      fb.gripper_open == feedback_close_);
+            if (!gripper_synced_)
+                return false;
+            gripper_target_ = fb.gripper_open == feedback_open_ ? frameAngle(FrameAction::Open)
+                                                                : frameAngle(FrameAction::Close);
             return true;
         }
-        if (Clock::now() >= until) return false;
+        if (Clock::now() >= until)
+            return false;
         std::this_thread::sleep_for(Ms(10));
     }
 }
@@ -240,14 +266,21 @@ int16_t UARTController::cameraPitchTarget() const {
 
 namespace {
 // 编号不一致说明完成标志属于上一次动作，不能采信。
-ActionResult judgeAction(uint8_t id, bool feedback_valid, uint8_t feedback_id, uint8_t state, int expected) {
-    if (id == 0) return ActionResult::Idle;
-    if (!feedback_valid) return ActionResult::NoFeedback;
-    return feedback_id == id && expected >= 0 && state == expected ? ActionResult::Done : ActionResult::NotDone;
+ActionResult
+judgeAction(uint8_t id, bool feedback_valid, uint8_t feedback_id, uint8_t state, int expected) {
+    if (id == 0)
+        return ActionResult::Idle;
+    if (!feedback_valid)
+        return ActionResult::NoFeedback;
+    return feedback_id == id && expected >= 0 && state == expected ? ActionResult::Done
+                                                                   : ActionResult::NotDone;
 }
 
 int16_t clampPitch(int16_t cdeg) {
-    return static_cast<int16_t>(std::round(std::clamp<int16_t>(cdeg, -kCameraPitchLimitCdeg, kCameraPitchLimitCdeg) / 100.0) * 100);
+    return static_cast<int16_t>(
+        std::round(std::clamp<int16_t>(cdeg, -kCameraPitchLimitCdeg, kCameraPitchLimitCdeg) /
+                   100.0) *
+        100);
 }
 } // namespace
 
@@ -257,26 +290,36 @@ ActionResult UARTController::gripperActionResult() const {
 
 UARTController::GripperAck UARTController::gripperAck() const {
     std::lock_guard<std::mutex> guard(io_mutex_);
-    if (!gripper_sent_) return {};
+    if (!gripper_sent_)
+        return {};
     const auto fb = freshFeedback(actuator_feedback_);
     const int logical_open = gripper_target_ == frameAngle(FrameAction::Open) ? 1 : 0;
     const int expected = done_flag_ ? 1 : logical_open ? feedback_open_ : feedback_close_;
-    auto result = judgeAction(gripper_action_id_, fb.valid, fb.timestamp_us > action_started_us_ ? fb.gripper_action_id : 0, fb.gripper_open, expected);
+    auto result = judgeAction(gripper_action_id_,
+                              fb.valid,
+                              fb.timestamp_us > action_started_us_ ? fb.gripper_action_id : 0,
+                              fb.gripper_open,
+                              expected);
     // 完成位模式：新动作至少经过settle时间才算完成；接管的已完成动作（action_started_us_=0）不再等待。
-    if (done_flag_ && result == ActionResult::Done && action_started_us_ && fb.timestamp_us < action_started_us_ + done_settle_us_)
+    if (done_flag_ && result == ActionResult::Done && action_started_us_ &&
+        fb.timestamp_us < action_started_us_ + done_settle_us_)
         result = ActionResult::NotDone;
     return {result, logical_open};
 }
 
 int UARTController::confirmedFrameOpen(const ActuatorFeedback& fb) const {
-    if (!fb.valid) return -1;
+    if (!fb.valid)
+        return -1;
     if (!done_flag_) {
-        if (feedback_open_ < 0) return -1;
+        if (feedback_open_ < 0)
+            return -1;
         return fb.gripper_open == feedback_open_ ? 1 : fb.gripper_open == feedback_close_ ? 0 : -1;
     }
     {
         std::lock_guard<std::mutex> guard(io_mutex_);
-        if (!gripper_sent_) return gripper_synced_ ? (gripper_target_ == frameAngle(FrameAction::Open) ? 1 : 0) : -1;
+        if (!gripper_sent_)
+            return gripper_synced_ ? (gripper_target_ == frameAngle(FrameAction::Open) ? 1 : 0)
+                                   : -1;
     }
     const auto ack = gripperAck();
     return ack.result == ActionResult::Done ? ack.target : -1;
@@ -290,29 +333,38 @@ ActionResult UARTController::cameraPitchResult(int16_t tolerance_cdeg) const {
         sent = camera_sent_;
         target = camera_pitch_target_;
     }
-    if (!sent) return ActionResult::Idle;
+    if (!sent)
+        return ActionResult::Idle;
     const auto fb = latestActuatorFeedback();
-    if (!fb.valid || fb.camera_pitch_cdeg == kCameraPitchInvalid) return ActionResult::NoFeedback;
+    if (!fb.valid || fb.camera_pitch_cdeg == kCameraPitchInvalid)
+        return ActionResult::NoFeedback;
     const int error = std::abs(static_cast<int>(fb.camera_pitch_cdeg) - target);
-    return error <= std::abs(static_cast<int>(tolerance_cdeg)) ? ActionResult::Done : ActionResult::NotDone;
+    return error <= std::abs(static_cast<int>(tolerance_cdeg)) ? ActionResult::Done
+                                                               : ActionResult::NotDone;
 }
 
-bool UARTController::sendMotion(const MotionCommand &command) {
-    if (command.header != MotionPacket::kHeader) throw std::invalid_argument("Motion header must be 0x56");
+bool UARTController::sendMotion(const MotionCommand& command) {
+    if (command.header != MotionPacket::kHeader)
+        throw std::invalid_argument("Motion header must be 0x56");
     std::lock_guard<std::mutex> guard(io_mutex_);
-    if (feedback_only_) return false;
+    if (feedback_only_)
+        return false;
     // 夹爪目标变化才算新动作；写失败后重发沿用同一编号。未同步时首包也算新动作；
     // 同步后首包若与下位机当前状态相同，沿用下位机编号，不消耗编号。
     const int16_t gripper = command.gripper_offset;
-    if(gripper!=0 && gripper!=20) return false;
+    if (gripper != 0 && gripper != 20)
+        return false;
     // MCU只在偏移变化时递增；重复事务不能创造新编号。
     const bool keep_mcu_action = !gripper_sent_ && gripper_synced_ && gripper == gripper_target_;
     if (!keep_mcu_action && (!gripper_sent_ || gripper != gripper_target_)) {
         gripper_action_id_ = nextGripperActionId(gripper_action_id_);
         gripper_target_ = gripper;
-        action_started_us_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        action_started_us_ =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch())
+                                      .count());
     }
-    transaction_=command.frame_transaction;
+    transaction_ = command.frame_transaction;
     gripper_sent_ = true;
     camera_pitch_target_ = clampPitch(command.camera_pitch_cdeg);
     camera_sent_ = true;
@@ -341,12 +393,14 @@ bool UARTController::sendMotion(const MotionCommand &command) {
         return false;
     }
     int drained;
-    do { drained = ::tcdrain(fd_); } while (drained < 0 && errno == EINTR);
+    do {
+        drained = ::tcdrain(fd_);
+    } while (drained < 0 && errno == EINTR);
     return drained == 0;
 }
 
-std::array<uint8_t, 13> UARTController::buildPacket(int speed1, int speed2,
-                                                    int angle1, int angle2) {
+std::array<uint8_t, 13>
+UARTController::buildPacket(int speed1, int speed2, int angle1, int angle2) {
     std::array<uint8_t, 13> pack{};
     pack[0] = 0x55;
     pack[1] = 13;
@@ -373,15 +427,17 @@ std::array<uint8_t, 13> UARTController::buildPacket(int speed1, int speed2,
     return pack;
 }
 
-std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand &command,
-                                                      uint8_t gripper_action_id) {
+std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand& command,
+                                                       uint8_t gripper_action_id) {
     MotionPacket packet;
-    if (command.header != MotionPacket::kHeader) throw std::invalid_argument("Motion header must be 0x56");
+    if (command.header != MotionPacket::kHeader)
+        throw std::invalid_argument("Motion header must be 0x56");
     const bool valid = std::isfinite(command.vx_mps) && std::isfinite(command.wz_rps);
     // 协议不限制有限速度；业务层的运动约束仍由上层执行。
     packet.vx_mps = valid ? command.vx_mps : 0.0f;
     packet.wz_rps = valid ? command.wz_rps : 0.0f;
-    if(command.gripper_offset!=0 && command.gripper_offset!=20)throw std::invalid_argument("Frame requires OPEN=0 or CLOSE=20");
+    if (command.gripper_offset != 0 && command.gripper_offset != 20)
+        throw std::invalid_argument("Frame requires OPEN=0 or CLOSE=20");
     // 业务层0开/20关映射为固件的有符号偏移+5开/-5关。A6反馈仍为二值状态。
     packet.gripper_offset = command.gripper_offset == 0 ? 5 : -5;
     packet.gripper_action_id = gripper_action_id;
@@ -390,15 +446,14 @@ std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand &comm
     std::vector<uint8_t> bytes(sizeof(packet));
     std::memcpy(bytes.data(), &packet, sizeof(packet));
     // CRC覆盖帧头到imu yaw，与A6反馈同一算法；按字节写入，低字节在前。
-    const uint16_t crc = calculateCRC16(bytes.data(), 0,
-        static_cast<uint8_t>(offsetof(MotionPacket, crc16) - 1));
+    const uint16_t crc =
+        calculateCRC16(bytes.data(), 0, static_cast<uint8_t>(offsetof(MotionPacket, crc16) - 1));
     bytes[offsetof(MotionPacket, crc16)] = static_cast<uint8_t>(crc & 0xFF);
     bytes[offsetof(MotionPacket, crc16) + 1] = static_cast<uint8_t>(crc >> 8);
     return bytes;
 }
 
-uint16_t UARTController::calculateCRC16(const uint8_t *data, uint8_t start_byte,
-                                        uint8_t end_byte) {
+uint16_t UARTController::calculateCRC16(const uint8_t* data, uint8_t start_byte, uint8_t end_byte) {
     uint16_t crc = 0xFFFF;
     for (uint8_t i = start_byte; i <= end_byte; ++i) {
         crc ^= data[i];
@@ -429,14 +484,17 @@ void UARTController::reopenPort() {
 void UARTController::openPort() {
     std::lock_guard<std::mutex> guard(io_mutex_);
     const speed_t speed = baudToTermios(baudrate_);
-    fd_ = ::open(port_.c_str(), (feedback_only_ ? O_RDONLY : O_RDWR) | O_NOCTTY | O_SYNC | O_CLOEXEC);
+    fd_ =
+        ::open(port_.c_str(), (feedback_only_ ? O_RDONLY : O_RDWR) | O_NOCTTY | O_SYNC | O_CLOEXEC);
     if (fd_ < 0) {
         throw std::runtime_error("Failed to open " + port_ + ": " + std::strerror(errno));
     }
 
     // 独占串口：发送与只读反馈都不允许第二个进程（夹爪脚本、串口助手、另一个主程序）同时打开。
     if (::flock(fd_, LOCK_EX | LOCK_NB) < 0 || ::ioctl(fd_, TIOCEXCL) < 0) {
-        ::close(fd_); fd_ = -1; throw std::runtime_error("Serial port " + port_ + " is already owned");
+        ::close(fd_);
+        fd_ = -1;
+        throw std::runtime_error("Serial port " + port_ + " is already owned");
     }
     termios tty{};
     if (::tcgetattr(fd_, &tty) != 0) {
@@ -505,12 +563,14 @@ void UARTController::readLoop() {
         uint8_t bytes[256];
         const ssize_t n = ::read(local_fd, bytes, sizeof(bytes));
         if (n > 0) {
-            const auto received_us = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    Clock::now().time_since_epoch()).count());
+            const auto received_us =
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                          Clock::now().time_since_epoch())
+                                          .count());
             for (ssize_t i = 0; i < n; ++i) {
                 ActuatorFeedback state;
-                if (parser.consume(bytes[i], received_us, state)) publishActuatorFeedback(state);
+                if (parser.consume(bytes[i], received_us, state))
+                    publishActuatorFeedback(state);
             }
         } else if (n == 0) {
             break; // disconnected stream; do not spin while retaining stale feedback

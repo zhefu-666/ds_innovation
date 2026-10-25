@@ -26,8 +26,16 @@ struct PushInCargoEvidence {
     uint64_t seen_us = 0, static_since_us = 0;
 };
 
-enum class PushInOutcome { Continue, Repush, Complete };
-enum class PushInEventKind { Cargo, DropZone, Text };
+enum class PushInOutcome {
+    Continue,
+    Repush,
+    Complete
+};
+enum class PushInEventKind {
+    Cargo,
+    DropZone,
+    Text
+};
 
 struct PushInEvent {
     PushInEventKind kind;
@@ -46,13 +54,14 @@ struct PushInResult {
 };
 
 class PushInStage {
-public:
+  public:
     // A new push resets alignment and held heading, retaining probe and confirmation history.
     void prepare(bool align);
     void clearTrip();
     // The parent confirms camera/frame readiness and updates cargo tracking first.
     PushInResult update(const TaskTuning&, const PushInContext&, const PushInCargoEvidence&);
-private:
+
+  private:
     bool align_pending_ = false, push_hold_valid_ = false;
     uint64_t align_start_us_ = 0;
     float push_hold_phi_ = 0;

@@ -98,8 +98,10 @@ struct Rig {
 
     void blacklisted(bool expected) const {
         const auto rejected = task.rejectedTargets(input.now_us);
-        assert((std::find(rejected.begin(), rejected.end(), kTarget) != rejected.end()) == expected);
-        if (expected) assert(task.rejected_.at(kTarget) == input.now_us + task.t_.blacklist_us);
+        assert((std::find(rejected.begin(), rejected.end(), kTarget) != rejected.end()) ==
+               expected);
+        if (expected)
+            assert(task.rejected_.at(kTarget) == input.now_us + task.t_.blacklist_us);
     }
 
     void carry(bool assumed, const char* reason) const {
@@ -182,7 +184,8 @@ void failureTests() {
         rig.summary(1, ordinary(2));
         rig.tick();
         assert(rig.output.state == PushState::ABORT_DROP);
-        assert(rig.output.reason == "multi_grab_inventory_mismatch" && rig.output.verdict == RuleVerdict::OK);
+        assert(rig.output.reason == "multi_grab_inventory_mismatch" &&
+               rig.output.verdict == RuleVerdict::OK);
         assert(rig.task.phase_us_ == rig.input.now_us && !rig.task.fault_);
         const auto bearings = rig.task.rejectedBearings(rig.input.now_us);
         assert(bearings.size() == 1 && std::abs(bearings.front().world_yaw - .4f) < 1e-6f);
@@ -201,7 +204,8 @@ void failureTests() {
         tuning.require_multi_view = false;
         Rig rig(tuning);
         rig.atElapsed(tuning.verify_budget_us + 1);
-        assert(rig.output.state == PushState::CAPTURE_FAIL && rig.output.reason == "capture_unverified");
+        assert(rig.output.state == PushState::CAPTURE_FAIL &&
+               rig.output.reason == "capture_unverified");
         assert(rig.output.verdict == RuleVerdict::DANGEROUS && !rig.task.fault_);
         assert(rig.task.phase_us_ == rig.input.now_us);
         rig.closed();
@@ -216,7 +220,8 @@ void failureTests() {
         rig.input.hold_observable = true;
         rig.summary(2, {});
         rig.tick();
-        assert(rig.output.state == PushState::CAPTURE_FAIL && rig.output.reason == "capture_target_not_in_frame");
+        assert(rig.output.state == PushState::CAPTURE_FAIL &&
+               rig.output.reason == "capture_target_not_in_frame");
         assert(rig.output.verdict == RuleVerdict::DANGEROUS && !rig.task.fault_);
         assert(rig.task.phase_us_ == rig.input.now_us);
         rig.closed();
@@ -233,7 +238,8 @@ void failureTests() {
         Rig rig(tuning);
         rig.summary(1, ordinary());
         rig.atElapsed(8000001);
-        assert(rig.output.state == PushState::SAFE_STOP && rig.output.reason == "multi_view_unconfirmed");
+        assert(rig.output.state == PushState::SAFE_STOP &&
+               rig.output.reason == "multi_view_unconfirmed");
         assert(rig.task.fault_ && rig.task.phase_us_ == kStart);
         assert(rig.output.verdict == RuleVerdict::DANGEROUS);
         rig.closed();
@@ -255,14 +261,16 @@ void lifecycleTests() {
         Rig moved = std::move(copied);
         original.task.enter(PushState::VERIFY_CAPTURE, original.input.now_us, "reentered_capture");
         moved.tick();
-        assert(moved.output.state == PushState::VERIFY_CAPTURE && moved.output.reason == "seed_reason");
+        assert(moved.output.state == PushState::VERIFY_CAPTURE &&
+               moved.output.reason == "seed_reason");
         moved.report("moved_continue");
         moved.tick();
         moved.carry(false, "capture_verified");
         moved.report("moved_verified");
         original.tick();
         original.tick();
-        assert(original.output.state == PushState::VERIFY_CAPTURE && original.output.reason == "reentered_capture");
+        assert(original.output.state == PushState::VERIFY_CAPTURE &&
+               original.output.reason == "reentered_capture");
         original.closed();
         original.report("reentered_continue");
         original.tick();
@@ -307,7 +315,8 @@ void lifecycleTests() {
         rig.held(held);
         rig.input.held_objects = {{99, "core_supply", .54f}};
         rig.tick();
-        assert(rig.output.state == PushState::VERIFY_CAPTURE && rig.output.reason == "held_illegal_recheck");
+        assert(rig.output.state == PushState::VERIFY_CAPTURE &&
+               rig.output.reason == "held_illegal_recheck");
         rig.closed();
         rig.report("recheck_continue");
         rig.input.safety_ok = false;
@@ -319,7 +328,8 @@ void lifecycleTests() {
         rig.input.reset = true;
         rig.tick();
         assert(rig.output.state == PushState::WAIT_START && rig.output.reason == "reset");
-        assert(!rig.task.fault_ && rig.output.batch_size == 0 && rig.output.verdict == RuleVerdict::OK);
+        assert(!rig.task.fault_ && rig.output.batch_size == 0 &&
+               rig.output.verdict == RuleVerdict::OK);
         rig.closed();
         rig.blacklisted(false);
         rig.report("reset");
@@ -336,7 +346,8 @@ void lifecycleTests() {
         rig.tick();
         assert(rig.output.state == PushState::CARRY && rig.output.reason == "assumed_capture");
         assert(rig.task.trip_ == ordinary() && !rig.task.fault_);
-        assert(rig.task.carry_us_ == rig.input.now_us && rig.task.hold_seen_us_ == rig.input.now_us);
+        assert(rig.task.carry_us_ == rig.input.now_us &&
+               rig.task.hold_seen_us_ == rig.input.now_us);
         assert(rig.task.carry_progress_us_ == 0 && rig.task.carried_ == 0);
         rig.closed();
         rig.blacklisted(false);

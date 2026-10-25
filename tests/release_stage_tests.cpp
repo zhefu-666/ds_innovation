@@ -41,8 +41,10 @@ struct Fixture {
     }
 };
 
-void expect(const ReleaseRetreatResult& result, ReleaseRetreatOutcome outcome,
-            const std::string& reason = "", bool reverse = false) {
+void expect(const ReleaseRetreatResult& result,
+            ReleaseRetreatOutcome outcome,
+            const std::string& reason = "",
+            bool reverse = false) {
     CHECK(result.outcome == outcome);
     CHECK(result.reason == reason);
     CHECK(result.reverse == reverse);
@@ -53,18 +55,23 @@ void strictRetreatUsesObservedMouthClearance() {
     missing.context.observed_zone = false;
     expect(missing.update(missing.tuning.retreat_budget_us), ReleaseRetreatOutcome::Continue);
     CHECK(!missing.update(missing.tuning.retreat_budget_us).blind_back_out);
-    expect(missing.update(missing.tuning.retreat_budget_us + 1), ReleaseRetreatOutcome::Fault,
+    expect(missing.update(missing.tuning.retreat_budget_us + 1),
+           ReleaseRetreatOutcome::Fault,
            "retreat_reference_lost");
 
     Fixture blocked;
-    expect(blocked.update(blocked.tuning.retreat_budget_us), ReleaseRetreatOutcome::Continue,
-           "", true);
-    expect(blocked.update(blocked.tuning.retreat_budget_us + 1), ReleaseRetreatOutcome::Fault,
+    expect(blocked.update(blocked.tuning.retreat_budget_us),
+           ReleaseRetreatOutcome::Continue,
+           "",
+           true);
+    expect(blocked.update(blocked.tuning.retreat_budget_us + 1),
+           ReleaseRetreatOutcome::Fault,
            "retreat_blocked");
 
     Fixture clear;
     clear.context.mouth_clear = true;
-    expect(clear.update(clear.tuning.retreat_budget_us + 1), ReleaseRetreatOutcome::VerifyDelivery,
+    expect(clear.update(clear.tuning.retreat_budget_us + 1),
+           ReleaseRetreatOutcome::VerifyDelivery,
            "backed_out");
 
     Fixture predicted;
@@ -88,14 +95,16 @@ void carryModesAllowBoundedBlindRetreat() {
         CHECK(moving.blind_back_out);
         fixture.context.travel_m = fixture.tuning.assume_back_m;
         expect(fixture.update(fixture.tuning.retreat_budget_us + 1),
-               ReleaseRetreatOutcome::VerifyDelivery, "assumed_backed_out");
+               ReleaseRetreatOutcome::VerifyDelivery,
+               "assumed_backed_out");
 
         Fixture timeout;
         timeout.tuning.field_carry = !assume_all_safe;
         timeout.tuning.assume_all_safe = assume_all_safe;
         timeout.context.observed_zone = false;
         expect(timeout.update(timeout.tuning.retreat_budget_us + 1),
-               ReleaseRetreatOutcome::Fault, "retreat_blocked");
+               ReleaseRetreatOutcome::Fault,
+               "retreat_blocked");
     }
 
     Fixture rush_only;
@@ -142,8 +151,7 @@ void prepushUsesAnchoredDisplacement() {
     CHECK(fixture.stage.needsCargoTracking());
     fixture.context.hold_y = .2501f;
     fixture.context.travel_m = 100;
-    expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-           "assumed_release_back_off", true);
+    expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     fixture.context.hold_y = .25f;
     expect(fixture.update(), ReleaseRetreatOutcome::PushIn, "assumed_release_then_push");
     CHECK(!fixture.stage.needsCargoTracking());
@@ -157,8 +165,10 @@ void prepushUsesAnchoredDisplacement() {
     Fixture not_backing_away;
     not_backing_away.begin();
     not_backing_away.context.hold_y = .75f;
-    expect(not_backing_away.update(), ReleaseRetreatOutcome::Continue,
-           "assumed_release_back_off", true);
+    expect(not_backing_away.update(),
+           ReleaseRetreatOutcome::Continue,
+           "assumed_release_back_off",
+           true);
 }
 
 void prepushBlindDistanceUsesMotionRatio() {
@@ -187,10 +197,13 @@ void prepushTimeoutProceedsToPushIn() {
         Fixture fixture;
         fixture.begin();
         fixture.context.anchored_zone = anchored;
-        expect(fixture.update(fixture.tuning.retreat_budget_us), ReleaseRetreatOutcome::Continue,
-               anchored ? "assumed_release_back_off" : "assumed_release_back_off_blind", true);
+        expect(fixture.update(fixture.tuning.retreat_budget_us),
+               ReleaseRetreatOutcome::Continue,
+               anchored ? "assumed_release_back_off" : "assumed_release_back_off_blind",
+               true);
         expect(fixture.update(fixture.tuning.retreat_budget_us + 1),
-               ReleaseRetreatOutcome::PushIn, "assumed_release_then_push");
+               ReleaseRetreatOutcome::PushIn,
+               "assumed_release_then_push");
         CHECK(!fixture.stage.needsCargoTracking());
     }
 }
@@ -204,34 +217,43 @@ void insideShortcutRequiresIndependentTimestamps() {
     fixture.inside(11);
     expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     fixture.inside(12);
-    expect(fixture.update(), ReleaseRetreatOutcome::InsideAfterRelease,
+    expect(fixture.update(),
+           ReleaseRetreatOutcome::InsideAfterRelease,
            "assumed_inside_after_release");
     CHECK(!fixture.stage.needsCargoTracking());
 
     Fixture timestamp_zero;
     timestamp_zero.begin();
     timestamp_zero.inside(0);
-    expect(timestamp_zero.update(), ReleaseRetreatOutcome::Continue,
-           "assumed_release_back_off", true);
+    expect(
+        timestamp_zero.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     for (const uint64_t timestamp : {1ULL, 2ULL}) {
         timestamp_zero.inside(timestamp);
-        expect(timestamp_zero.update(), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(timestamp_zero.update(),
+               ReleaseRetreatOutcome::Continue,
+               "assumed_release_back_off",
+               true);
     }
     timestamp_zero.inside(3);
-    expect(timestamp_zero.update(), ReleaseRetreatOutcome::InsideAfterRelease,
+    expect(timestamp_zero.update(),
+           ReleaseRetreatOutcome::InsideAfterRelease,
            "assumed_inside_after_release");
 
     Fixture different_not_monotonic;
     different_not_monotonic.begin();
     different_not_monotonic.inside(10);
-    expect(different_not_monotonic.update(), ReleaseRetreatOutcome::Continue,
-           "assumed_release_back_off", true);
+    expect(different_not_monotonic.update(),
+           ReleaseRetreatOutcome::Continue,
+           "assumed_release_back_off",
+           true);
     different_not_monotonic.inside(11);
-    expect(different_not_monotonic.update(), ReleaseRetreatOutcome::Continue,
-           "assumed_release_back_off", true);
+    expect(different_not_monotonic.update(),
+           ReleaseRetreatOutcome::Continue,
+           "assumed_release_back_off",
+           true);
     different_not_monotonic.inside(10);
-    expect(different_not_monotonic.update(), ReleaseRetreatOutcome::InsideAfterRelease,
+    expect(different_not_monotonic.update(),
+           ReleaseRetreatOutcome::InsideAfterRelease,
            "assumed_inside_after_release");
 }
 
@@ -241,29 +263,45 @@ void insideConditionsAndBrokenEvidenceResetTheCount() {
         fixture.begin();
         for (const uint64_t timestamp : {10ULL, 11ULL}) {
             fixture.inside(timestamp);
-            expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-                   "assumed_release_back_off", true);
+            expect(fixture.update(),
+                   ReleaseRetreatOutcome::Continue,
+                   "assumed_release_back_off",
+                   true);
         }
         fixture.inside(12);
         switch (invalid_gate) {
-        case 0: fixture.cargo.visible = false; break;
-        case 1: fixture.cargo.fixed = false; break;
-        case 2: fixture.cargo.clipped = true; break;
-        case 3: fixture.cargo.rear_y = fixture.tuning.assume_cargo_done_y_m - .001f; break;
-        case 4: fixture.cargo.rear_x = fixture.tuning.assume_cargo_x_tol_m + .001f; break;
-        case 5: fixture.context.repush_count = 1; break;
+            case 0:
+                fixture.cargo.visible = false;
+                break;
+            case 1:
+                fixture.cargo.fixed = false;
+                break;
+            case 2:
+                fixture.cargo.clipped = true;
+                break;
+            case 3:
+                fixture.cargo.rear_y = fixture.tuning.assume_cargo_done_y_m - .001f;
+                break;
+            case 4:
+                fixture.cargo.rear_x = fixture.tuning.assume_cargo_x_tol_m + .001f;
+                break;
+            case 5:
+                fixture.context.repush_count = 1;
+                break;
         }
-        expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
         fixture.context.repush_count = 0;
         // Invalid evidence clears the count but retains the last accepted timestamp.
         for (const uint64_t timestamp : {11ULL, 13ULL, 14ULL}) {
             fixture.inside(timestamp);
-            expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-                   "assumed_release_back_off", true);
+            expect(fixture.update(),
+                   ReleaseRetreatOutcome::Continue,
+                   "assumed_release_back_off",
+                   true);
         }
         fixture.inside(15);
-        expect(fixture.update(), ReleaseRetreatOutcome::InsideAfterRelease,
+        expect(fixture.update(),
+               ReleaseRetreatOutcome::InsideAfterRelease,
                "assumed_inside_after_release");
     }
 
@@ -272,7 +310,8 @@ void insideConditionsAndBrokenEvidenceResetTheCount() {
     inclusive.tuning.assume_inside_after_release_obs = 1;
     inclusive.inside(1);
     inclusive.cargo.rear_x = inclusive.tuning.assume_cargo_x_tol_m;
-    expect(inclusive.update(), ReleaseRetreatOutcome::InsideAfterRelease,
+    expect(inclusive.update(),
+           ReleaseRetreatOutcome::InsideAfterRelease,
            "assumed_inside_after_release");
 }
 
@@ -281,13 +320,13 @@ void insideShortcutPrecedesDistanceAndTimeout() {
     fixture.begin();
     for (const uint64_t timestamp : {1ULL, 2ULL}) {
         fixture.inside(timestamp);
-        expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     }
     fixture.inside(3);
     fixture.context.hold_y = .25f;
     expect(fixture.update(fixture.tuning.retreat_budget_us + 1),
-           ReleaseRetreatOutcome::InsideAfterRelease, "assumed_inside_after_release");
+           ReleaseRetreatOutcome::InsideAfterRelease,
+           "assumed_inside_after_release");
 
     Fixture retry;
     retry.begin();
@@ -305,17 +344,16 @@ void releaseBackOffResetsCountButRetainsTimestamp() {
     fixture.begin();
     for (const uint64_t timestamp : {10ULL, 11ULL}) {
         fixture.inside(timestamp);
-        expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     }
     fixture.begin(.75f);
     for (const uint64_t timestamp : {11ULL, 12ULL, 13ULL}) {
         fixture.inside(timestamp);
-        expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     }
     fixture.inside(14);
-    expect(fixture.update(), ReleaseRetreatOutcome::InsideAfterRelease,
+    expect(fixture.update(),
+           ReleaseRetreatOutcome::InsideAfterRelease,
            "assumed_inside_after_release");
 }
 
@@ -324,15 +362,15 @@ void repushBackOffRetainsHistoryAndUpdatesTheOrigin() {
     fixture.begin();
     for (const uint64_t timestamp : {10ULL, 11ULL}) {
         fixture.inside(timestamp);
-        expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     }
     fixture.stage.beginRepushBackOff(.75f);
     fixture.context.hold_y = .75f;
     fixture.inside(11);
     expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     fixture.inside(12);
-    expect(fixture.update(), ReleaseRetreatOutcome::InsideAfterRelease,
+    expect(fixture.update(),
+           ReleaseRetreatOutcome::InsideAfterRelease,
            "assumed_inside_after_release");
 
     Fixture new_origin;
@@ -347,8 +385,7 @@ void clearTripDiscardsPrepushHistory() {
     fixture.begin();
     for (const uint64_t timestamp : {10ULL, 11ULL}) {
         fixture.inside(timestamp);
-        expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     }
     fixture.stage.clearTrip();
     CHECK(!fixture.stage.needsCargoTracking());
@@ -359,11 +396,11 @@ void clearTripDiscardsPrepushHistory() {
     fixture.context.hold_y = .75f;
     for (const uint64_t timestamp : {11ULL, 12ULL}) {
         fixture.inside(timestamp);
-        expect(fixture.update(), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(fixture.update(), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     }
     fixture.inside(13);
-    expect(fixture.update(), ReleaseRetreatOutcome::InsideAfterRelease,
+    expect(fixture.update(),
+           ReleaseRetreatOutcome::InsideAfterRelease,
            "assumed_inside_after_release");
 }
 
@@ -372,14 +409,17 @@ void pauseKeepsPrepushHistoryWhileCallerResetsElapsedAndTravel() {
     fixture.begin(.75f);
     for (const uint64_t timestamp : {10ULL, 11ULL}) {
         fixture.inside(timestamp);
-        expect(fixture.update(5000000), ReleaseRetreatOutcome::Continue,
-               "assumed_release_back_off", true);
+        expect(fixture.update(5000000),
+               ReleaseRetreatOutcome::Continue,
+               "assumed_release_back_off",
+               true);
     }
     fixture.context.travel_m = 0;
     fixture.inside(11);
     expect(fixture.update(1), ReleaseRetreatOutcome::Continue, "assumed_release_back_off", true);
     fixture.inside(12);
-    expect(fixture.update(2), ReleaseRetreatOutcome::InsideAfterRelease,
+    expect(fixture.update(2),
+           ReleaseRetreatOutcome::InsideAfterRelease,
            "assumed_inside_after_release");
 }
 } // namespace

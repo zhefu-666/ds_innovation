@@ -81,7 +81,8 @@ struct Rig {
         input.zone_inventory_complete = input.zone_counts_valid = true;
         input.zone_supply_count = trip.total();
         input.zone_injured_count = 4;
-        input.camera_pitch_cdeg = task.assumeView() ? tuning.assume_view_pitch_cdeg : tuning.far_pitch_cdeg;
+        input.camera_pitch_cdeg =
+            task.assumeView() ? tuning.assume_view_pitch_cdeg : tuning.far_pitch_cdeg;
         input.camera_pitch_stable = true;
         input.gripper_done = true;
         input.gripper_feedback_open = 1;
@@ -104,14 +105,16 @@ struct Rig {
     void seedVerification(const char* reason) {
         task.enter(PushState::VERIFY_DELIVERY, input.now_us, reason);
         task.last_us_ = input.now_us;
-        task.pitch_cmd_ = task.assumeView() ? task.t_.assume_view_pitch_cdeg : task.t_.far_pitch_cdeg;
+        task.pitch_cmd_ =
+            task.assumeView() ? task.t_.assume_view_pitch_cdeg : task.t_.far_pitch_cdeg;
         task.pitch_wait_us_ = input.now_us;
         input.camera_pitch_cdeg = task.pitch_cmd_;
     }
 
     void refresh() {
         input.zone_estimate = zone(input.now_us, ++frame);
-        if (!input.cargo_body.empty() && fresh_cargo) input.cargo_ts_us = input.now_us;
+        if (!input.cargo_body.empty() && fresh_cargo)
+            input.cargo_ts_us = input.now_us;
         input.vref_valid = vref;
         input.vref_points = vref ? 3 : 0;
         input.vref_zone = zone(input.cargo_body.empty() ? input.now_us : input.cargo_ts_us, frame);
@@ -138,7 +141,8 @@ struct Rig {
         input.cargo_img = {PushObservation::CargoImg{}};
         vref = measured;
         task.cargo_fix_ = measured;
-        if (!measured) task.zone_.update(zone(input.now_us, 1), input.now_us);
+        if (!measured)
+            task.zone_.update(zone(input.now_us, 1), input.now_us);
     }
 
     void stationaryOpen() const {
@@ -168,7 +172,8 @@ void scoringTests() {
         Rig rig(strictTuning(), ordinary(2));
         for (int index = 0; index < 6; ++index) {
             rig.tick();
-            assert(rig.output.state == PushState::VERIFY_DELIVERY && rig.output.delivered_total == 10);
+            assert(rig.output.state == PushState::VERIFY_DELIVERY &&
+                   rig.output.delivered_total == 10);
             rig.stationaryOpen();
         }
         rig.tick();
@@ -184,7 +189,8 @@ void scoringTests() {
     {
         Rig rig(strictTuning(), ordinary(2));
         rig.input.zone_supply_count = 1;
-        for (int index = 0; index < 7; ++index) rig.tick();
+        for (int index = 0; index < 7; ++index)
+            rig.tick();
         assert(rig.output.state == PushState::TURN_SCAN && rig.output.reason == "partial_delivery");
         assert(rig.output.delivered_total == 11 && !rig.output.first_ordinary_delivered);
         assert(rig.task.near_failures_ == 3 && rig.task.mid_clear_n_ == 4);
@@ -196,7 +202,8 @@ void scoringTests() {
         auto trip = ordinary();
         trip.core = 1;
         Rig rig(strictTuning(), trip);
-        for (int index = 0; index < 7; ++index) rig.tick();
+        for (int index = 0; index < 7; ++index)
+            rig.tick();
         assert(rig.output.state == PushState::TURN_SCAN && rig.output.delivered_total == 12);
         assert(!rig.output.first_ordinary_delivered && rig.output.reason == "delivered");
         rig.report("mixed_full_does_not_unlock_first");
@@ -206,9 +213,11 @@ void scoringTests() {
         Rig rig(tuning);
         rig.input.zone_supply_count = 0;
         rig.atElapsed(tuning.delivery_budget_us + 1);
-        assert(rig.output.state == PushState::TURN_SCAN && rig.output.reason == "delivery_unverified");
+        assert(rig.output.state == PushState::TURN_SCAN &&
+               rig.output.reason == "delivery_unverified");
         assert(rig.output.delivered_total == 10 && !rig.output.first_ordinary_delivered);
-        assert(rig.task.attempt_started_ == 777 && rig.task.bounded_approach_ == .2f && rig.task.bounded_retreat_ == .3f);
+        assert(rig.task.attempt_started_ == 777 && rig.task.bounded_approach_ == .2f &&
+               rig.task.bounded_retreat_ == .3f);
         assert(!rig.task.delivery_visual_);
         rig.report("strict_unverified");
     }
@@ -216,8 +225,10 @@ void scoringTests() {
         auto tuning = strictTuning();
         tuning.demo_carry_once = true;
         Rig rig(tuning);
-        for (int index = 0; index < 7; ++index) rig.tick();
-        assert(rig.output.state == PushState::SAFE_STOP && rig.output.reason == "demo_delivery_complete");
+        for (int index = 0; index < 7; ++index)
+            rig.tick();
+        assert(rig.output.state == PushState::SAFE_STOP &&
+               rig.output.reason == "demo_delivery_complete");
         assert(rig.task.fault_ && rig.task.phase_us_ == kStart);
         assert(rig.output.delivered_total == 11 && rig.output.first_ordinary_delivered);
         rig.stationaryOpen();
@@ -226,8 +237,10 @@ void scoringTests() {
     {
         Rig rig(visualTuning(false));
         rig.visualCargo(.02f);
-        for (int index = 0; index < 3; ++index) rig.tick();
-        assert(rig.output.state == PushState::TURN_SCAN && rig.output.reason == "delivery_unverified");
+        for (int index = 0; index < 3; ++index)
+            rig.tick();
+        assert(rig.output.state == PushState::TURN_SCAN &&
+               rig.output.reason == "delivery_unverified");
         assert(rig.output.delivered_total == 10 && !rig.output.first_ordinary_delivered);
         assert(rig.task.delivery_visual_ && rig.task.attempt_started_ == 777);
         rig.report("visual_without_assumption", rig.task.takeDropZoneEvent());
@@ -272,7 +285,8 @@ void pauseAndViewTests() {
         assert(!before_move.empty());
         rig.report("far_view_requested", before_move);
         rig.tick();
-        assert(rig.output.state == PushState::VERIFY_DELIVERY && rig.output.reason == "camera_pitch_wait");
+        assert(rig.output.state == PushState::VERIFY_DELIVERY &&
+               rig.output.reason == "camera_pitch_wait");
         assert(rig.task.takeDropZoneEvent().empty());
         rig.report("far_view_motion_gates_verification");
         rig.input.camera_pitch_cdeg = tuning.far_pitch_cdeg;
@@ -320,9 +334,11 @@ void cargoHistoryTests() {
         rig.tick();
         assert(rig.output.state == PushState::VERIFY_DELIVERY);
         rig.tick();
-        assert(rig.output.state == PushState::ENTER && rig.output.reason == "assumed_verify_repush");
+        assert(rig.output.state == PushState::ENTER &&
+               rig.output.reason == "assumed_verify_repush");
         assert(rig.task.repush_n_ == 1 && rig.task.cargo_ref_us_ == 0);
-        assert(!rig.task.assume_pushed_ && rig.task.push_in_.align_pending_ && rig.task.push_in_.align_start_us_ == 0 && !rig.task.push_in_.push_hold_valid_);
+        assert(!rig.task.assume_pushed_ && rig.task.push_in_.align_pending_ &&
+               rig.task.push_in_.align_start_us_ == 0 && !rig.task.push_in_.push_hold_valid_);
         rig.stationaryOpen();
         const auto events = rig.task.takeDropZoneEvent();
         const auto before = events.find("fix=1 repush=0 in=0 out=2");
@@ -331,7 +347,8 @@ void cargoHistoryTests() {
         assert(events.find("fix=1 repush=1 in=0 out=0", after) != std::string::npos);
         rig.report("repush_events_before_transition", events);
         rig.tick();
-        assert(rig.output.motion.gripper_offset == 20 && rig.output.motion.frame_transaction == kTransaction + 1);
+        assert(rig.output.motion.gripper_offset == 20 &&
+               rig.output.motion.frame_transaction == kTransaction + 1);
         rig.report("repush_closes_next_tick");
     }
     {

@@ -61,7 +61,8 @@ struct Rig {
     bool fresh = true, auto_camera = true;
     uint64_t trace = 1469598103934665603ULL;
 
-    explicit Rig(TaskTuning parameters = tuning(), PushState state = PushState::SCATTER) : task(parameters) {
+    explicit Rig(TaskTuning parameters = tuning(), PushState state = PushState::SCATTER)
+        : task(parameters) {
         input.now_us = kStart;
         input.run = input.safety_ok = input.path_safe = input.retreat_safe = true;
         input.opponent_zone_clear = input.heading_valid = input.camera_pitch_stable = true;
@@ -74,7 +75,8 @@ struct Rig {
         task.enter(state, input.now_us, "seed_turn_rush");
         task.last_us_ = input.now_us;
         task.last_vx_ = task.last_wz_ = 0;
-        if (state == PushState::APPROACH) task.approach_pitch_ = task.t_.track_pitch_cdeg;
+        if (state == PushState::APPROACH)
+            task.approach_pitch_ = task.t_.track_pitch_cdeg;
         if (state == PushState::PILE) {
             task.pile_phase_ = 9;
             task.pile_phase_us_ = input.now_us;
@@ -97,35 +99,46 @@ struct Rig {
         input.now_us = now;
         task.last_us_ = now - kTick;
         task.last_vx_ = task.last_wz_ = 0;
-        if (fresh) input.clutter_ts_us = now;
-        if (auto_camera) input.camera_pitch_cdeg = task.desiredPitch();
+        if (fresh)
+            input.clutter_ts_us = now;
+        if (auto_camera)
+            input.camera_pitch_cdeg = task.desiredPitch();
         output = task.update(input);
         std::ostringstream sample;
-        sample << std::setprecision(std::numeric_limits<float>::max_digits10)
-               << int(output.state) << ':' << output.reason << ':' << output.motion.vx_mps << ':'
-               << output.motion.wz_rps << ':' << output.motion.camera_pitch_cdeg << ':'
-               << int(output.motion.gripper_offset) << ':' << output.motion.frame_transaction << ':'
-               << task.sweep_phase_ << ':' << task.sweep_start_us_ << ':' << task.sweep_yaw0_ << ':'
-               << task.sweep_travel0_ << ':' << task.travel_ << ':' << task.phase_us_ << ':'
-               << task.sweepDone() << ':' << task.sweepSpentUs(now) << ':' << task.sweepChainOpen();
-        for (const unsigned char c : sample.str()) trace = (trace ^ c) * 1099511628211ULL;
+        sample << std::setprecision(std::numeric_limits<float>::max_digits10) << int(output.state)
+               << ':' << output.reason << ':' << output.motion.vx_mps << ':' << output.motion.wz_rps
+               << ':' << output.motion.camera_pitch_cdeg << ':' << int(output.motion.gripper_offset)
+               << ':' << output.motion.frame_transaction << ':' << task.sweep_phase_ << ':'
+               << task.sweep_start_us_ << ':' << task.sweep_yaw0_ << ':' << task.sweep_travel0_
+               << ':' << task.travel_ << ':' << task.phase_us_ << ':' << task.sweepDone() << ':'
+               << task.sweepSpentUs(now) << ':' << task.sweepChainOpen();
+        for (const unsigned char c : sample.str())
+            trace = (trace ^ c) * 1099511628211ULL;
     }
 
-    void tick() { at(input.now_us + kTick); }
-    void stationary() const { assert(output.motion.vx_mps == 0 && output.motion.wz_rps == 0); }
+    void tick() {
+        at(input.now_us + kTick);
+    }
+    void stationary() const {
+        assert(output.motion.vx_mps == 0 && output.motion.wz_rps == 0);
+    }
 
     void start() {
         tick();
         assert(task.sweep_phase_ == 5);
-        assert(output.reason == "disperse_look" || (output.state == PushState::PILE && output.reason == "disperse_turn"));
-        if (output.reason == "disperse_look") stationary();
+        assert(output.reason == "disperse_look" ||
+               (output.state == PushState::PILE && output.reason == "disperse_turn"));
+        if (output.reason == "disperse_look")
+            stationary();
         assert(output.motion.camera_pitch_cdeg == task.t_.intermediate_pitch_cdeg);
     }
 
     void turn() {
         start();
-        if (output.reason == "disperse_look") tick();
-        assert(output.reason == "disperse_turn" && output.motion.vx_mps == 0 && output.motion.wz_rps != 0);
+        if (output.reason == "disperse_look")
+            tick();
+        assert(output.reason == "disperse_turn" && output.motion.vx_mps == 0 &&
+               output.motion.wz_rps != 0);
     }
 
     void thinToLow() {
@@ -150,8 +163,8 @@ struct Rig {
                   << " travel0=" << task.sweep_travel0_ << " travel=" << task.travel_
                   << " vx=" << output.motion.vx_mps << " wz=" << output.motion.wz_rps
                   << " pitch=" << output.motion.camera_pitch_cdeg
-                  << " frame=" << int(output.motion.gripper_offset)
-                  << " done=" << task.sweepDone() << " spent=" << task.sweepSpentUs(input.now_us)
+                  << " frame=" << int(output.motion.gripper_offset) << " done=" << task.sweepDone()
+                  << " spent=" << task.sweepSpentUs(input.now_us)
                   << " open=" << task.sweepChainOpen() << " pile=" << task.pile_phase_
                   << " pile_mid=" << task.pile_chain_yaw_mid_ << '\n';
     }
@@ -227,7 +240,8 @@ void turnBoundsAndMotion() {
         rig.tick();
         assert(rig.output.reason == "disperse_swing" && rig.output.motion.wz_rps != 0);
         assert(rig.output.motion.camera_pitch_cdeg == rig.task.t_.far_pitch_cdeg);
-        rig.report(small ? "small_neighbour_clear_keeps_alternating_swing" : "single_turn_disabled_keeps_alternating_swing");
+        rig.report(small ? "small_neighbour_clear_keeps_alternating_swing"
+                         : "single_turn_disabled_keeps_alternating_swing");
     }
     {
         auto parameters = tuning();
@@ -284,11 +298,14 @@ void turnBoundsAndMotion() {
     }
     for (PushState state : {PushState::SCATTER, PushState::APPROACH}) {
         Rig rig(tuning(), state);
-        if (state == PushState::SCATTER) rig.task.burst_swing_ = true;
-        else rig.task.t_.approach_dense_burst_swing = true;
+        if (state == PushState::SCATTER)
+            rig.task.burst_swing_ = true;
+        else
+            rig.task.t_.approach_dense_burst_swing = true;
         rig.turn();
         assert(rig.output.motion.wz_rps == rig.task.t_.first_burst_swing_wz);
-        rig.report(state == PushState::SCATTER ? "scatter_burst_turn_speed" : "approach_burst_turn_speed");
+        rig.report(state == PushState::SCATTER ? "scatter_burst_turn_speed"
+                                               : "approach_burst_turn_speed");
     }
 }
 
@@ -367,7 +384,8 @@ void pushAndParentLifecycle() {
         rig.finishTurn();
         assert(rig.output.state == PushState::PILE && rig.task.pile_phase_ == 7);
         assert(rig.task.sweepDone() == 1 && !rig.task.sweepChainOpen());
-        rig.report(state == PushState::SCATTER ? "scatter_turn_hands_completed_chain_to_pile" : "approach_turn_hands_completed_chain_to_pile");
+        rig.report(state == PushState::SCATTER ? "scatter_turn_hands_completed_chain_to_pile"
+                                               : "approach_turn_hands_completed_chain_to_pile");
     }
     for (PushState state : {PushState::SCATTER, PushState::APPROACH, PushState::PILE}) {
         Rig rig(parameters, state);
@@ -376,18 +394,25 @@ void pushAndParentLifecycle() {
         const auto start = rig.task.sweep_start_us_;
         const auto travel0 = rig.task.sweep_travel0_;
         rig.tick();
-        assert(rig.output.reason == "disperse_turn_push" && rig.output.motion.vx_mps > 0 && rig.output.motion.wz_rps == 0);
-        rig.report(state == PushState::SCATTER ? "scatter_turn_starts_straight_push" :
-                   state == PushState::APPROACH ? "approach_turn_starts_straight_push" : "pile_turn_starts_straight_push");
-        rig.task.travel_ = travel0 + parameters.disperse_turn_push_m * rig.task.motionRatio() + .001f;
+        assert(rig.output.reason == "disperse_turn_push" && rig.output.motion.vx_mps > 0 &&
+               rig.output.motion.wz_rps == 0);
+        rig.report(state == PushState::SCATTER    ? "scatter_turn_starts_straight_push"
+                   : state == PushState::APPROACH ? "approach_turn_starts_straight_push"
+                                                  : "pile_turn_starts_straight_push");
+        rig.task.travel_ =
+            travel0 + parameters.disperse_turn_push_m * rig.task.motionRatio() + .001f;
         rig.tick();
         assert(rig.task.sweep_start_us_ == start);
         if (state == PushState::PILE) {
-            assert(rig.output.state == PushState::PILE && rig.task.pile_phase_ == 10 && rig.task.sweep_phase_ == 0);
+            assert(rig.output.state == PushState::PILE && rig.task.pile_phase_ == 10 &&
+                   rig.task.sweep_phase_ == 0);
             assert(std::abs(rig.task.pile_chain_yaw_mid_ - .9f) < .0001f);
-        } else assert(rig.task.sweepDone() == 1 && !rig.task.sweepChainOpen());
-        rig.report(state == PushState::SCATTER ? "scatter_push_completion_closes_parent_chain" :
-                   state == PushState::APPROACH ? "approach_push_completion_restores_parent_budget" : "pile_completion_keeps_parent_midpoint");
+        } else
+            assert(rig.task.sweepDone() == 1 && !rig.task.sweepChainOpen());
+        rig.report(state == PushState::SCATTER ? "scatter_push_completion_closes_parent_chain"
+                   : state == PushState::APPROACH
+                       ? "approach_push_completion_restores_parent_budget"
+                       : "pile_completion_keeps_parent_midpoint");
     }
     {
         Rig rig(parameters);
@@ -424,12 +449,15 @@ void pushAndParentLifecycle() {
         rig.input.clutter_ts_us = 0;
         rig.tick();
         assert(rig.output.reason == "disperse_turn" && rig.output.state == state);
-        rig.report(state == PushState::SCATTER ? "scatter_active_turn_survives_missing_clutter" : "approach_active_turn_survives_missing_clutter");
+        rig.report(state == PushState::SCATTER ? "scatter_active_turn_survives_missing_clutter"
+                                               : "approach_active_turn_survives_missing_clutter");
         rig.input.heading_valid = false;
         rig.tick();
-        assert(rig.output.reason == (state == PushState::SCATTER ? "blind_scatter_no_heading" : "sweep_upright_no_heading"));
+        assert(rig.output.reason == (state == PushState::SCATTER ? "blind_scatter_no_heading"
+                                                                 : "sweep_upright_no_heading"));
         rig.stationary();
-        rig.report(state == PushState::SCATTER ? "scatter_parent_heading_loss_closes_chain" : "approach_parent_heading_loss_closes_chain");
+        rig.report(state == PushState::SCATTER ? "scatter_parent_heading_loss_closes_chain"
+                                               : "approach_parent_heading_loss_closes_chain");
     }
     {
         auto framed = tuning();
@@ -472,7 +500,8 @@ void pushAndParentLifecycle() {
         rig.finishTurn();
         rig.input.reset = true;
         rig.tick();
-        assert(rig.output.reason == "reset" && rig.task.sweepDone() == 0 && !rig.task.sweepChainOpen());
+        assert(rig.output.reason == "reset" && rig.task.sweepDone() == 0 &&
+               !rig.task.sweepChainOpen());
         rig.report("explicit_reset_discards_pending_push_and_sweep_usage");
         rig.input.reset = false;
         rig.input.heading_rad = 0;

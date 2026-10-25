@@ -36,7 +36,9 @@ struct Fixture {
         context.hold_center = .12f;
     }
 
-    PushInResult update() { return stage.update(tuning, context, cargo); }
+    PushInResult update() {
+        return stage.update(tuning, context, cargo);
+    }
 
     PushInResult at(uint64_t now_us, uint64_t elapsed_us) {
         context.now_us = now_us;
@@ -53,16 +55,23 @@ struct Fixture {
     }
 };
 
-void expect(const PushInResult& result, PushInOutcome outcome,
-            const std::string& reason, bool drive = false) {
+void expect(const PushInResult& result,
+            PushInOutcome outcome,
+            const std::string& reason,
+            bool drive = false) {
     CHECK(result.outcome == outcome);
     CHECK(result.reason == reason);
     CHECK(result.drive == drive);
-    if (!drive) CHECK(result.vx == 0 && result.wz == 0);
+    if (!drive)
+        CHECK(result.vx == 0 && result.wz == 0);
 }
 
-void event(const PushInResult& result, size_t index, PushInEventKind kind,
-           const std::string& text, const cv::Point2f& position, bool visible) {
+void event(const PushInResult& result,
+           size_t index,
+           PushInEventKind kind,
+           const std::string& text,
+           const cv::Point2f& position,
+           bool visible) {
     CHECK(index < result.events.size());
     const auto& actual = result.events[index];
     CHECK(actual.kind == kind);
@@ -181,7 +190,8 @@ void alignmentTurnsBeforeDepthAndSuppressesTheStuckWatchdog() {
     CHECK(expired.reset_cargo_reference && expired.events.size() == 2);
     CHECK(expired.events[0].kind == PushInEventKind::Text);
     CHECK(expired.events[0].text ==
-          "[CARGO_ZONE] event=push_align_giveup half=supply bearing_deg=-45.0 body_x=0.200 body_y=0.320 seen=1 waited_ms=3000\n");
+          "[CARGO_ZONE] event=push_align_giveup half=supply bearing_deg=-45.0 body_x=0.200 "
+          "body_y=0.320 seen=1 waited_ms=3000\n");
     event(expired, 1, PushInEventKind::DropZone, "push_done", fixture.context.hold, false);
 }
 
@@ -218,7 +228,8 @@ void alignmentFreshnessAndPrepareControlItsLifecycle() {
     expect(straight, PushInOutcome::Continue, "assumed_push_in_visual", true);
     CHECK(straight.reset_cargo_reference && straight.events.size() == 1);
     CHECK(straight.events[0].text ==
-          "[CARGO_ZONE] event=push_aligned half=injured bearing_deg=-0.0 body_x=0.000 body_y=0.320 seen=1 waited_ms=0\n");
+          "[CARGO_ZONE] event=push_aligned half=injured bearing_deg=-0.0 body_x=0.000 body_y=0.320 "
+          "seen=1 waited_ms=0\n");
 }
 
 void confirmationCanExtendAndThenCompleteWithoutACargoFix() {
@@ -245,7 +256,7 @@ void confirmationCanExtendAndThenCompleteWithoutACargoFix() {
     Fixture visible_without_fix;
     visible_without_fix.tuning.assume_enter_confirm = true;
     visible_without_fix.context.hold.y = visible_without_fix.tuning.assume_push_depth_m +
-                                        visible_without_fix.tuning.assume_overshoot_m;
+                                         visible_without_fix.tuning.assume_overshoot_m;
     visible_without_fix.visible(visible_without_fix.tuning.assume_enter_true_y_m);
     visible_without_fix.cargo.fixed = false;
     const auto real = visible_without_fix.update();
@@ -260,14 +271,22 @@ void confirmationStopsAtMaximumDepthOrExtraBudget() {
         fixture.tuning.assume_enter_confirm = true;
         fixture.tuning.assume_enter_hold_y_m = 1;
         fixture.context.hold.y = fixture.tuning.assume_enter_max_hold_y_m - .001f;
-        fixture.context.elapsed_us = fixture.tuning.enter_budget_us + fixture.tuning.assume_enter_extra_us - 1;
+        fixture.context.elapsed_us =
+            fixture.tuning.enter_budget_us + fixture.tuning.assume_enter_extra_us - 1;
         expect(fixture.update(), PushInOutcome::Continue, "assumed_push_in_visual", true);
-        if (maximum_depth) fixture.context.hold.y = fixture.tuning.assume_enter_max_hold_y_m;
-        else ++fixture.context.elapsed_us;
+        if (maximum_depth)
+            fixture.context.hold.y = fixture.tuning.assume_enter_max_hold_y_m;
+        else
+            ++fixture.context.elapsed_us;
         const auto stopped = fixture.update();
         expect(stopped, PushInOutcome::Complete, "assumed_push_in_done");
         CHECK(stopped.events.size() == 2);
-        event(stopped, 0, PushInEventKind::Cargo, "push_unconfirmed_giveup", fixture.cargo.rear, false);
+        event(stopped,
+              0,
+              PushInEventKind::Cargo,
+              "push_unconfirmed_giveup",
+              fixture.cargo.rear,
+              false);
         event(stopped, 1, PushInEventKind::DropZone, "push_done", fixture.context.hold, false);
     }
 
@@ -325,14 +344,18 @@ void visualReferenceFreshnessAndPursuitHaveInclusiveBoundaries() {
     fixture.cargo.body.x = .2f;
     fixture.cargo.seen_us = fixture.context.now_us - 400000;
     expect(fixture.update(), PushInOutcome::Continue, "assumed_push_in_pursuit", true);
-    expect(fixture.at(fixture.context.now_us + 1, 2), PushInOutcome::Continue,
-           "assumed_push_in_hold_heading", true);
+    expect(fixture.at(fixture.context.now_us + 1, 2),
+           PushInOutcome::Continue,
+           "assumed_push_in_hold_heading",
+           true);
 
     Fixture reference;
     reference.context.visual_reference_seen_us = reference.context.now_us - 400000;
     expect(reference.update(), PushInOutcome::Continue, "assumed_push_in_visual", true);
-    expect(reference.at(reference.context.now_us + 1, 2), PushInOutcome::Continue,
-           "assumed_push_in_dead_reckoning", true);
+    expect(reference.at(reference.context.now_us + 1, 2),
+           PushInOutcome::Continue,
+           "assumed_push_in_dead_reckoning",
+           true);
 }
 
 void probePulseBoundariesAndPrepareHistory() {

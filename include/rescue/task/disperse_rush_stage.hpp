@@ -17,7 +17,10 @@ struct DisperseRushContext {
     cv::Point2f target_body{0.f, 0.f};
 };
 
-enum class DisperseRushOutcome { Continue, Complete };
+enum class DisperseRushOutcome {
+    Continue,
+    Complete
+};
 
 struct DisperseRushResult {
     DisperseRushOutcome outcome = DisperseRushOutcome::Continue;
@@ -31,17 +34,29 @@ struct DisperseRushResult {
 };
 
 class DisperseRushStage {
-public:
+  public:
     void beginSweep(bool pending);
     void clear();
-    void clearFlags() { pending_ = active_ = false; }
-    bool planActive() const { return active_; }
-    bool planPending() const { return pending_; }
-    float capPositive() const { return cap_positive_; }
-    float capNegative() const { return cap_negative_; }
+    void clearFlags() {
+        pending_ = active_ = false;
+    }
+    bool planActive() const {
+        return active_;
+    }
+    bool planPending() const {
+        return pending_;
+    }
+    float capPositive() const {
+        return cap_positive_;
+    }
+    float capNegative() const {
+        return cap_negative_;
+    }
     // The parent applies the plan, the swing transition and every motion permission check.
-    DisperseRushResult update(const TaskTuning&, const PushObservation&, const DisperseRushContext&);
-private:
+    DisperseRushResult
+    update(const TaskTuning&, const PushObservation&, const DisperseRushContext&);
+
+  private:
     bool pending_ = false, active_ = false;
     float cap_positive_ = 99.f, cap_negative_ = 99.f;
 };

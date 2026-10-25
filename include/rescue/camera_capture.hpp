@@ -15,27 +15,32 @@ namespace rescue {
 
 struct CameraFrame {
     cv::Mat image;
-    ModelImage prepared; // Same decoded frame, immutable until inference completes.
-    uint64_t timestamp_us = 0; // Host read completion: before decode in raw mode, after decode in legacy mode; not exposure.
+    ModelImage prepared;       // Same decoded frame, immutable until inference completes.
+    uint64_t timestamp_us = 0; // Host read completion: before decode in raw mode, after decode in
+                               // legacy mode; not exposure.
     uint64_t epoch_ns = 0;
     uint64_t frame_number = 0;
 };
 
 class CameraCapture {
-public:
+  public:
     CameraCapture(int index, int width, int height, int fps, int model_size = 0);
     ~CameraCapture();
-    CameraCapture(const CameraCapture &) = delete;
-    CameraCapture &operator=(const CameraCapture &) = delete;
+    CameraCapture(const CameraCapture&) = delete;
+    CameraCapture& operator=(const CameraCapture&) = delete;
 
     bool start();
     void stop();
-    bool latest(CameraFrame &out) const;
-    bool waitNext(uint64_t after, CameraFrame &out, int timeout_ms);
-    bool isRunning() const { return running_.load(); }
-    uint64_t droppedFrames() const { return dropped_frames_.load(); }
+    bool latest(CameraFrame& out) const;
+    bool waitNext(uint64_t after, CameraFrame& out, int timeout_ms);
+    bool isRunning() const {
+        return running_.load();
+    }
+    uint64_t droppedFrames() const {
+        return dropped_frames_.load();
+    }
 
-private:
+  private:
     void captureLoop();
     void decodeLoop();
     struct CompressedFrame {

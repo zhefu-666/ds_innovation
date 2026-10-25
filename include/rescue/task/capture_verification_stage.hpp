@@ -16,7 +16,14 @@ struct CaptureVerificationContext {
     bool first_ordinary_delivered;
 };
 
-enum class CaptureVerificationOutcome { Continue, Verified, Assumed, CaptureFail, AbortDrop, SafeStop };
+enum class CaptureVerificationOutcome {
+    Continue,
+    Verified,
+    Assumed,
+    CaptureFail,
+    AbortDrop,
+    SafeStop
+};
 
 struct CaptureVerificationResult {
     CaptureVerificationOutcome outcome = CaptureVerificationOutcome::Continue;
@@ -28,12 +35,13 @@ struct CaptureVerificationResult {
 };
 
 class CaptureVerificationStage {
-public:
+  public:
     // Start a new verification attempt; cancellation and trip reset discard its evidence.
     void reset();
-    CaptureVerificationResult update(const PushObservation&, const TaskTuning&,
-                                     const CaptureVerificationContext&);
-private:
+    CaptureVerificationResult
+    update(const PushObservation&, const TaskTuning&, const CaptureVerificationContext&);
+
+  private:
     int confirmations_ = 0;
     Inventory seen_;
     int observed_frames_ = 0, label_frames_ = 0, bad_frames_ = 0;

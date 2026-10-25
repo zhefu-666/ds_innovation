@@ -26,7 +26,13 @@ struct ReleasedCargoEvidence {
     uint64_t timestamp_us = 0;
 };
 
-enum class ReleaseRetreatOutcome { Continue, PushIn, VerifyDelivery, InsideAfterRelease, Fault };
+enum class ReleaseRetreatOutcome {
+    Continue,
+    PushIn,
+    VerifyDelivery,
+    InsideAfterRelease,
+    Fault
+};
 
 struct ReleaseRetreatResult {
     ReleaseRetreatOutcome outcome = ReleaseRetreatOutcome::Continue;
@@ -36,15 +42,19 @@ struct ReleaseRetreatResult {
 };
 
 class ReleaseRetreatStage {
-public:
+  public:
     // Fresh release clears the confirmation count but retains the last cargo timestamp.
     void beginReleaseBackOff(float hold_y);
     void beginRepushBackOff(float hold_y);
     void clearTrip();
-    bool needsCargoTracking() const { return prepush_; }
+    bool needsCargoTracking() const {
+        return prepush_;
+    }
     // Called only after the parent has confirmed the camera and open frame are ready.
-    ReleaseRetreatResult update(const TaskTuning&, const ReleaseRetreatContext&, const ReleasedCargoEvidence&);
-private:
+    ReleaseRetreatResult
+    update(const TaskTuning&, const ReleaseRetreatContext&, const ReleasedCargoEvidence&);
+
+  private:
     bool prepush_ = false;
     float start_hold_y_ = 0;
     int inside_count_ = 0;

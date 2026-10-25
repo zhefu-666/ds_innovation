@@ -24,17 +24,25 @@ struct DecisionTelemetry {
 // A bounded, optional observation path. The worker never opens the camera or UART.
 // One atomic snapshot in tmpfs is consumed by the separate Foxglove bridge.
 class TelemetryPublisher {
-public:
-    explicit TelemetryPublisher(const Config& config, const std::string& effective_config_json = {});
+  public:
+    explicit TelemetryPublisher(const Config& config,
+                                const std::string& effective_config_json = {});
     ~TelemetryPublisher();
     TelemetryPublisher(const TelemetryPublisher&) = delete;
     TelemetryPublisher& operator=(const TelemetryPublisher&) = delete;
-    void submit(const cv::Mat& annotated, const std::vector<SegDetection>& detections,
-                const PushObservation& observation, const PushOutput& output,
-                uint64_t epoch_ns, uint64_t sequence, double loop_fps,
-                double inference_ms, double capture_ms, const ImuSnapshot& imu = {},
+    void submit(const cv::Mat& annotated,
+                const std::vector<SegDetection>& detections,
+                const PushObservation& observation,
+                const PushOutput& output,
+                uint64_t epoch_ns,
+                uint64_t sequence,
+                double loop_fps,
+                double inference_ms,
+                double capture_ms,
+                const ImuSnapshot& imu = {},
                 const DecisionTelemetry& decision = {}) noexcept;
-private:
+
+  private:
     struct Snapshot {
         cv::Mat frame;
         std::vector<SegDetection> detections;
@@ -58,4 +66,4 @@ private:
     int lock_fd_ = -1;
     std::thread worker_;
 };
-}
+} // namespace rescue

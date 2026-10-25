@@ -14,7 +14,11 @@ struct DisperseSwingContext {
     bool burst = false, approach_fast = false;
 };
 
-enum class DisperseSwingOutcome { Continue, NextPass, Complete };
+enum class DisperseSwingOutcome {
+    Continue,
+    NextPass,
+    Complete
+};
 
 struct DisperseSwingResult {
     DisperseSwingOutcome outcome = DisperseSwingOutcome::Continue;
@@ -26,17 +30,34 @@ struct DisperseSwingResult {
 };
 
 class DisperseSwingStage {
-public:
-    void configure(int passes, int swings) { pass_ = 0; pass_limit_ = passes; swing_limit_ = swings; }
-    void beginSwing() { swing_count_ = 0; }
-    void restartPass() { pass_ = 0; }
-    int swingCount() const { return swing_count_; }
-    int pass() const { return pass_; }
-    int passLimit() const { return pass_limit_; }
-    int swingLimit() const { return swing_limit_; }
+  public:
+    void configure(int passes, int swings) {
+        pass_ = 0;
+        pass_limit_ = passes;
+        swing_limit_ = swings;
+    }
+    void beginSwing() {
+        swing_count_ = 0;
+    }
+    void restartPass() {
+        pass_ = 0;
+    }
+    int swingCount() const {
+        return swing_count_;
+    }
+    int pass() const {
+        return pass_;
+    }
+    int passLimit() const {
+        return pass_limit_;
+    }
+    int swingLimit() const {
+        return swing_limit_;
+    }
     // The parent applies progress events and preserves every motion permission check.
     DisperseSwingResult update(const TaskTuning&, const DisperseSwingContext&);
-private:
+
+  private:
     int swing_count_ = 0, pass_ = 0, pass_limit_ = 1, swing_limit_ = 6;
 };
 } // namespace rescue

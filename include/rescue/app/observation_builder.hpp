@@ -17,11 +17,11 @@ class SensorFusion;
 
 namespace app {
 struct ObservationContext {
-    const PushTask &task;
-    const PushOutput &previous;
-    const UARTController *feedback;
-    const HipnucImu *imu;
-    const MotionWatch &motion_watch;
+    const PushTask& task;
+    const PushOutput& previous;
+    const UARTController* feedback;
+    const HipnucImu* imu;
+    const MotionWatch& motion_watch;
     bool motion_link_enabled;
 };
 
@@ -40,25 +40,34 @@ struct ObservationResult {
 };
 
 class ObservationBuilder {
-public:
-    ObservationBuilder(const ResolvedRuntimeConfig &config, GeometryPipeline *geometry,
-                       const CameraCalibration &vref_calibration, bool vref_ready,
-                       const ZoneGeometry &zone_geometry, const ZoneColorClassifier &zone_colors,
-                       ControlledField &controlled_field, SensorFusion &fusion);
-    ObservationResult build(const cv::Mat &frame, const PerceptionResult &vision_result,
-                            std::vector<SegDetection> detections, uint64_t frame_sequence,
-                            uint64_t timestamp, const ObservationContext &context);
-    const HoldDiagnostics &holdDiagnostics() const { return capture_.diagnostics(); }
+  public:
+    ObservationBuilder(const ResolvedRuntimeConfig& config,
+                       GeometryPipeline* geometry,
+                       const CameraCalibration& vref_calibration,
+                       bool vref_ready,
+                       const ZoneGeometry& zone_geometry,
+                       const ZoneColorClassifier& zone_colors,
+                       ControlledField& controlled_field,
+                       SensorFusion& fusion);
+    ObservationResult build(const cv::Mat& frame,
+                            const PerceptionResult& vision_result,
+                            std::vector<SegDetection> detections,
+                            uint64_t frame_sequence,
+                            uint64_t timestamp,
+                            const ObservationContext& context);
+    const HoldDiagnostics& holdDiagnostics() const {
+        return capture_.diagnostics();
+    }
 
-private:
-    const ResolvedRuntimeConfig &config_;
-    GeometryPipeline *geometry_;
-    const CameraCalibration &vref_calibration_;
+  private:
+    const ResolvedRuntimeConfig& config_;
+    GeometryPipeline* geometry_;
+    const CameraCalibration& vref_calibration_;
     bool vref_ready_;
-    const ZoneGeometry &zone_geometry_;
-    const ZoneColorClassifier &zone_colors_;
-    ControlledField &controlled_field_;
-    SensorFusion &fusion_;
+    const ZoneGeometry& zone_geometry_;
+    const ZoneColorClassifier& zone_colors_;
+    ControlledField& controlled_field_;
+    SensorFusion& fusion_;
     CaptureMonitor capture_;
     PixelSelector pixel_selector_;
     uint64_t progress_ref_us_ = 0;

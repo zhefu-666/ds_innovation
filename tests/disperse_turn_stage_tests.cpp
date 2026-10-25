@@ -12,16 +12,21 @@ using namespace rescue;
 
 namespace {
 void check(bool condition, const char* expression, int line) {
-    if (!condition) throw std::runtime_error("line " + std::to_string(line) + ": " + expression);
+    if (!condition)
+        throw std::runtime_error("line " + std::to_string(line) + ": " + expression);
 }
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
-void expect(const DisperseTurnResult& result, DisperseTurnOutcome outcome,
-            DisperseTurnMotion motion, const char* reason = nullptr) {
+void expect(const DisperseTurnResult& result,
+            DisperseTurnOutcome outcome,
+            DisperseTurnMotion motion,
+            const char* reason = nullptr) {
     CHECK(result.outcome == outcome);
     CHECK(result.motion == motion);
-    CHECK(reason ? result.reason && std::string(result.reason) == reason : result.reason == nullptr);
-    if (motion != DisperseTurnMotion::Turn) CHECK(result.direction == 0);
+    CHECK(reason ? result.reason && std::string(result.reason) == reason
+                 : result.reason == nullptr);
+    if (motion != DisperseTurnMotion::Turn)
+        CHECK(result.direction == 0);
 }
 
 struct Fixture {
@@ -56,8 +61,12 @@ struct Fixture {
         stage.begin(true);
     }
 
-    void crowded() { observation.clutter_body = {{-.1f, .5f}, {.1f, .5f}}; }
-    void fresh() { observation.clutter_ts_us = context.now_us; }
+    void crowded() {
+        observation.clutter_body = {{-.1f, .5f}, {.1f, .5f}};
+    }
+    void fresh() {
+        observation.clutter_ts_us = context.now_us;
+    }
 
     DisperseTurnResult update() {
         const auto result = stage.update(observation, tuning, context);
@@ -84,7 +93,10 @@ struct Fixture {
         observation.clutter_body.clear();
         expect(start(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
         observation.heading_rad = tuning.disperse_turn_min_rad;
-        expect(update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_look");
+        expect(update(),
+               DisperseTurnOutcome::Continue,
+               DisperseTurnMotion::None,
+               "disperse_frame_look");
         CHECK(stage.phase() == DisperseTurnPhase::FrameCheck && stage.needsFrameView());
     }
 };
@@ -102,12 +114,15 @@ void lifecycleAndFreshLookDeadline() {
     CHECK(fixture.stage.phase() == DisperseTurnPhase::Look);
     fixture.context.camera_ready = false;
     fixture.fresh();
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_look");
+    expect(
+        fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_look");
     fixture.context.camera_ready = true;
     fixture.observation.clutter_ts_us = 0;
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_look");
+    expect(
+        fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_look");
     fixture.context.now_us += fixture.tuning.disperse_turn_look_us - 1;
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_look");
+    expect(
+        fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_look");
     ++fixture.context.now_us;
     fixture.context.fallback_direction = -1;
     const auto timeout = fixture.update();
@@ -115,7 +130,8 @@ void lifecycleAndFreshLookDeadline() {
     CHECK(timeout.turn_started && timeout.direction == -1);
     fixture.stage.begin(true);
     fixture.context.now_us += 1000;
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_look");
+    expect(
+        fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_look");
     CHECK(fixture.stage.phase() == DisperseTurnPhase::Look);
 }
 
@@ -130,20 +146,22 @@ void beginRestartsConfirmationHistory() {
     const auto restarted = fixture.start();
     CHECK(restarted.motion == DisperseTurnMotion::Turn);
     fixture.observation.heading_rad = .5f;
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
+    expect(
+        fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
     expect(fixture.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
     CHECK(!fixture.stage.active());
 }
 
 void directionUsesEmptierSideThenTheFallback() {
-    struct Case { std::vector<cv::Point2f> points; float fallback, expected; };
-    const Case cases[] = {
-        {{{-.1f, .5f}, {-.2f, .5f}}, 1, -1},
-        {{{.1f, .5f}, {.2f, .5f}}, -1, 1},
-        {{{-.1f, .5f}, {.1f, .5f}}, -1, -1},
-        {{}, 1, 1},
-        {{{0, .5f}}, -1, 1}
+    struct Case {
+        std::vector<cv::Point2f> points;
+        float fallback, expected;
     };
+    const Case cases[] = {{{{-.1f, .5f}, {-.2f, .5f}}, 1, -1},
+                          {{{.1f, .5f}, {.2f, .5f}}, -1, 1},
+                          {{{-.1f, .5f}, {.1f, .5f}}, -1, -1},
+                          {{}, 1, 1},
+                          {{{0, .5f}}, -1, 1}};
     for (const auto& item : cases) {
         Fixture fixture;
         fixture.observation.clutter_body = item.points;
@@ -162,10 +180,12 @@ void lookRequiresAnAtOrAfterReadyFreshNonfutureFrame() {
         fixture.observation.clutter_ts_us = 0;
         fixture.update();
         fixture.context.now_us += 100;
-        fixture.observation.clutter_ts_us = static_cast<uint64_t>(static_cast<int64_t>(fixture.context.now_us) - age);
+        fixture.observation.clutter_ts_us =
+            static_cast<uint64_t>(static_cast<int64_t>(fixture.context.now_us) - age);
         const auto result = fixture.update();
         CHECK(result.turn_started == (age == 100));
-        CHECK(fixture.stage.phase() == (age == 100 ? DisperseTurnPhase::Turn : DisperseTurnPhase::Look));
+        CHECK(fixture.stage.phase() ==
+              (age == 100 ? DisperseTurnPhase::Turn : DisperseTurnPhase::Look));
     }
     Fixture fixture;
     fixture.observation.clutter_ts_us = fixture.context.now_us - 1;
@@ -179,10 +199,16 @@ void viewGeometryKeepsInclusiveOuterBoundsAndSkipsInvalidPoints() {
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const float infinity = std::numeric_limits<float>::infinity();
     const float front = fixture.tuning.sweep_frame_front_m + .03f;
-    fixture.observation.clutter_body = {
-        {.1f, .5f}, {nan, .5f}, {-.1f, nan}, {-infinity, .5f}, {-.1f, infinity},
-        {-2, .5f}, {-1, .2f}, {-.01f, front}, {-.1f, 0}, {-.1f, -.5f}
-    };
+    fixture.observation.clutter_body = {{.1f, .5f},
+                                        {nan, .5f},
+                                        {-.1f, nan},
+                                        {-infinity, .5f},
+                                        {-.1f, infinity},
+                                        {-2, .5f},
+                                        {-1, .2f},
+                                        {-.01f, front},
+                                        {-.1f, 0},
+                                        {-.1f, -.5f}};
     fixture.context.fallback_direction = -1;
     CHECK(fixture.start().direction == 1);
 
@@ -204,7 +230,10 @@ void repeatedFreshFramesCountDuringTurnAndStaleFramesPreserveHistory() {
     duplicate.observation.clutter_body.clear();
     duplicate.start();
     duplicate.observation.heading_rad = .5f;
-    expect(duplicate.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
+    expect(duplicate.update(),
+           DisperseTurnOutcome::Continue,
+           DisperseTurnMotion::Turn,
+           "disperse_turn");
     expect(duplicate.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
 
     for (const bool future : {false, true}) {
@@ -213,8 +242,12 @@ void repeatedFreshFramesCountDuringTurnAndStaleFramesPreserveHistory() {
         fixture.start();
         fixture.observation.heading_rad = .5f;
         fixture.context.now_us += fixture.tuning.sweep_fresh_us + 1;
-        if (future) fixture.observation.clutter_ts_us = fixture.context.now_us + 1;
-        expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
+        if (future)
+            fixture.observation.clutter_ts_us = fixture.context.now_us + 1;
+        expect(fixture.update(),
+               DisperseTurnOutcome::Continue,
+               DisperseTurnMotion::Turn,
+               "disperse_turn");
         fixture.fresh();
         expect(fixture.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
     }
@@ -228,7 +261,8 @@ void crowdedFreshFramesResetTurnConfirmation() {
     fixture.crowded();
     fixture.update();
     fixture.observation.clutter_body.clear();
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
+    expect(
+        fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
     expect(fixture.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
 }
 
@@ -237,7 +271,8 @@ void minimumAngleAndPlannedCapsUseTheirOriginalBoundaries() {
     minimum.observation.clutter_body.clear();
     minimum.start();
     minimum.observation.heading_rad = .499f;
-    expect(minimum.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
+    expect(
+        minimum.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
     minimum.observation.heading_rad = .5f;
     expect(minimum.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
 
@@ -250,7 +285,10 @@ void minimumAngleAndPlannedCapsUseTheirOriginalBoundaries() {
         fixture.start();
         fixture.context.camera_ready = false;
         fixture.observation.heading_rad = direction * .374f;
-        expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
+        expect(fixture.update(),
+               DisperseTurnOutcome::Continue,
+               DisperseTurnMotion::Turn,
+               "disperse_turn");
         fixture.observation.heading_rad = direction * .375f;
         expect(fixture.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
     }
@@ -261,7 +299,8 @@ void turnTimeoutIsExclusiveAndLeavesTheCompletionReasonEmpty() {
     fixture.start();
     fixture.context.now_us += fixture.tuning.disperse_swing_budget_us;
     fixture.context.camera_ready = false;
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
+    expect(
+        fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn");
     ++fixture.context.now_us;
     const auto result = fixture.update();
     expect(result, DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
@@ -280,10 +319,15 @@ void frameChecksRequireMidPitchAndDeduplicateTimestamps() {
     Fixture fixture;
     fixture.frameCheck();
     const auto first = fixture.update();
-    expect(first, DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_confirm");
-    CHECK(first.frame_event && first.frame_count == 0 && first.confirmations == 1 && first.turned == .5f);
+    expect(
+        first, DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_confirm");
+    CHECK(first.frame_event && first.frame_count == 0 && first.confirmations == 1 &&
+          first.turned == .5f);
     const auto duplicate = fixture.update();
-    expect(duplicate, DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_confirm");
+    expect(duplicate,
+           DisperseTurnOutcome::Continue,
+           DisperseTurnMotion::None,
+           "disperse_frame_confirm");
     CHECK(!duplicate.frame_event);
     ++fixture.context.now_us;
     fixture.fresh();
@@ -299,14 +343,24 @@ void lowFrameGeometryHasInclusiveSidesAndFrontButExcludesTheOrigin() {
     const float range = fixture.tuning.disperse_turn_frame_range_m;
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const float infinity = std::numeric_limits<float>::infinity();
-    fixture.observation.clutter_body = {
-        {half, range}, {-half, range}, {0, .01f},
-        {half + .001f, .1f}, {-half - .001f, .1f}, {0, range + .001f},
-        {0, 0}, {0, -.01f}, {nan, .1f}, {0, nan}, {infinity, .1f}, {0, infinity}
-    };
+    fixture.observation.clutter_body = {{half, range},
+                                        {-half, range},
+                                        {0, .01f},
+                                        {half + .001f, .1f},
+                                        {-half - .001f, .1f},
+                                        {0, range + .001f},
+                                        {0, 0},
+                                        {0, -.01f},
+                                        {nan, .1f},
+                                        {0, nan},
+                                        {infinity, .1f},
+                                        {0, infinity}};
     fixture.tuning.disperse_turn_frame_max = 3;
     const auto boundary = fixture.update();
-    expect(boundary, DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_confirm");
+    expect(boundary,
+           DisperseTurnOutcome::Continue,
+           DisperseTurnMotion::None,
+           "disperse_frame_confirm");
     CHECK(boundary.frame_event && boundary.frame_count == 3 && boundary.confirmations == 1);
     fixture.tuning.disperse_turn_frame_max = 2;
     ++fixture.context.now_us;
@@ -322,17 +376,22 @@ void lowFramesMustBeAtOrAfterReadinessFreshAndNotFromTheFuture() {
         fixture.frameCheck();
         fixture.observation.clutter_ts_us = 0;
         fixture.context.camera_ready = false;
-        expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_look");
+        expect(fixture.update(),
+               DisperseTurnOutcome::Continue,
+               DisperseTurnMotion::None,
+               "disperse_frame_look");
         fixture.context.now_us += 10;
         fixture.context.camera_ready = true;
         fixture.observation.clutter_ts_us = fixture.context.now_us - 1;
         CHECK(!fixture.update().frame_event);
         fixture.context.now_us += 100;
-        fixture.observation.clutter_ts_us = static_cast<uint64_t>(static_cast<int64_t>(fixture.context.now_us) - age);
+        fixture.observation.clutter_ts_us =
+            static_cast<uint64_t>(static_cast<int64_t>(fixture.context.now_us) - age);
         const auto result = fixture.update();
         CHECK(result.frame_event == (age == 100));
         CHECK(fixture.stage.phase() == DisperseTurnPhase::FrameCheck);
-        if (age == 100) CHECK(result.confirmations == 1);
+        if (age == 100)
+            CHECK(result.confirmations == 1);
     }
 }
 
@@ -340,9 +399,15 @@ void lowFrameFirstObservationTimeoutIsInclusive() {
     Fixture fixture;
     fixture.frameCheck();
     fixture.observation.clutter_ts_us = 0;
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_look");
+    expect(fixture.update(),
+           DisperseTurnOutcome::Continue,
+           DisperseTurnMotion::None,
+           "disperse_frame_look");
     fixture.context.now_us += fixture.tuning.disperse_turn_look_us - 1;
-    expect(fixture.update(), DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_look");
+    expect(fixture.update(),
+           DisperseTurnOutcome::Continue,
+           DisperseTurnMotion::None,
+           "disperse_frame_look");
     ++fixture.context.now_us;
     expect(fixture.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
 }
@@ -352,13 +417,15 @@ void lowFrameCapsAndTimeoutPrecedeCameraReadiness() {
         Fixture fixture;
         fixture.frameCheck();
         fixture.context.camera_ready = false;
-        if (cause == 0) fixture.observation.heading_rad += fixture.tuning.disperse_turn_frame_extra_rad;
+        if (cause == 0)
+            fixture.observation.heading_rad += fixture.tuning.disperse_turn_frame_extra_rad;
         if (cause == 1) {
             fixture.context.swing_plan_active = true;
             fixture.context.cap_positive = .75f;
             fixture.observation.heading_rad = .625f;
         }
-        if (cause == 2) fixture.context.now_us += fixture.tuning.disperse_swing_budget_us + 1;
+        if (cause == 2)
+            fixture.context.now_us += fixture.tuning.disperse_swing_budget_us + 1;
         expect(fixture.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
     }
 }
@@ -377,13 +444,17 @@ void clearConfirmationPreservesPhaseDirectionAndLowFrameDeduplication() {
     fixture.stage.clearConfirmation();
     CHECK(fixture.stage.needsFrameView());
     const auto duplicate = fixture.update();
-    expect(duplicate, DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn_frame");
+    expect(
+        duplicate, DisperseTurnOutcome::Continue, DisperseTurnMotion::Turn, "disperse_turn_frame");
     CHECK(!duplicate.frame_event && duplicate.direction == -1);
     ++fixture.context.now_us;
     fixture.fresh();
     const auto first_after_clear = fixture.update();
     CHECK(first_after_clear.frame_event && first_after_clear.confirmations == 1);
-    expect(first_after_clear, DisperseTurnOutcome::Continue, DisperseTurnMotion::None, "disperse_frame_confirm");
+    expect(first_after_clear,
+           DisperseTurnOutcome::Continue,
+           DisperseTurnMotion::None,
+           "disperse_frame_confirm");
     ++fixture.context.now_us;
     fixture.fresh();
     expect(fixture.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
@@ -398,7 +469,8 @@ void oneTickCanStartBothTurningAndPushingWithoutGivingAMotionOrReason() {
     fixture.observation.heading_rad = 3;
     const auto result = fixture.start();
     expect(result, DisperseTurnOutcome::Continue, DisperseTurnMotion::None);
-    CHECK(result.turn_started && result.push_started && fixture.stage.phase() == DisperseTurnPhase::Push);
+    CHECK(result.turn_started && result.push_started &&
+          fixture.stage.phase() == DisperseTurnPhase::Push);
     CHECK(fixture.context.sweep_yaw == 3 && fixture.context.sweep_travel_m == 10);
     CHECK(fixture.context.sweep_start_us == fixture.context.now_us);
 }
@@ -415,13 +487,18 @@ void pushDistanceIsInclusiveAndTheBudgetIsExclusive() {
         CHECK(armed.push_started);
         fixture.context.camera_ready = false;
         fixture.observation.heading_rad = std::numeric_limits<float>::quiet_NaN();
-        if (distance) fixture.context.travel_m += .499f;
-        else fixture.context.now_us += fixture.tuning.disperse_turn_push_budget_us;
+        if (distance)
+            fixture.context.travel_m += .499f;
+        else
+            fixture.context.now_us += fixture.tuning.disperse_turn_push_budget_us;
         const auto pushing = fixture.update();
-        expect(pushing, DisperseTurnOutcome::Continue, DisperseTurnMotion::Push, "disperse_turn_push");
+        expect(
+            pushing, DisperseTurnOutcome::Continue, DisperseTurnMotion::Push, "disperse_turn_push");
         CHECK(!pushing.turn_started && !pushing.push_started);
-        if (distance) fixture.context.travel_m = 10.5f;
-        else ++fixture.context.now_us;
+        if (distance)
+            fixture.context.travel_m = 10.5f;
+        else
+            ++fixture.context.now_us;
         expect(fixture.update(), DisperseTurnOutcome::Complete, DisperseTurnMotion::None);
         CHECK(!fixture.stage.active());
     }

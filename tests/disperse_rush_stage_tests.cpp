@@ -11,7 +11,8 @@ using namespace rescue;
 
 namespace {
 void check(bool condition, const char* expression, int line) {
-    if (!condition) throw std::runtime_error("line " + std::to_string(line) + ": " + expression);
+    if (!condition)
+        throw std::runtime_error("line " + std::to_string(line) + ": " + expression);
 }
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
@@ -56,7 +57,9 @@ struct Fixture {
         return cv::Point2f(-std::sin(bearing) * range, end_y + std::cos(bearing) * range);
     }
 
-    DisperseRushResult update() { return stage.update(tuning, obs, context); }
+    DisperseRushResult update() {
+        return stage.update(tuning, obs, context);
+    }
 };
 
 void defaultStateAndLifecycle() {
@@ -79,7 +82,8 @@ void defaultStateAndLifecycle() {
     f.update();
     CHECK(f.stage.planActive());
     f.stage.clearFlags();
-    CHECK(!f.stage.planActive() && f.stage.capPositive() == .4f); // flags only: caps stay as planned
+    CHECK(!f.stage.planActive() &&
+          f.stage.capPositive() == .4f); // flags only: caps stay as planned
 }
 
 void planNeedsSwitchFreshClutterAndPitch() {
@@ -122,7 +126,8 @@ void planDefersToTheCompletionFrame() {
     f.stage.beginSweep(true);
     expectRush(f.update(), f.tuning.disperse_speed, "disperse_rush");
     CHECK(!f.stage.planActive() && f.stage.planPending());
-    f.context.travel_m = f.context.sweep_travel_m + f.context.rush_distance_m; // travel equality completes
+    f.context.travel_m =
+        f.context.sweep_travel_m + f.context.rush_distance_m; // travel equality completes
     const auto result = f.update();
     CHECK(result.outcome == DisperseRushOutcome::Complete);
     CHECK(result.plan_event && result.outside_n == 1);
@@ -133,10 +138,10 @@ void planSkipsClusterMembersAndFarBlocks() {
     Fixture f;
     f.stage.beginSweep(true);
     f.obs.clutter_body = {
-        {0.f, 1.3f},                    // inside the dispersal cluster
-        {0.f, 3.f},                     // beyond the swing-avoid radius of the rush end
-        Fixture::at(.5f, .5f, 1.f),     // counted
-        Fixture::at(-.5f, .5f, 1.f),    // counted
+        {0.f, 1.3f},                 // inside the dispersal cluster
+        {0.f, 3.f},                  // beyond the swing-avoid radius of the rush end
+        Fixture::at(.5f, .5f, 1.f),  // counted
+        Fixture::at(-.5f, .5f, 1.f), // counted
     };
     const auto result = f.update();
     CHECK(result.plan_event && result.outside_n == 2);

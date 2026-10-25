@@ -20,15 +20,18 @@ struct PerceptionResult {
 // RKNN context is only ever driven by one caller at a time; with --parallel-infer
 // the pose context runs on an async worker while the detector runs here.
 class PerceptionPipeline {
-public:
-    explicit PerceptionPipeline(const Config &config);
-    bool hasPose() const { return pose_ != nullptr; }
-    PerceptionResult infer(const cv::Mat &frame, uint64_t timestamp_us, const ModelImage *prepared = nullptr);
+  public:
+    explicit PerceptionPipeline(const Config& config);
+    bool hasPose() const {
+        return pose_ != nullptr;
+    }
+    PerceptionResult
+    infer(const cv::Mat& frame, uint64_t timestamp_us, const ModelImage* prepared = nullptr);
 
-private:
+  private:
     Config config_;
     std::unique_ptr<IDetector> detector_;
-    YoloRknnDetector *rknn_ = nullptr;
+    YoloRknnDetector* rknn_ = nullptr;
     std::unique_ptr<SafeZoneKeypointRknn> pose_;
 };
 } // namespace rescue

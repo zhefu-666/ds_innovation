@@ -26,6 +26,6 @@ struct LoadedAppConfig {
 
 // Loads one schema-v1 JSON file before explicit CLI arguments. The legacy
 // resolver still determines final tuning and records its later overrides.
-LoadedAppConfig loadAppConfig(int argc, char **argv);
+LoadedAppConfig loadAppConfig(int argc, char** argv);
 
 } // namespace rescue::app

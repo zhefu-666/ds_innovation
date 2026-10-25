@@ -18,8 +18,8 @@ void check(bool condition, const char* expression, int line) {
 }
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
-Inventory inventory(int ordinary, int core = 0, int injured = 0,
-                    int dangerous = 0, int unknown = 0) {
+Inventory
+inventory(int ordinary, int core = 0, int injured = 0, int dangerous = 0, int unknown = 0) {
     Inventory value;
     value.ordinary = ordinary;
     value.core = core;
@@ -47,8 +47,7 @@ struct Fixture {
         tuning.verify_held_contents = true;
     }
 
-    void held(const Inventory& value,
-              std::vector<PushObservation::HeldObject> objects = {}) {
+    void held(const Inventory& value, std::vector<PushObservation::HeldObject> objects = {}) {
         observation.hold_observable = true;
         observation.captured = true;
         observation.held_complete = true;
@@ -63,13 +62,14 @@ struct Fixture {
     }
 
     void weakCore(int track_id = 99, float confidence = .54f) {
-        held(inventory(1, 1), {{7, "ordinary_supply", .9f},
-                               {track_id, "core_supply", confidence}});
+        held(inventory(1, 1), {{7, "ordinary_supply", .9f}, {track_id, "core_supply", confidence}});
     }
 };
 
-void expect(const CaptureVerificationResult& result, CaptureVerificationOutcome outcome,
-            const std::string& reason = "", bool blacklist = false) {
+void expect(const CaptureVerificationResult& result,
+            CaptureVerificationOutcome outcome,
+            const std::string& reason = "",
+            bool blacklist = false) {
     CHECK(result.outcome == outcome);
     CHECK(result.reason == reason);
     CHECK(result.blacklist_target == blacklist);
@@ -101,8 +101,7 @@ void strictMultiviewBoundaries() {
     for (const int verdict : {0, 2}) {
         Fixture negative;
         negative.multiview(negative.pending, verdict);
-        expect(negative.update(1), CaptureVerificationOutcome::SafeStop,
-               "multi_view_unconfirmed");
+        expect(negative.update(1), CaptureVerificationOutcome::SafeStop, "multi_view_unconfirmed");
     }
 }
 
@@ -118,23 +117,24 @@ void multiviewInventoryMustMatchExactly() {
     Fixture mismatch;
     mismatch.multiview(inventory(2));
     const auto wrong_count = mismatch.update(1);
-    expect(wrong_count, CaptureVerificationOutcome::AbortDrop,
-           "multi_grab_inventory_mismatch", true);
+    expect(
+        wrong_count, CaptureVerificationOutcome::AbortDrop, "multi_grab_inventory_mismatch", true);
     CHECK(wrong_count.verdict == RuleVerdict::OK);
 
     Fixture different_kind;
     different_kind.first = true;
     different_kind.pending = inventory(1, 1);
     different_kind.multiview(inventory(2));
-    expect(different_kind.update(1), CaptureVerificationOutcome::AbortDrop,
-           "multi_grab_inventory_mismatch", true);
+    expect(different_kind.update(1),
+           CaptureVerificationOutcome::AbortDrop,
+           "multi_grab_inventory_mismatch",
+           true);
 
     Fixture core_before_first;
     core_before_first.pending = inventory(0, 1);
     core_before_first.multiview(core_before_first.pending);
     const auto illegal = core_before_first.update(1);
-    expect(illegal, CaptureVerificationOutcome::AbortDrop,
-           "multi_grab_core_before_first", true);
+    expect(illegal, CaptureVerificationOutcome::AbortDrop, "multi_grab_core_before_first", true);
     CHECK(illegal.verdict == RuleVerdict::CORE_BEFORE_FIRST);
 
     Fixture empty;
@@ -180,21 +180,22 @@ void assumptionModesAndBoundaries() {
             expect(result, CaptureVerificationOutcome::Assumed, "assumed_capture");
             CHECK(result.inventory == conflict.pending);
         } else {
-            expect(result, CaptureVerificationOutcome::AbortDrop,
-                   "multi_grab_inventory_mismatch", true);
+            expect(result,
+                   CaptureVerificationOutcome::AbortDrop,
+                   "multi_grab_inventory_mismatch",
+                   true);
         }
     }
 
     Fixture carry_only;
     carry_only.tuning.field_carry = true;
-    expect(carry_only.update(8000001), CaptureVerificationOutcome::SafeStop,
-           "multi_view_unconfirmed");
+    expect(
+        carry_only.update(8000001), CaptureVerificationOutcome::SafeStop, "multi_view_unconfirmed");
 
     Fixture valid;
     valid.field();
     valid.multiview(valid.pending);
-    expect(valid.update(1), CaptureVerificationOutcome::Verified,
-           "multi_view_capture_verified");
+    expect(valid.update(1), CaptureVerificationOutcome::Verified, "multi_view_capture_verified");
 
     for (const std::string label : {"ordinary_supply", "core_supply", "injured_person"}) {
         Fixture fallback;
@@ -218,8 +219,10 @@ void assumptionUsesAccumulatedHeldEvidence() {
     Fixture observed_empty;
     observed_empty.field();
     observed_empty.held({});
-    expect(observed_empty.update(8000001), CaptureVerificationOutcome::CaptureFail,
-           "capture_target_not_in_frame", true);
+    expect(observed_empty.update(8000001),
+           CaptureVerificationOutcome::CaptureFail,
+           "capture_target_not_in_frame",
+           true);
 
     Fixture disabled;
     disabled.tuning.field_rush = true;
@@ -242,8 +245,10 @@ void assumptionUsesAccumulatedHeldEvidence() {
     other_kind.field();
     other_kind.first = true;
     other_kind.held(inventory(0, 1));
-    expect(other_kind.update(8000001), CaptureVerificationOutcome::CaptureFail,
-           "capture_target_not_in_frame", true);
+    expect(other_kind.update(8000001),
+           CaptureVerificationOutcome::CaptureFail,
+           "capture_target_not_in_frame",
+           true);
 }
 
 void promptIllegalContents() {
@@ -266,8 +271,10 @@ void promptIllegalContents() {
         fixture.held(test.held);
         expect(fixture.update(1), CaptureVerificationOutcome::Continue);
         const auto result = fixture.update(2);
-        expect(result, CaptureVerificationOutcome::AbortDrop,
-               std::string("held_") + verdictName(test.verdict), true);
+        expect(result,
+               CaptureVerificationOutcome::AbortDrop,
+               std::string("held_") + verdictName(test.verdict),
+               true);
         CHECK(result.verdict == test.verdict);
     }
 
@@ -276,15 +283,17 @@ void promptIllegalContents() {
     disabled_recheck.tuning.held_recheck = false;
     disabled_recheck.weakCore();
     expect(disabled_recheck.update(1), CaptureVerificationOutcome::Continue);
-    expect(disabled_recheck.update(2), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    expect(disabled_recheck.update(2),
+           CaptureVerificationOutcome::AbortDrop,
+           "held_core_before_first",
+           true);
 
     Fixture untracked;
     untracked.field();
     untracked.weakCore(-1, .99f);
     expect(untracked.update(1), CaptureVerificationOutcome::Continue);
-    expect(untracked.update(2), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    expect(
+        untracked.update(2), CaptureVerificationOutcome::AbortDrop, "held_core_before_first", true);
 
     Fixture interrupted;
     interrupted.field();
@@ -312,42 +321,47 @@ void recheckConfirmationThresholds() {
     strong.field();
     strong.weakCore(99, .75f);
     expect(strong.update(1), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
-    expect(strong.update(2), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    expect(strong.update(2), CaptureVerificationOutcome::AbortDrop, "held_core_before_first", true);
 
     Fixture below_threshold;
     below_threshold.field();
     below_threshold.weakCore(99, .749f);
     for (uint64_t frame = 1; frame < 4; ++frame) {
-        expect(below_threshold.update(frame), CaptureVerificationOutcome::Continue,
+        expect(below_threshold.update(frame),
+               CaptureVerificationOutcome::Continue,
                "held_illegal_recheck");
     }
-    expect(below_threshold.update(4), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    expect(below_threshold.update(4),
+           CaptureVerificationOutcome::AbortDrop,
+           "held_core_before_first",
+           true);
 
     Fixture strong_interrupted;
     strong_interrupted.field();
     strong_interrupted.tuning.held_recheck_confirm_frames = 10;
     strong_interrupted.weakCore(99, .9f);
-    expect(strong_interrupted.update(1), CaptureVerificationOutcome::Continue,
-           "held_illegal_recheck");
+    expect(
+        strong_interrupted.update(1), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
     strong_interrupted.weakCore(99, .54f);
-    expect(strong_interrupted.update(2), CaptureVerificationOutcome::Continue,
-           "held_illegal_recheck");
+    expect(
+        strong_interrupted.update(2), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
     strong_interrupted.weakCore(99, .9f);
-    expect(strong_interrupted.update(3), CaptureVerificationOutcome::Continue,
-           "held_illegal_recheck");
-    expect(strong_interrupted.update(4), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    expect(
+        strong_interrupted.update(3), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
+    expect(strong_interrupted.update(4),
+           CaptureVerificationOutcome::AbortDrop,
+           "held_core_before_first",
+           true);
 
     Fixture highest_confidence;
     highest_confidence.field();
-    highest_confidence.held(inventory(0, 2), {{90, "core_supply", .54f},
-                                            {99, "core_supply", .9f}});
-    expect(highest_confidence.update(1), CaptureVerificationOutcome::Continue,
-           "held_illegal_recheck");
-    expect(highest_confidence.update(2), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    highest_confidence.held(inventory(0, 2), {{90, "core_supply", .54f}, {99, "core_supply", .9f}});
+    expect(
+        highest_confidence.update(1), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
+    expect(highest_confidence.update(2),
+           CaptureVerificationOutcome::AbortDrop,
+           "held_core_before_first",
+           true);
 
     for (const bool first : {false, true}) {
         Fixture injured;
@@ -355,8 +369,10 @@ void recheckConfirmationThresholds() {
         injured.first = first;
         injured.held(inventory(1, 0, 1), {{99, "injured_person", .9f}});
         expect(injured.update(1), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
-        expect(injured.update(2), CaptureVerificationOutcome::AbortDrop,
-               first ? "held_injured_not_alone" : "held_injured_before_first", true);
+        expect(injured.update(2),
+               CaptureVerificationOutcome::AbortDrop,
+               first ? "held_injured_not_alone" : "held_injured_before_first",
+               true);
     }
 }
 
@@ -365,14 +381,16 @@ void recheckIdentityAndTimeBoundaries() {
     identity.field();
     identity.weakCore(90);
     for (uint64_t frame = 1; frame <= 3; ++frame) {
-        expect(identity.update(frame), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
+        expect(
+            identity.update(frame), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
     }
     identity.weakCore(91);
     for (uint64_t frame = 4; frame <= 6; ++frame) {
-        expect(identity.update(frame), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
+        expect(
+            identity.update(frame), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
     }
-    expect(identity.update(7), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    expect(
+        identity.update(7), CaptureVerificationOutcome::AbortDrop, "held_core_before_first", true);
 
     Fixture strong_identity;
     strong_identity.field();
@@ -380,8 +398,10 @@ void recheckIdentityAndTimeBoundaries() {
     expect(strong_identity.update(1), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
     strong_identity.weakCore(91, .9f);
     expect(strong_identity.update(2), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
-    expect(strong_identity.update(3), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    expect(strong_identity.update(3),
+           CaptureVerificationOutcome::AbortDrop,
+           "held_core_before_first",
+           true);
 
     Fixture timer;
     timer.field();
@@ -430,8 +450,10 @@ void recheckPreservesExistingBranchOrder() {
     unseen.observation.hold_observable = false;
     CHECK(unseen.update(8000001).outcome == CaptureVerificationOutcome::Continue);
     unseen.held(inventory(1));
-    expect(unseen.update(8000002), CaptureVerificationOutcome::CaptureFail,
-           "held_illegal_unresolved", true);
+    expect(unseen.update(8000002),
+           CaptureVerificationOutcome::CaptureFail,
+           "held_illegal_unresolved",
+           true);
 
     Fixture verified;
     verified.field();
@@ -485,7 +507,8 @@ void singleViewBoundariesAndIllegalEvidence() {
     timed_out.tuning.require_multi_view = false;
     timed_out.held(inventory(1, 0, 0, 1));
     expect(timed_out.update(timed_out.tuning.verify_budget_us + 1),
-           CaptureVerificationOutcome::CaptureFail, "capture_unverified");
+           CaptureVerificationOutcome::CaptureFail,
+           "capture_unverified");
 }
 
 void singleViewNeedsConsecutiveCompleteEvidence() {
@@ -496,11 +519,21 @@ void singleViewNeedsConsecutiveCompleteEvidence() {
         fixture.held(fixture.pending);
         expect(fixture.update(1), CaptureVerificationOutcome::Continue);
         switch (interrupted_gate) {
-        case 0: fixture.observation.hold_observable = false; break;
-        case 1: fixture.observation.captured = false; break;
-        case 2: fixture.observation.held_complete = false; break;
-        case 3: fixture.observation.held = {}; break;
-        case 4: fixture.observation.held = inventory(2); break;
+            case 0:
+                fixture.observation.hold_observable = false;
+                break;
+            case 1:
+                fixture.observation.captured = false;
+                break;
+            case 2:
+                fixture.observation.held_complete = false;
+                break;
+            case 3:
+                fixture.observation.held = {};
+                break;
+            case 4:
+                fixture.observation.held = inventory(2);
+                break;
         }
         expect(fixture.update(2), CaptureVerificationOutcome::Continue);
         fixture.held(fixture.pending);
@@ -514,9 +547,15 @@ void singleViewNeedsConsecutiveCompleteEvidence() {
         fixture.tuning.require_multi_view = false;
         fixture.held(inventory(1, 0, 0, 1));
         switch (missing_gate) {
-        case 0: fixture.observation.hold_observable = false; break;
-        case 1: fixture.observation.captured = false; break;
-        case 2: fixture.observation.held_complete = false; break;
+            case 0:
+                fixture.observation.hold_observable = false;
+                break;
+            case 1:
+                fixture.observation.captured = false;
+                break;
+            case 2:
+                fixture.observation.held_complete = false;
+                break;
         }
         expect(fixture.update(1), CaptureVerificationOutcome::Continue);
     }
@@ -547,8 +586,10 @@ void resetClearsStageHistory() {
     expect(recheck.update(1), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
     recheck.stage.reset();
     expect(recheck.update(2000000), CaptureVerificationOutcome::Continue, "held_illegal_recheck");
-    expect(recheck.update(2000001), CaptureVerificationOutcome::AbortDrop,
-           "held_core_before_first", true);
+    expect(recheck.update(2000001),
+           CaptureVerificationOutcome::AbortDrop,
+           "held_core_before_first",
+           true);
 
     Fixture bad_frames;
     bad_frames.field();
@@ -572,8 +613,10 @@ void resetClearsStageHistory() {
     expect(label_history.update(1), CaptureVerificationOutcome::Continue);
     label_history.stage.reset();
     label_history.held({});
-    expect(label_history.update(8000001), CaptureVerificationOutcome::CaptureFail,
-           "capture_target_not_in_frame", true);
+    expect(label_history.update(8000001),
+           CaptureVerificationOutcome::CaptureFail,
+           "capture_target_not_in_frame",
+           true);
 
     Fixture active_recheck;
     active_recheck.field();
