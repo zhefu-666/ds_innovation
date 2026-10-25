@@ -18,7 +18,7 @@ python3 tools/match/check_socket.py
 # The pitch tool owns the MCU port until 45-degree A6 feedback is stable.
 python3 tools/camera_pitch/pitch_ctl.py prepare45 --timeout 5
 
-exec build-camera-offset-20261007/rescue_upper_host \
+exec build-release/rescue_upper_host \
   --hardware --no-show --telemetry \
   --team blue --imu --imu-port /dev/ttyUSB0 \
   --calibration config/camera.yaml \

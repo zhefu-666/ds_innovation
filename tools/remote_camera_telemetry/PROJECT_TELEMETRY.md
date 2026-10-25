@@ -1,6 +1,6 @@
 # ds_innovation 主程序实时查看
 
-本说明对应 2026-09-26 新增的主程序遥测。板子运行 `/home/cat/ds_innovation/build-arm64-telemetry/rescue_upper_host`，电脑使用 Foxglove 或浏览器查看。当前仍为 `--dry-run` 检测预览，不启用底盘运动。
+本说明对应 2026-09-26 新增的主程序遥测。板子运行 `/home/cat/ds_innovation/build-release/rescue_upper_host`，电脑使用 Foxglove 或浏览器查看。当前仍为 `--dry-run` 检测预览，不启用底盘运动。
 
 ## 查看
 
@@ -49,7 +49,7 @@ python3 tools/remote_camera_telemetry/manage_project.py stop
 python3 tools/remote_camera_telemetry/manage_project.py start --conf 0.35
 ```
 
-其他主程序参数先查看 `./build-arm64-telemetry/rescue_upper_host --help`。`requested_fps` 是请求的采集帧率，`loop_fps` 是包含推理的实际处理帧率，两者不能混用。`inference_ms` 包含检测和跟踪，`capture_ms` 是读取图像的等待时间。运行配置由命令行提供，不读取 `config/rescue.yaml`。
+其他主程序参数先查看 `./build-release/rescue_upper_host --help`。`requested_fps` 是请求的采集帧率，`loop_fps` 是包含推理的实际处理帧率，两者不能混用。`inference_ms` 包含检测和跟踪，`capture_ms` 是读取图像的等待时间。运行配置由命令行提供，不读取 `config/rescue.yaml`。
 
 日志：
 
@@ -73,7 +73,7 @@ python3 tools/remote_camera_telemetry/project_bridge.py
 
 ```bash
 cd /home/cat/ds_innovation
-./build-arm64-telemetry/rescue_upper_host --dry-run --no-show --telemetry
+./build-release/rescue_upper_host --dry-run --no-show --telemetry
 ```
 
 两个进程都在板子上运行。任何一方退出都不会给底盘发送动作。主程序停止或超过 2 秒未更新时，网页隐藏旧画面，健康通道 `robot_data_connected=false`；Foxglove Image 可能保留最后一帧，应同时关注健康通道。
@@ -107,9 +107,9 @@ Python 服务复用板子已有 OpenCV 4.6 和 websockets 10.4，读取该快照
 ## 构建与验证
 
 ```bash
-cmake -S . -B build-arm64-telemetry -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DRESCUE_ENABLE_TELEMETRY=ON
-cmake --build build-arm64-telemetry -j4
-ctest --test-dir build-arm64-telemetry --output-on-failure
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DRESCUE_ENABLE_TELEMETRY=ON
+cmake --build build-release -j4
+ctest --test-dir build-release --output-on-failure
 python3 tools/remote_camera_telemetry/test_project_bridge.py
 ```
 

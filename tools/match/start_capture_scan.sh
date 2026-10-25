@@ -12,7 +12,7 @@ if (( $# == 2 )); then
   [[ "$2" == --controlled-ignore-clearance ]] || { echo 'Unknown contact-test option.' >&2; exit 2; }
   extra+=(--controlled-ignore-clearance)
 fi
-binary=build-camera-offset-20261007/rescue_upper_host
+binary=build-release/rescue_upper_host
 common=(--no-match-time-limit --controlled-empty-field --search-cues --team blue --no-show
   --allow-mechanical-pitch-model --pitch-presets 500,4000,4000
   --calibration config/camera.mechanical_5_40.yaml --model models/detect_fp.rknn

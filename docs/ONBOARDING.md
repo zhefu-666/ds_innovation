@@ -80,7 +80,7 @@ cd /home/cat/ds_innovation
 ./build-onboarding-offline/rescue_upper_host --config config/runtime/push_replay.json
 ```
 
-车端将二进制换成 `build-arm64-consolidation-20261025/rescue_upper_host`（当时快照为 `build-arm64-selfcontained/`）。输出中的 `vx/wz` 是算法计算值，
+车端将二进制换成 `build-release/rescue_upper_host`（当时快照为 `build-arm64-selfcontained/`）。输出中的 `vx/wz` 是算法计算值，
 **不是实际车速，也不表示命令已发送**。
 
 正常结果：状态从搜索、接近、捕获，进入搬运、区域入口、交付核验，最终返回 `SCAN`，
@@ -114,7 +114,7 @@ ctest --test-dir build-onboarding-offline --output-on-failure
 
 ### 3.3 网页/Foxglove 只读感知预览
 
-先确认没有其他程序占用相机。管理脚本固定使用 `build-arm64-telemetry/`，
+先确认没有其他程序占用相机。管理脚本固定使用 `build-release/`，
 所以两个 ARM 构建目录都应保持当前版本；本指南已重建此目录以包含 split 多输出修复。
 
 ```bash
@@ -134,7 +134,7 @@ python3 tools/remote_camera_telemetry/manage_project.py stop
 
 管理脚本强制附加 `--dry-run --no-show --telemetry`，不需要也不应添加 `--hardware`。
 遥测桥只读取 `/dev/shm/rescue-telemetry.bin`，不接受客户端运动控制请求。
-若出现 `Expected one input and one output`，先重建 `build-arm64-telemetry/`，不要换模型逃避问题。
+若出现 `Expected one input and one output`，先重建 `build-release/`，不要换模型逃避问题。
 
 ## 4. 车端重建与静态检查
 
@@ -150,8 +150,8 @@ cmake --build build-arm64-selfcontained -j4
 ctest --test-dir build-arm64-selfcontained --output-on-failure
 ```
 
-将两处目录名改为 `build-arm64-telemetry` 可重建网页管理脚本使用的二进制。
-`build-arm64-telemetry` 也是自包含资源构建，名称不意味着它引用旧部署目录。
+将两处目录名改为 `build-release` 可重建网页管理脚本使用的二进制。
+`build-release` 也是自包含资源构建，名称不意味着它引用旧部署目录。
 
 静态入口检查不会打开设备；方框未确认时只显示占位配置，不得将占位值用于运动：
 
@@ -257,5 +257,5 @@ SCAN -> APPROACH -> PREPARE -> RUSH -> LOWER_FRAME
 - 唯一模型清单差异 `models/zone_pose_red_v2_manifest.json` 已同步为本地版本；
   车端原件保留在 `onboarding-backup/zone_pose_red_v2_manifest.before-onboarding.json`。
 - 未改动本机任务代码、配置或冻结基线；未提交、未清理任何既有修改。
-- 车端 `build-arm64-selfcontained/`、`build-arm64-telemetry/` 已按当前源码重建。
+- 车端 `build-arm64-selfcontained/`、`build-release/` 已按当前源码重建。
 - 预览验证结束后停止管理进程，不保留后台占用相机或串口的服务。
