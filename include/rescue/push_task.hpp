@@ -8,6 +8,8 @@
 #include "rescue/task/delivery_verification_stage.hpp"
 #include "rescue/task/release_retreat_stage.hpp"
 #include "rescue/task/carry_approach_stage.hpp"
+#include "rescue/task/carry_search_stage.hpp"
+#include "rescue/task/sweep_trigger_stage.hpp"
 #include "rescue/task/enter_stage.hpp"
 #include "rescue/task/push_in_stage.hpp"
 #include "rescue/task/sweep_ledger.hpp"
@@ -661,7 +663,7 @@ class PushTask {
     std::string label_, reason_;
     Inventory trip_, pending_, seen_;
     RuleVerdict verdict_ = RuleVerdict::OK;
-    bool first_ = false, fault_ = false, track_close_ = false, delivery_seen_ = false;
+    bool first_ = false, fault_ = false, track_close_ = false;
     uint8_t frame_raised_ = 0; // logical open, independent of wire angle
     bool sweep_open_ = false, sweep_open_done_ = false, sweep_open_disabled_ = false,
          sweep_close_wait_ = false; // sweep_frame_open overlay on the wire angle only
@@ -696,14 +698,9 @@ class PushTask {
     uint64_t zone_search_started_us_ = 0;
     float run_yaw0_ = 0;
     bool run_yaw0_set_ = false; // heading at the first update after reset: the start line
-    bool zone_mem_ = false, zone_enemy_ = false, cs_active_ = false, cs_last_set_ = false;
-    int cs_phase_ = 0;
-    float zone_mem_yaw_ = 0, zone_enemy_yaw_ = 0, cs_turned_ = 0, cs_goal_ = 0, cs_last_yaw_ = 0;
-    uint64_t zone_mem_us_ = 0, cs_t0_ = 0, cs_leg_t0_ = 0;
-    int enemy_evade_phase_ = 0, enemy_seen_frames_ = 0,
-        enemy_evade_count_ = 0; // phase: 0 idle, 1 turning about, 2 driving away
-    float enemy_evade_turned_ = 0, enemy_evade_yaw_ = 0, enemy_evade_last_yaw_ = 0;
-    uint64_t enemy_evade_start_us_ = 0, enemy_evade_cool_until_us_ = 0;
+    bool zone_mem_ = false, zone_enemy_ = false;
+    float zone_mem_yaw_ = 0, zone_enemy_yaw_ = 0;
+    uint64_t zone_mem_us_ = 0;
     uint64_t last_us_ = 0, phase_us_ = 0, gripper_us_ = 0, carry_us_ = 0, pitch_wait_us_ = 0,
              hold_seen_us_ = 0;
     // Dead-reckoned from the previous command; only bounds a phase, never proves progress.
@@ -801,6 +798,8 @@ class PushTask {
     PushInStage push_in_;
     EnterStage enter_;
     CarryApproachStage carry_approach_;
+    CarrySearchStage carry_search_;
+    SweepTriggerPlanner sweep_trigger_;
     SweepLedger sweep_ledger_;
     DisperseRushStage disperse_rush_;
     DisperseTurnStage disperse_turn_;

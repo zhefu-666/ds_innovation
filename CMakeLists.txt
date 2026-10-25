@@ -16,7 +16,7 @@ set(RESCUE_TASK_SOURCES src/push_task.cpp src/task/capture_verification_stage.cp
     src/task/sweep_ledger.cpp src/task/disperse_turn_stage.cpp src/task/disperse_swing_stage.cpp
     src/task/disperse_rush_stage.cpp src/task/recovery_stage.cpp src/task/search_stage.cpp
     src/task/enter_stage.cpp src/task/disperse_cluster_stage.cpp src/task/carry_approach_stage.cpp
-    src/task/sweep_stage.cpp)
+    src/task/carry_search_stage.cpp src/task/sweep_trigger_stage.cpp src/task/sweep_stage.cpp)
 
 add_library(rescue_app_config STATIC
     src/app/config_loader.cpp
@@ -255,11 +255,23 @@ if(BUILD_TESTING)
     target_compile_options(rescue_disperse_cluster_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_disperse_cluster_stage_tests COMMAND rescue_disperse_cluster_stage_tests)
     add_executable(rescue_carry_approach_stage_tests tests/carry_approach_stage_tests.cpp
-        src/task/carry_approach_stage.cpp src/zone_estimate.cpp)
+        src/task/carry_approach_stage.cpp src/task/carry_search_stage.cpp src/zone_estimate.cpp)
     target_include_directories(rescue_carry_approach_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
     target_link_libraries(rescue_carry_approach_stage_tests PRIVATE ${OpenCV_LIBS})
     target_compile_options(rescue_carry_approach_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_carry_approach_stage_tests COMMAND rescue_carry_approach_stage_tests)
+    add_executable(rescue_carry_search_stage_tests tests/carry_search_stage_tests.cpp
+        src/task/carry_search_stage.cpp src/zone_estimate.cpp)
+    target_include_directories(rescue_carry_search_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_carry_search_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_carry_search_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_carry_search_stage_tests COMMAND rescue_carry_search_stage_tests)
+    add_executable(rescue_sweep_trigger_stage_tests tests/sweep_trigger_stage_tests.cpp
+        src/task/sweep_trigger_stage.cpp src/zone_estimate.cpp)
+    target_include_directories(rescue_sweep_trigger_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_sweep_trigger_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_compile_options(rescue_sweep_trigger_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_sweep_trigger_stage_tests COMMAND rescue_sweep_trigger_stage_tests)
     add_executable(rescue_search_stage_tests tests/search_stage_tests.cpp
         src/task/search_stage.cpp src/task/sweep_ledger.cpp src/task/disperse_turn_stage.cpp
         src/task/disperse_swing_stage.cpp src/transport_rules.cpp src/zone_estimate.cpp)

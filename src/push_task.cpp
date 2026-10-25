@@ -1,5 +1,6 @@
 #include "rescue/push_task.hpp"
 #include "rescue/task/disperse_cluster_stage.hpp"
+#include "rescue/task/sweep_trigger_stage.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -97,9 +98,6 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     assume_blind_ = false;
     unstick_step_ = 0;
     prelower_us_ = 0;
-    enemy_evade_phase_ = 0;
-    enemy_seen_frames_ = 0;
-    enemy_evade_cool_until_us_ = 0;
     if (s != PushState::SCAN) {
         scatter_idle_since_us_ = 0;
         scatter_seen_ = 0;
@@ -107,8 +105,6 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     }
     if (s != PushState::RUSH)
         rush_yaw_ref_set_ = false; // PREPARE (tracked) -> RUSH keeps the last seen target bearing
-    if (s == PushState::START_ADVANCE)
-        delivery_seen_ = false;
     if (s == PushState::APPROACH)
         precheck_seen_ = 0;
     if (s == PushState::RUSH) {
@@ -228,7 +224,6 @@ void PushTask::clearTrip() {
     half_locked_ = false;
     half_injured_ = false;
     half_x_ = 0;
-    delivery_seen_ = false;
     zone_search_started_us_ = 0;
     approach_forward_ = 0;
     last_target_valid_ = false;
@@ -752,7 +747,8 @@ PushOutput PushTask::update(const PushObservation& in) {
         scatter_cool_until_us_ = 0;
         sweep_ledger_.reset();
         search_.resetConfirmSince();
-        zone_mem_ = zone_enemy_ = cs_active_ = run_yaw0_set_ = false;
+        zone_mem_ = zone_enemy_ = run_yaw0_set_ = false;
+        carry_search_.reset();
         scatter_count_ = 0;
         scatter_approach_n_ = 0;
         scatter_far_ = false;
@@ -789,7 +785,7 @@ PushOutput PushTask::update(const PushObservation& in) {
         return result();
     }
     if (state_ != PushState::CARRY)
-        cs_active_ = false;
+        carry_search_.reset();
     if (!run_yaw0_set_ && in.heading_valid && std::isfinite(in.heading_rad)) {
         run_yaw0_ = in.heading_rad;
         run_yaw0_set_ = true;
@@ -1029,54 +1025,41 @@ PushOutput PushTask::update(const PushObservation& in) {
     };
     // Searching our zone with a load: an enemy-colour zone in view means turn about and drive a
     // long leg away. true: this tick's motion is owned.
+    // Shared inputs for the carry search / enemy evasion stage.
+    const auto carrySearchContext = [&] {
+        CarrySearchContext context;
+        context.now_us = now;
+        context.heading_valid = in.heading_valid;
+        context.heading_rad = in.heading_rad;
+        context.zone_mem = zone_mem_;
+        context.zone_mem_us = zone_mem_us_;
+        context.zone_mem_yaw = zone_mem_yaw_;
+        context.run_yaw0_set = run_yaw0_set_;
+        context.run_yaw0 = run_yaw0_;
+        context.enemy_zone_seen = in.enemy_zone_seen;
+        context.travel_m = travel_;
+        context.motion_ratio = motionRatio();
+        return context;
+    };
+    // Searching our zone with a load: an enemy-colour zone in view means turn about and drive a
+    // long leg away. true: this tick's motion is owned.
     const auto evadeEnemy = [&]() -> bool {
-        const bool heading_ok = in.heading_valid && std::isfinite(in.heading_rad);
-        if (enemy_evade_phase_ == 0) {
-            if (!t_.enemy_evade || now < enemy_evade_cool_until_us_ || !in.enemy_zone_seen) {
-                enemy_seen_frames_ = 0;
-                return false;
-            }
-            if (++enemy_seen_frames_ < t_.enemy_evade_frames || !heading_ok)
-                return false;
-            enemy_evade_phase_ = 1;
-            enemy_evade_turned_ = 0;
-            enemy_evade_last_yaw_ = in.heading_rad;
-            enemy_evade_start_us_ = now;
-            ++enemy_evade_count_;
-            enemy_seen_frames_ = 0;
-        }
-        if (enemy_evade_phase_ == 1) {
-            if (heading_ok) {
-                enemy_evade_turned_ += std::abs(wrapAngle(in.heading_rad - enemy_evade_last_yaw_));
-                enemy_evade_last_yaw_ = in.heading_rad;
-            }
-            if (!heading_ok || now - enemy_evade_start_us_ > t_.enemy_evade_turn_budget_us) {
-                enemy_evade_phase_ = 0;
-                enemy_evade_cool_until_us_ = now + t_.enemy_evade_cool_us;
-                zone_search_started_us_ = now;
-                return false;
-            }
-            if (enemy_evade_turned_ < t_.enemy_evade_turn_rad) {
-                reason_ = "enemy_zone_turn_away";
-                scanSpin();
-                return true;
-            }
-            enemy_evade_phase_ = 2;
-            enemy_evade_yaw_ = in.heading_rad;
-            enemy_evade_start_us_ = now;
+        const auto evade = carry_search_.evade(t_, carrySearchContext());
+        if (evade.reset_zone_search)
+            zone_search_started_us_ = evade.zone_search_us;
+        if (evade.reset_travel)
             travel_ = 0;
+        if (evade.reason)
+            reason_ = evade.reason;
+        if (evade.action == CarrySearchAction::TurnAway) {
+            scanSpin();
+            return true;
         }
-        if (travel_ >= t_.enemy_evade_m * motionRatio() ||
-            now - enemy_evade_start_us_ > t_.enemy_evade_drive_budget_us) {
-            enemy_evade_phase_ = 0;
-            enemy_evade_cool_until_us_ = now + t_.enemy_evade_cool_us;
-            zone_search_started_us_ = now;
-            return false;
+        if (evade.action == CarrySearchAction::DriveAway) {
+            drive(evade.speed, evade.heading);
+            return true;
         }
-        const float err = heading_ok ? wrapAngle(enemy_evade_yaw_ - in.heading_rad) : 0.f;
-        reason_ = "enemy_zone_drive_away";
-        drive(t_.enemy_evade_speed, std::clamp(t_.heading_gain * err, -t_.max_wz, t_.max_wz));
-        return true;
+        return false;
     };
     const auto unstick = [&]() -> bool { // true: the wiggle owns this tick's motion
         if (!t_.spin_unstick)
@@ -1138,65 +1121,33 @@ PushOutput PushTask::update(const PushObservation& in) {
     };
     // Own zone not verified while carrying: spin, and when nothing (or only a far sighting) is
     // found, drive toward it and spin again.
-    const auto carrySearch = [&] {
-        const bool heading_ok = in.heading_valid && std::isfinite(in.heading_rad);
-        if (!cs_active_) {
-            cs_active_ = true;
-            cs_phase_ = 0;
-            cs_turned_ = 0;
-            cs_last_set_ = false;
-            cs_t0_ = now;
-            cs_goal_ = t_.carry_search_turns * 2.f * float(CV_PI);
-        }
-        const bool fresh = zone_mem_ && now - zone_mem_us_ <= t_.carry_sight_fresh_us;
-        const bool known = zone_mem_ && now - zone_mem_us_ <= t_.carry_sight_mem_us;
-        if (cs_phase_ == 0) {
-            if (heading_ok) {
-                if (cs_last_set_)
-                    cs_turned_ += std::abs(wrapAngle(in.heading_rad - cs_last_yaw_));
-                cs_last_yaw_ = in.heading_rad;
-                cs_last_set_ = true;
-            }
-            const bool spun = cs_turned_ >= cs_goal_ || now - cs_t0_ > t_.carry_spin_cap_us;
-            if (!fresh && !spun) {
-                reason_ = "searching_own_zone";
+    // Own zone not verified while carrying: turn away from a seen enemy zone, else spin and then
+    // drive a leg. The stage decides; every permission and write stays here.
+    const auto carrySearch = [&]() -> bool {
+        const auto carry = carry_search_.update(t_, carrySearchContext());
+        if (carry.reset_zone_search)
+            zone_search_started_us_ = carry.zone_search_us;
+        if (carry.reset_travel)
+            travel_ = 0;
+        if (carry.reason)
+            reason_ = carry.reason;
+        switch (carry.action) {
+            case CarrySearchAction::TurnAway:
                 scanSpin();
-                return;
-            }
-            if (!heading_ok || (!known && !run_yaw0_set_)) {
-                reason_ = "searching_own_zone";
+                return true;
+            case CarrySearchAction::DriveAway:
+                drive(carry.speed, carry.heading);
+                return true;
+            case CarrySearchAction::Scan:
                 scanSpin();
-                return;
-            }
-            cs_phase_ = 1;
-            cs_t0_ = cs_leg_t0_ = now;
+                return false;
+            case CarrySearchAction::Steer:
+                steer(carry.speed, carry.heading);
+                return false;
+            case CarrySearchAction::None:
+                break;
         }
-        if (!heading_ok) {
-            cs_phase_ = 0;
-            cs_t0_ = now;
-            cs_turned_ = 0;
-            cs_last_set_ = false;
-            cs_goal_ = t_.carry_search_respin_turns * 2.f * float(CV_PI);
-            return;
-        }
-        const float target = known ? zone_mem_yaw_ : wrapAngle(run_yaw0_ + float(CV_PI));
-        const float err = wrapAngle(target - in.heading_rad);
-        if (std::abs(err) > t_.rotate_in_place_rad)
-            cs_leg_t0_ = now; // the leg clock runs only while driving
-        if (now - cs_leg_t0_ >= t_.carry_leg_us || now - cs_t0_ > t_.carry_leg_turn_cap_us) {
-            cs_phase_ = 0;
-            cs_t0_ = now;
-            cs_turned_ = 0;
-            cs_last_set_ = false;
-            cs_goal_ = t_.carry_search_respin_turns * 2.f * float(CV_PI);
-            reason_ = "searching_own_zone";
-            scanSpin();
-            return;
-        }
-        reason_ = fresh   ? "carry_drive_to_sighted_zone"
-                  : known ? "carry_drive_to_remembered_zone"
-                          : "carry_drive_start_line";
-        steer(t_.carry_speed, err);
+        return false;
     };
     const auto trackingReason = [&]() -> const char* {
         if (!in.target_valid)
@@ -1226,22 +1177,24 @@ PushOutput PushTask::update(const PushObservation& in) {
     // A running sweep is cut when the chain deadline or a time budget runs out.
     const bool sweepOver = sweepBudget.over;
     const int sweep_esc = sweepBudget.escalation;
-    // Blind-scatter group search shared by SCAN, the far drive, and the lost-target paths.
-    const bool scatter_ok = t_.blind_scatter && t_.disperse && scan_ok && forward_ok &&
-                            in.heading_valid && std::isfinite(in.heading_rad) &&
-                            scatter_count_ < t_.blind_scatter_max &&
-                            now >= scatter_cool_until_us_ && sweepLedgerOk;
-    const bool scatter_multi_ok = t_.blind_scatter && t_.disperse && scan_ok && forward_ok &&
-                                  in.heading_valid && std::isfinite(in.heading_rad) &&
-                                  scatter_count_ < t_.blind_scatter_max &&
-                                  now >= scatter_cool_until_us_ &&
-                                  (t_.dense_multi_ignore_gap ? sweepBudgetOk : sweepLedgerOk);
-    const bool approach_ok = scatter_approach_n_ < t_.blind_scatter_approach_max;
-    const float far_y = approach_ok
-                            ? std::max(t_.blind_scatter_max_y_m, t_.blind_scatter_far_max_y_m)
-                            : t_.blind_scatter_max_y_m;
-    const bool clutter_fresh =
-        in.clutter_ts_us && now >= in.clutter_ts_us && now - in.clutter_ts_us <= t_.sweep_fresh_us;
+    // Every blind-scatter trigger shares these derived permissions.
+    SweepTriggerContext trigger_context;
+    trigger_context.now_us = now;
+    trigger_context.scan_ok = scan_ok;
+    trigger_context.forward_ok = forward_ok;
+    trigger_context.heading_valid = in.heading_valid;
+    trigger_context.heading_rad = in.heading_rad;
+    trigger_context.scatter_count = scatter_count_;
+    trigger_context.scatter_approach_n = scatter_approach_n_;
+    trigger_context.scatter_cool_until_us = scatter_cool_until_us_;
+    trigger_context.ledger_ready = sweepLedgerOk;
+    trigger_context.budget_ok = sweepBudgetOk;
+    const auto trigger = sweep_trigger_.evaluate(t_, trigger_context, in.clutter_ts_us);
+    const bool scatter_ok = trigger.scatter_ok;
+    const bool scatter_multi_ok = trigger.scatter_multi_ok;
+    const bool approach_ok = trigger.approach_ok;
+    const float far_y = trigger.far_y;
+    const bool clutter_fresh = trigger.clutter_fresh;
     DisperseClusterPlanner cluster;
     const auto findBest = [&](const std::vector<cv::Point2f>& pts, float max_y, float radius) {
         return cluster.findBest(t_, in, pts, max_y, radius);
@@ -2388,8 +2341,6 @@ PushOutput PushTask::update(const PushObservation& in) {
                     break;
                 }
                 if (!t_.assume_all_safe) {
-                    if (evadeEnemy())
-                        break;
                     carrySearch();
                     break;
                 } // no verified own zone: never release blind
@@ -2669,8 +2620,6 @@ PushOutput PushTask::update(const PushObservation& in) {
                 context.half_x = halfX();
                 context.zone_yaw = z.yaw_body_rad;
             }
-            if (in.delivery_observed)
-                delivery_seen_ = true;
             const auto strict = enter_.update(t_, context);
             if (strict.reset_misses)
                 misses_ = 0;
