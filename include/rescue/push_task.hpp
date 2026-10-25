@@ -12,6 +12,9 @@
 #include "rescue/task/disperse_turn_stage.hpp"
 #include "rescue/task/disperse_swing_stage.hpp"
 #include "rescue/task/disperse_rush_stage.hpp"
+#include "rescue/task/recovery_stage.hpp"
+#include "rescue/task/search_stage.hpp"
+#include "rescue/task/sweep_stage.hpp"
 #include <map>
 #include <string>
 
@@ -648,7 +651,6 @@ class PushTask {
     int clear_attempts_ = 0;
     int near_failures_ = 0;
     uint64_t clear_commanded_us_ = 0, clear_planned_us_ = 0;
-    float clear_heading_rad_ = 0;
     int search_cue_id_ = -1, capture_target_id_ = -1;
     int target_id_ = -1, confirmations_ = 0, misses_ = 0, step_ = 0;
     float last_range_ = 0; // last tracked range in MID_APPROACH, inf when none
@@ -656,7 +658,7 @@ class PushTask {
     std::string delivery_geometry_id_;
     std::string label_, reason_;
     Inventory trip_, pending_, seen_;
-    RuleVerdict verdict_ = RuleVerdict::OK, seen_verdict_ = RuleVerdict::OK;
+    RuleVerdict verdict_ = RuleVerdict::OK;
     bool first_ = false, fault_ = false, track_close_ = false, delivery_seen_ = false;
     uint8_t frame_raised_ = 0; // logical open, independent of wire angle
     bool sweep_open_ = false, sweep_open_done_ = false, sweep_open_disabled_ = false,
@@ -665,25 +667,18 @@ class PushTask {
     uint64_t frame_transaction_ = 0, attempt_started_ = 0;
     uint64_t inplace_since_us_ = 0,
              inplace_last_us_ =
-                 0;      // continuous in-place turn tracking (demo APPROACH/RUSH turn escalation)
-    int dense_seen_ = 0; // dense-group confirmation frames
+                 0; // continuous in-place turn tracking (demo APPROACH/RUSH turn escalation)
     int wire_last_ = -1;
     uint64_t wire_txn_ = 0; // wire-level target/transaction: only a real open<->close change is a
                             // new action for the MCU
     float bounded_approach_ = 0, bounded_retreat_ = 0;
     int16_t multi_view_pitch_ = kCameraPitchInvalid;
     int16_t pitch_cmd_ = t_.far_pitch_cdeg;
-    uint64_t rebind_since_us_ = 0;
-    uint64_t approach_last_us_ = 0;
     // PILE state
     int pile_phase_ = 0, pile_runs_ = 0, pile_seen_ = 0;
     uint64_t pile_phase_us_ = 0, pile_cool_until_us_ = 0;
-    float pile_yaw0_ = 0, pile_travel0_ = 0, pile_cut_yaw_ = 0, pile_cut_m_ = 0, pile_push0_ = -1.f;
-    int pile_chain_n_ = 0, pile_chain_look_ = 0;
-    float pile_chain_in_m_ = 0, pile_chain_yaw_pre_ = 0,
-          pile_chain_yaw_mid_ =
-              0; // PILE chain: rounds spent / looks spent this round / metres driven in this round
-                 // / heading before the turn / middle of the turn
+    float pile_yaw0_ = 0, pile_push0_ = -1.f;
+    int pile_chain_n_ = 0;
     int approach_last_id_ = -1;
     float approach_last_heading_ = 0.f, approach_last_distance_ = 0.f,
           approach_last_world_yaw_ = 0.f;
@@ -734,40 +729,31 @@ class PushTask {
     }
     void noteCargo(const char* event, const cv::Point2f& rear, bool fix);
     void trackCargo(const PushObservation& in, uint64_t now);
-    float prep_ref_m_ = 0;
-    uint64_t prep_ref_us_ = 0, prep_last_us_ = 0;
     int scatter_approach_n_ = 0;
     bool scatter_far_ = false;
     float scatter_approach_m_ = 0;
     bool burst_drive_used_ = false, burst_fast_ = false, burst_swing_armed_ = false,
          burst_swing_ = false; // first_burst: drive spent / this far drive is fast / swing waiting
                                // for the next near scatter / this scatter swings fast
-    int vis_hits_ = 0, vis_miss_ = 0;
-    uint64_t vis_chase_t0_ = 0, vis_cool_until_us_ = 0, vis_last_seen_us_ = 0;
-    float vis_bearing_ = 0;
-    uint64_t scan_hold_t0_ = 0, scan_hold_last_sight_us_ = 0, scan_hold_cool_until_us_ = 0;
-    int scatter_count_ = 0, scatter_seen_ = 0, far_seen_ = 0;
+    int scatter_count_ = 0, scatter_seen_ = 0;
     bool scatter_commit_ = false;
     uint64_t scatter_cool_until_us_ = 0, scatter_idle_since_us_ = 0;
-    float scatter_yaw_ = 0, scatter_range_ = 0, scatter_back_ = 0, scan_turn_acc_ = 0,
-          scan_last_heading_ = 0;
-    bool scan_last_valid_ = false;
+    float scatter_yaw_ = 0, scatter_range_ = 0, scan_turn_acc_ = 0;
     float scan_mid_limit_ = 0;
     bool post_disperse_mid_ = false;
     bool disperse_small_ = false;
     int mid_clear_n_ = 0;
     int precheck_seen_ = 0, precheck_rejects_ = 0;
-    uint64_t confirm_since_us_ = 0;
     bool rush_stall_phase_ = false;
     int rush_stall_id_ = -1, rush_stall_samples_ = 0, rush_stall_obs_frames_ = 0;
     float rush_stall_ref_m_ = 0;
     uint64_t rush_stall_ref_us_ = 0, rush_stall_last_us_ = 0, rush_stall_obs_us_ = 0;
     int16_t rush_stall_pitch_ = kCameraPitchInvalid;
     int sweep_phase_ = 0, sweep_attempts_ = 0, sweep_seen_ = 0;
-    float sweep_creep_m_ = 0, sweep_travel0_ = 0;
+    float sweep_travel0_ = 0;
     float disperse_rush_m_ = 0, disperse_sign_ = 1;
     uint64_t disperse_cool_until_us_ = 0;
-    float sweep_yaw0_ = 0, sweep_sign_ = 1;
+    float sweep_yaw0_ = 0;
     uint64_t sweep_start_us_ = 0, sweep_t0_us_ = 0;
     int unstick_step_ = 0;
     uint64_t unstick_us_ = 0;
@@ -775,8 +761,6 @@ class PushTask {
     float rush_yaw_ref_ = 0;
     uint64_t prelower_us_ = 0;
     int rush_pulse_phase_ = 0, rush_pulse_count_ = 0;
-    float rush_pulse_yaw0_ = 0, rush_pulse_delta_ = 0;
-    uint64_t rush_pulse_start_us_ = 0, rush_pulse_t0_us_ = 0;
     bool uprightInCorridor(const PushObservation& in,
                            uint64_t now,
                            float& lateral,
@@ -819,6 +803,9 @@ class PushTask {
     DisperseRushStage disperse_rush_;
     DisperseTurnStage disperse_turn_;
     DisperseSwingStage disperse_swing_;
+    RecoveryStage recovery_;
+    SearchStage search_;
+    SweepStage sweep_;
     // 假设模式：YOLO-pose粗略区域位姿锚定在里程系，视野丢失后用IMU航向+缩放后的指令位移继续推算。
     AnchoredZone zone_;
     float odo_ = 0, ratio_est_ = 0, ratio_odo_ = 0, last_imu_yaw_ = 0;
@@ -838,15 +825,10 @@ class PushTask {
     cv::Point2f drop_centre_zone_;
     bool heading_seen_ = false;
     int lost_round_ = 0; // LOST_SEARCH: 0 FAR sweep, 1 intermediate (20deg) sweep for close cargo
-    bool retreat_origin_valid_ = false;
     bool corridor_retreat_ = false;
     int corridor_retries_ =
-        0;                 // LOST_HOLD reused as a no-blacklist back-off from a blocked corridor
-    int retreat_mode_ = 0; // 0 undecided, 1 zone-measured, 2 blind (dead reckoning + IMU heading)
-    uint64_t retreat_zone_us_ = 0;
-    float retreat_heading_ = 0, approach_forward_ = 0; // forward commanded since the trip started
-    cv::Point2f retreat_origin_zone_, retreat_forward_zone_;
-    std::string retreat_geometry_id_;
+        0; // LOST_HOLD reused as a no-blacklist back-off from a blocked corridor
+    float approach_forward_ = 0; // forward commanded since the trip started
     std::vector<RejectedBearing> rejected_bearings_;
     std::map<int, uint64_t> rejected_; // primary track id -> blacklist expiry
 

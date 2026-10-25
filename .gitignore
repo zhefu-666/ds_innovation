@@ -49,3 +49,6 @@ calibration_runs/
 /tool/demo/backup-*/
 /tool/demo/logs/
 /tool/demo/view.lock
+
+# Local pre-change archives (e.g. protocol-20261023)
+/backups/

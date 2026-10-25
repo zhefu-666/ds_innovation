@@ -121,7 +121,7 @@ struct Rig {
         if (state == PushState::PILE) {
             task.pile_phase_ = 9;
             task.pile_phase_us_ = input.now_us;
-            task.pile_travel0_ = 0;
+            task.sweep_.pile_travel0_ = 0;
         }
         task.sweep_phase_ = 4;
         task.sweep_start_us_ = task.sweep_t0_us_ = input.now_us;
@@ -156,7 +156,7 @@ struct Rig {
                << task.disperse_sign_ << ':' << task.disperse_rush_m_ << ':' << task.disperse_small_
                << ':' << task.sweepDone() << ':' << task.sweepSpentUs(now) << ':'
                << task.sweepChainOpen() << ':' << task.pile_phase_ << ':'
-               << task.pile_chain_yaw_mid_ << ':' << task.pile_chain_in_m_;
+               << task.sweep_.pile_chain_yaw_mid_ << ':' << task.sweep_.pile_chain_in_m_;
         for (const unsigned char c : sample.str())
             trace = (trace ^ c) * 1099511628211ULL;
     }
@@ -212,8 +212,8 @@ struct Rig {
                   << " frame=" << int(output.motion.gripper_offset) << " done=" << task.sweepDone()
                   << " spent=" << task.sweepSpentUs(input.now_us)
                   << " open=" << task.sweepChainOpen() << " pile=" << task.pile_phase_
-                  << " pile_mid=" << task.pile_chain_yaw_mid_
-                  << " pile_in=" << task.pile_chain_in_m_ << '\n';
+                  << " pile_mid=" << task.sweep_.pile_chain_yaw_mid_
+                  << " pile_in=" << task.sweep_.pile_chain_in_m_ << '\n';
     }
 };
 

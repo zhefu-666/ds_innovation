@@ -1885,7 +1885,7 @@ void pileTests() {
                 if (s.out.reason == "pile_measure" && r.y_measure == 0)
                     r.y_measure = s.py;
                 if (s.out.reason == "pile_cut_align" || s.out.reason == "pile_cut_drive") {
-                    r.cut_yaw = s.task.pile_cut_yaw_;
+                    r.cut_yaw = s.task.sweep_.pile_cut_yaw_;
                     r.phi_cut = s.phi;
                 }
             }
