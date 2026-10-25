@@ -1,4 +1,4 @@
-#include "rescue/controlled_field.hpp"
+#include "rescue/control/controlled_field.hpp"
 #include <cassert>
 #include <iostream>
 using namespace rescue;

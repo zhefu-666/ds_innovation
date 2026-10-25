@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rescue/config.hpp"
+#include "rescue/config/config.hpp"
 
 #include <string>
 #include <utility>

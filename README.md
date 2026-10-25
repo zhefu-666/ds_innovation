@@ -4,7 +4,7 @@
 
 当前主程序支持感知预览、离线回放和显式 `--hardware` 运动输出；网页管理脚本默认启动 `--dry-run` 预览。硬件路径使用 IMU、MCU 反馈、比赛许可和 MotionLink 门控，是否具备实车验收证据需要按实际模型、标定和运行策略分别确认。
 
-当前架构见 [应用架构](docs/ARCHITECTURE.md)，新增 JSON 配置与最终参数导出见 [运行配置](docs/RUNTIME_CONFIGURATION.md)，本轮实施与验证边界见 [重构进度](docs/REFACTORING_PROGRESS.md)。旧命令仍使用原有参数覆盖顺序，命令行请求值不一定等于现场最终值。
+当前架构见 [应用架构](docs/ARCHITECTURE.md)，代码目录职责见 [代码目录布局](docs/CODE_LAYOUT.md)，新增 JSON 配置与最终参数导出见 [运行配置](docs/RUNTIME_CONFIGURATION.md)，本轮实施与验证边界见 [重构进度](docs/REFACTORING_PROGRESS.md)。旧命令仍使用原有参数覆盖顺序，命令行请求值不一定等于现场最终值。
 
 新增参数、六点标注规范、无硬件回放和真实标定要求见 [阶段 0/1 实现说明](docs/history/STAGE01_IMPLEMENTATION.md)。
 

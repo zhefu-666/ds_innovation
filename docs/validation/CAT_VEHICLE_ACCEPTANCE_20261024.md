@@ -408,7 +408,7 @@ unique-state-id-pitch=[(0, 0, 120)]
 
 - R4 剩余：搜索接近、清扫冲入及触发/收尾、严格 ENTER、其余搬运恢复
 - R5：部署入口迁移、二进制对应关系、旧入口与历史代码清理
-- `src/push_task.cpp` 仍有 2378 行，不能称为 R4 完成
+- `src/task/push_task.cpp` 仍有 2378 行，不能称为 R4 完成
 - 协议基线已同步到 `cat` 部署分支的 2026-10-23 口径；新增 `tests/fixtures/runtime_protocol_20261023.json` 作为版本化补充，冻结基线未改
 
 重构不是“推倒重来”，目前是**可构建、可回归的完整快照**，但还不是可部署的实车版本。
@@ -442,8 +442,8 @@ unique-state-id-pitch=[(0, 0, 120)]
 
 以下项目已同步并纳入 `41/41` 回归，保留作为验收记录，不需要重复移植：
 
-- `include/rescue/types.hpp`：`kCameraPitchLimitCdeg = 3000`、`kCameraProtocolZeroDeg = 120`、`cameraPitchFromWire()` 接受 `90..150`
-- `src/uart_controller.cpp`：业务夹爪 `0/20` 映射线上 `+5/-5`
+- `include/rescue/core/types.hpp`：`kCameraPitchLimitCdeg = 3000`、`kCameraProtocolZeroDeg = 120`、`cameraPitchFromWire()` 接受 `90..150`
+- `src/hardware/uart_controller.cpp`：业务夹爪 `0/20` 映射线上 `+5/-5`
 - `tools/camera_pitch/pitch_ctl.py`：界面与 A6 使用 `90..150°`，TX 偏移 `-30..30`
 - `tools/frame/frame_ctl.py`：A6 有效范围 `90..150`，动作编号仅在偏移变化时递增
 - `tools/send_velocity.py`、`docs/通信协议.md` 与相关测试

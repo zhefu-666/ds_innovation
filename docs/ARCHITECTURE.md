@@ -47,7 +47,7 @@ flowchart TD
 | 观测构建 | `src/app/observation_builder.cpp` | 借用几何与传感器依赖，维护捕获、多视角、像素选择及无进展历史 |
 | 离线分派 | `src/app/offline_tasks.cpp` | 原任务回放、几何回放和单图推理路径 |
 | 诊断格式 | `src/app/diagnostics.cpp` | 原报告、区域绘制与单图诊断 |
-| 任务协调 | `src/push_task.cpp` | 顶层门控、阶段转换、机构事务、黑名单、搬运计时与计分；尚未提取的阶段 |
+| 任务协调 | `src/task/push_task.cpp` | 顶层门控、阶段转换、机构事务、黑名单、搬运计时与计分；尚未提取的阶段 |
 | 捕获核验 | `src/task/capture_verification_stage.cpp` | 单视角确认、多视角结果、框内证据与非法类别重查；私有历史与类型化结果 |
 | 交付核验 | `src/task/delivery_verification_stage.cpp` | 库存差值、独立帧与稳定窗口、视觉内外证据、定位等待；返回计分建议、补推请求与原事件文本 |
 | 释放后退区 | `src/task/release_retreat_stage.cpp` | 私有先退再推模式、起始深度、区内确认计数与去重时间戳；返回继续后退、推入、核验或故障结果 |
@@ -56,7 +56,7 @@ flowchart TD
 | 清扫单转 | `src/task/disperse_turn_stage.cpp` | 单转私有阶段、方向与视觉确认历史；返回运动请求、共享进度更新和原格式日志数据，不执行公共运动许可或切换顶层状态 |
 | 往复清扫 | `src/task/disperse_swing_stage.cpp` | 摆动序号、当前趟与上限；返回摆动/归中运动请求、重设时钟或附加趟结果，共享起点与许可由父层应用 |
 | 清扫冲入 | `src/task/disperse_rush_stage.cpp` | 待规划/已规划标记与左右摆动限幅；返回冲入运动、原因、完成与否及原 `[SWING_PLAN]` 数据，状态切换、账本与许可由父层应用 |
-| 搬运规则 | `src/transport_rules.cpp` | 统一判定首趟、类别、数量与走廊约束 |
+| 搬运规则 | `src/task/transport_rules.cpp` | 统一判定首趟、类别、数量与走廊约束 |
 
 配置导出、静态检查和离线任务先于现场设备装配。单图任务只初始化推理所需资源；两类回放不创建现场设备。`ResolvedRuntimeConfig` 在补齐来源和运行身份后冻结，Runtime 与观测构建器只读引用，相关对象均在应用调用期间存活。
 

@@ -215,7 +215,7 @@ automatic file discovery or directory merge in schema v1.
 The new application-layer loader uses the header-only `nlohmann_json` parser
 for strict JSON types and duplicate-key validation. Install the development
 package `nlohmann-json3-dev` (library version >= 3.6) as a build prerequisite where absent. The original
-`src/config.cpp` remains free of that dependency and OpenCV.
+`src/config/config.cpp` remains free of that dependency and OpenCV.
 
 `tests/config_loader_tests.cpp` verifies CLI compatibility, file-to-CLI
 precedence, explicit booleans, derived model selection, source metadata, relative

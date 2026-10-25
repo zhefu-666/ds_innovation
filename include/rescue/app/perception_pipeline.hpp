@@ -1,9 +1,9 @@
 #pragma once
 
-#include "rescue/config.hpp"
-#include "rescue/detector.hpp"
-#include "rescue/model_io.hpp"
-#include "rescue/zone_keypoints.hpp"
+#include "rescue/config/config.hpp"
+#include "rescue/perception/detector.hpp"
+#include "rescue/perception/model_io.hpp"
+#include "rescue/perception/zone_keypoints.hpp"
 #include <cstdint>
 #include <memory>
 #include <vector>

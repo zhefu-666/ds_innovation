@@ -26,7 +26,7 @@ CRC初值0、多项式0x1021、无最终异或；覆盖整帧0..3和6..81，跳�
 
 ## 接收数据结构
 
-`include/rescue/hipnuc_imu.hpp` 定义 `ImuSample` 和 `ImuSnapshot`。`HipnucImu::snapshot()` 线程安全地返回最新一份测量，不等待串口读操作：
+`include/rescue/hardware/hipnuc_imu.hpp` 定义 `ImuSample` 和 `ImuSnapshot`。`HipnucImu::snapshot()` 线程安全地返回最新一份测量，不等待串口读操作：
 
 - `acceleration_mps2`：线上g乘9.8，包含重力相关比力，不能直接作为去重力线加速度积分。
 - `angular_velocity_rps`、`rpy_rad`：°转rad；数组顺序分别x/y/z与roll/pitch/yaw。

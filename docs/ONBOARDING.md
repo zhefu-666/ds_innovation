@@ -194,12 +194,12 @@ src/main.cpp
 | [src/app/config_loader.cpp](../src/app/config_loader.cpp) | 严格 runtime JSON、请求来源和 CLI 优先级 |
 | [src/app/runtime_config.cpp](../src/app/runtime_config.cpp) | 最终兼容参数、假设和导出 |
 | [src/app/perception_pipeline.cpp](../src/app/perception_pipeline.cpp) | 检测/姿态模型、共享 letterbox、并行推理 |
-| [src/rknn_model.cpp](../src/rknn_model.cpp)、[src/rknn_output_layout.cpp](../src/rknn_output_layout.cpp) | RKNN 后端及单/多输出布局归一化 |
+| [src/perception/rknn_model.cpp](../src/perception/rknn_model.cpp)、[src/perception/rknn_output_layout.cpp](../src/perception/rknn_output_layout.cpp) | RKNN 后端及单/多输出布局归一化 |
 | [src/app/observation_builder.cpp](../src/app/observation_builder.cpp) | 把感知与传感器变成任务观测 |
-| [src/push_task.cpp](../src/push_task.cpp) | 顶层任务协调，仍保留较多历史策略 |
+| [src/task/push_task.cpp](../src/task/push_task.cpp) | 顶层任务协调，仍保留较多历史策略 |
 | `src/task/` | 已提取的捕获、交付、退区、推入和清扫阶段 |
-| [include/rescue/push_task.hpp](../include/rescue/push_task.hpp) | `PushState`、观测与输出的核心契约 |
-| [src/uart_controller.cpp](../src/uart_controller.cpp)、[src/motion_link.cpp](../src/motion_link.cpp) | A6 协议、反馈与运动发送链路 |
+| [include/rescue/task/push_task.hpp](../include/rescue/task/push_task.hpp) | `PushState`、观测与输出的核心契约 |
+| [src/hardware/uart_controller.cpp](../src/hardware/uart_controller.cpp)、[src/hardware/motion_link.cpp](../src/hardware/motion_link.cpp) | A6 协议、反馈与运动发送链路 |
 | `tests/` | 合成观测、协议、阶段、配置和端到端回放测试 |
 
 正常搬运主链可概括为：

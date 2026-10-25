@@ -1,6 +1,6 @@
 #include "rescue/task/enter_stage.hpp"
-#include "rescue/push_task.hpp"
-#include "rescue/zone_estimate.hpp"
+#include "rescue/task/push_task.hpp"
+#include "rescue/geometry/zone_estimate.hpp"
 
 #include <cmath>
 #include <cstdint>

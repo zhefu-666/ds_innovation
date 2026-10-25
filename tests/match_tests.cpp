@@ -1,6 +1,6 @@
-#include "rescue/match_control.hpp"
-#include "rescue/match_server.hpp"
-#include "rescue/config.hpp"
+#include "rescue/control/match_control.hpp"
+#include "rescue/control/match_server.hpp"
+#include "rescue/config/config.hpp"
 #include <cassert>
 #include <chrono>
 #include <cstring>

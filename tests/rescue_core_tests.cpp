@@ -1,11 +1,11 @@
-#include "rescue/camera_calibration.hpp"
-#include "rescue/imu_adapter.hpp"
-#include "rescue/planner.hpp"
-#include "rescue/sensor_fusion.hpp"
-#include "rescue/safe_zone_pose.hpp"
-#include "rescue/tracker.hpp"
-#include "rescue/uart_controller.hpp"
-#include "rescue/zone_layout.hpp"
+#include "rescue/geometry/camera_calibration.hpp"
+#include "rescue/hardware/imu_adapter.hpp"
+#include "rescue/geometry/planner.hpp"
+#include "rescue/hardware/sensor_fusion.hpp"
+#include "rescue/geometry/safe_zone_pose.hpp"
+#include "rescue/perception/tracker.hpp"
+#include "rescue/hardware/uart_controller.hpp"
+#include "rescue/geometry/zone_layout.hpp"
 
 #include <cassert>
 #include <cmath>

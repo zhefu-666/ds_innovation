@@ -1,11 +1,11 @@
 #pragma once
 
-#include "rescue/capture_monitor.hpp"
-#include "rescue/config.hpp"
-#include "rescue/geometry_pipeline.hpp"
-#include "rescue/match_control.hpp"
-#include "rescue/motion_link.hpp"
-#include "rescue/multi_view_capture.hpp"
+#include "rescue/perception/capture_monitor.hpp"
+#include "rescue/config/config.hpp"
+#include "rescue/geometry/geometry_pipeline.hpp"
+#include "rescue/control/match_control.hpp"
+#include "rescue/hardware/motion_link.hpp"
+#include "rescue/perception/multi_view_capture.hpp"
 #include <iosfwd>
 #include <map>
 #include <string>
