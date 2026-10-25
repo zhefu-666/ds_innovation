@@ -29,14 +29,17 @@ inline cv::FileNode selectFileNode(cv::FileStorage& storage, const std::string& 
     size_t begin = 0;
     while (begin <= path.size()) {
         const size_t end = path.find('/', begin);
-        std::string key = path.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        std::string key =
+            path.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
         if (!key.empty()) {
             std::string decoded;
             for (size_t i = 0; i < key.size(); ++i) {
                 if (key[i] == '~' && i + 1 < key.size() && key[i + 1] == '0') {
-                    decoded.push_back('~'); ++i;
+                    decoded.push_back('~');
+                    ++i;
                 } else if (key[i] == '~' && i + 1 < key.size() && key[i + 1] == '1') {
-                    decoded.push_back('/'); ++i;
+                    decoded.push_back('/');
+                    ++i;
                 } else {
                     decoded.push_back(key[i]);
                 }

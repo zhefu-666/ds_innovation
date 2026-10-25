@@ -4,8 +4,19 @@
 #include <string>
 
 namespace rescue {
-enum class MatchState { WAITING, RUNNING, PAUSED, FAULT, FINISHED };
-enum class MatchCommand { START, STOP, RESUME, FINISH };
+enum class MatchState {
+    WAITING,
+    RUNNING,
+    PAUSED,
+    FAULT,
+    FINISHED
+};
+enum class MatchCommand {
+    START,
+    STOP,
+    RESUME,
+    FINISH
+};
 struct MatchConfig {
     uint64_t duration_us = 0; // Required explicitly; do not guess the competition duration.
     uint64_t evidence_timeout_us = 200000, no_movement_us = 15000000;
@@ -22,16 +33,18 @@ struct MatchStatus {
 // Thread safe: the serial sender checks the same gate independently of inference.
 // STOP/health failures latch. RESUME is explicit and never restarts the match clock.
 class MatchControl {
-public:
+  public:
     explicit MatchControl(MatchConfig config);
     void health(uint64_t now, bool ready, const std::string& reason);
     // A measured pose in one fixed reference frame. Changing reference/invalid samples
     // establishes a new baseline, never counts as motion. No command integration here.
-    void measuredPosition(uint64_t sample_us, double x, double y, const std::string& reference, double uncertainty_m);
+    void measuredPosition(
+        uint64_t sample_us, double x, double y, const std::string& reference, double uncertainty_m);
     bool command(MatchCommand command, uint64_t now);
     MatchStatus status(uint64_t now);
     static const char* name(MatchState state);
-private:
+
+  private:
     void tick(uint64_t now);
     bool ready(uint64_t now) const;
     MatchConfig config_;

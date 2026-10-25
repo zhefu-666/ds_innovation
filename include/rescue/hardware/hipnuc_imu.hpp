@@ -21,9 +21,9 @@ struct ImuSample {
     // 接收层会拒绝重复/倒退时间帧，因此对外快照序号可能跳号。
     uint64_t sequence = 0;
     uint32_t device_time_ms = 0; // 整帧14..17：设备时间，ms，uint32；自然溢出可回绕。
-    uint16_t status = 0;        // 整帧7..8：设备状态原值；位含义需与具体型号/固件核对。
-    int temperature_c = 0;     // 整帧9：有符号int8温度，℃；解析后提升为int。
-    float pressure_pa = 0;     // 整帧10..13：float32气压，Pa。
+    uint16_t status = 0; // 整帧7..8：设备状态原值；位含义需与具体型号/固件核对。
+    int temperature_c = 0; // 整帧9：有符号int8温度，℃；解析后提升为int。
+    float pressure_pa = 0; // 整帧10..13：float32气压，Pa。
     // 整帧18..29：x/y/z加速度；线上g乘9.8转为m/s²，仍包含重力相关比力。
     // 整帧30..41：x/y/z角速度；线上°/s乘π/180转为rad/s。
     // 整帧42..53：x/y/z磁场，µT，无单位转换。
@@ -46,7 +46,7 @@ struct ImuSnapshot {
     // fresh：已连接且收到过设备时间推进的帧，数据年龄未超过timeout_ms。
     bool connected = false, fresh = false;
     uint64_t sampled_at_us = 0; // 获取快照时的主机单调时钟，us。
-    double age_ms = -1;        // (sampled_at_us - sample.received_us) / 1000；无可用时间时为-1。
+    double age_ms = -1; // (sampled_at_us - sample.received_us) / 1000；无可用时间时为-1。
     uint32_t timeout_ms = 200; // 数据新鲜度期限，ms，默认200。
     // bytes：串口累计读取字节；valid_frames：CRC通过且HI91类型/长度正确的帧数。
     // crc_errors：候选帧CRC失败次数；invalid_frames：非法长度/不支持类型/半包超时等次数。
@@ -61,22 +61,24 @@ uint64_t imuNowUs();
 // 根据设备字段填写sample的body_字段，不修改设备字段。
 void applyImuMounting(ImuSample& sample);
 class Hi91Parser {
-public:
+  public:
     bool consume(uint8_t byte, uint64_t received_us, ImuSample& out);
     uint64_t valid_frames = 0, crc_errors = 0, invalid_frames = 0;
-private:
+
+  private:
     std::vector<uint8_t> buffer_;
     uint64_t last_byte_us_ = 0;
 };
 class HipnucImu {
-public:
+  public:
     HipnucImu(const std::string& port, int baud = 115200, uint32_t timeout_ms = 200);
     ~HipnucImu();
     HipnucImu(const HipnucImu&) = delete;
     HipnucImu& operator=(const HipnucImu&) = delete;
     ImuSnapshot snapshot() const;
     ImuSnapshot snapshotAt(uint64_t capture_us, uint32_t max_skew_ms = 50) const;
-private:
+
+  private:
     void readLoop();
     int fd_ = -1;
     std::atomic<bool> running_{false};
@@ -85,4 +87,4 @@ private:
     ImuSnapshot state_;
     std::deque<ImuSample> history_;
 };
-}
+} // namespace rescue

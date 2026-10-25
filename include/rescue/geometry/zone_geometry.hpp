@@ -14,12 +14,13 @@ struct ZoneGeometry {
     std::string id, label;
     float width_m = 0, depth_m = 0;
     float landmark_width_m = 0, landmark_depth_m = 0, landmark_height_m = 0;
-    float divider_exclusion_half_width_m = .02f; // conservative policy, NOT a measured divider width
+    float divider_exclusion_half_width_m =
+        .02f; // conservative policy, NOT a measured divider width
     bool supply_left = true, confirmed = false;
     bool valid() const;
     // Landmark xy in the zone frame with z=0 relative to the landmark plane
     // (planar for IPPE); the plane itself is at z=landmark_height_m.
-    std::array<cv::Point3f,6> objectPoints() const;
+    std::array<cv::Point3f, 6> objectPoints() const;
     static ZoneGeometry load(const std::string& file, const std::string& label);
 };
 struct ZoneKeypoint {
@@ -29,7 +30,8 @@ struct ZoneKeypoint {
     bool visible = false;
 };
 struct KeypointFrame {
-    bool identity_verified = false; // explicit same-frame identity source; pose shape does not supply this
+    bool identity_verified =
+        false; // explicit same-frame identity source; pose shape does not supply this
     std::string zone_label, geometry_id;
     uint64_t frame_id = 0, capture_us = 0;
     cv::Size image_size;

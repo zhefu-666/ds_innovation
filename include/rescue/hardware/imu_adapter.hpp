@@ -10,6 +10,6 @@ namespace rescue {
 // imu_valid：串口已连接、数据新鲜、数值检查通过且车体姿态有限；
 // 角度是否在可信范围内由使用方判断（SensorFusion::tiltUnsafe、CameraCalibration::tiltTrusted）。
 // timestamp_us取收帧时的主机单调时钟，与imuNowUs()、utils.hpp的Clock同为steady_clock。
-SensorState sensorStateFromImu(const ImuSnapshot &imu);
+SensorState sensorStateFromImu(const ImuSnapshot& imu);
 
 } // namespace rescue
