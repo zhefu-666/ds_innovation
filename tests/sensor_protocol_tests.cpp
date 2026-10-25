@@ -12,7 +12,7 @@ using namespace rescue;
 // 模拟下位机打包8字节A6反馈（pitch为int16小端），CRC覆盖0..4，末尾0x0A。
 static void packFeedback(uint8_t *out, uint8_t gripper_done, uint8_t gripper_action_id,
                          int16_t camera_pitch_cdeg) {
-    const auto pitch=static_cast<uint16_t>(camera_pitch_cdeg == kCameraPitchInvalid ? kCameraPitchInvalid : camera_pitch_cdeg / 100 + 40);
+    const auto pitch=static_cast<uint16_t>(camera_pitch_cdeg == kCameraPitchInvalid ? kCameraPitchInvalid : camera_pitch_cdeg / 100 + 120);
     out[0]=SensorPacket::kHeader; out[1]=gripper_done; out[2]=gripper_action_id;
     out[3]=static_cast<uint8_t>(pitch&0xFF); out[4]=static_cast<uint8_t>(pitch>>8);
     const uint16_t crc=UARTController::calculateCRC16(out,0,4);
@@ -24,13 +24,13 @@ int main() {
     using Frame=std::array<uint8_t,8>;
     Frame frame{};
     packFeedback(frame.data(), 1, 1, 3000);
-    assert((frame == Frame{0xA6,0x01,0x01,0x46,0x00,0x4E,0x45,0x0A}));
+    assert((frame == Frame{0xA6,0x01,0x01,0x96,0x00,0x13,0x85,0x0A}));
     Frame moving{};
     packFeedback(moving.data(), 0, 1, 0);
-    assert((moving == Frame{0xA6,0x00,0x01,0x28,0x00,0x63,0xD9,0x0A}));
+    assert((moving == Frame{0xA6,0x00,0x01,0x78,0x00,0x5F,0xD9,0x0A}));
     Frame up{};
     packFeedback(up.data(), 1, 2, -1500);
-    assert((up == Frame{0xA6,0x01,0x02,0x19,0x00,0x87,0xB5,0x0A}));
+    assert((up == Frame{0xA6,0x01,0x02,0x69,0x00,0xA2,0x75,0x0A}));
     SensorPacketParser parser;
     ActuatorFeedback state;
     auto feed = [&](const auto &bytes, uint64_t time) {
@@ -67,25 +67,25 @@ int main() {
     assert(feed(raw,4000)==1 && state.gripper_open==0xA6 && state.camera_pitch_cdeg==kCameraPitchInvalid); // raw payload retained
 
     {
-        for (int wire : {-1, 0, 40, 45, 80, 81, -32768}) {
+        for (int wire : {0, 40, 89, 90, 115, 120, 125, 150, 151, -32768}) {
             Frame f{0xA6,0,0,static_cast<uint8_t>(wire & 255),static_cast<uint8_t>((wire >> 8) & 255),0,0,10};
             auto crc=UARTController::calculateCRC16(f.data(),0,4);f[5]=crc&255;f[6]=crc>>8;
             assert(feed(f,6000)==1);
-            const int expected = wire>=0 && wire<=80 ? (wire-40)*100 : kCameraPitchInvalid;
+            const int expected = wire>=90 && wire<=150 ? (wire-120)*100 : kCameraPitchInvalid;
             assert(state.camera_pitch_cdeg==expected);
             if(expected!=kCameraPitchInvalid) {
                 assert(cameraPitchToFeedbackDeg(expected)==wire);
                 MotionCommand c;c.camera_pitch_cdeg=expected;
                 const auto b=UARTController::buildMotionPacket(c,0);
                 const uint16_t packed=uint16_t(b[11]) | (uint16_t(b[12])<<8);
-                assert(static_cast<int16_t>(packed)==wire-40);
+                assert(static_cast<int16_t>(packed)==std::clamp(wire-120, -30, 30));
             }
         }
     }
 
     {
         // dry-run也按目标变化分配编号，不打开串口。
-        UARTController dry; dry.configureFrameFeedback(0,1);
+        UARTController dry; dry.configureFrameFeedback(1,0);
         dry.initUART("/dev/null",115200,true,false);
         assert(dry.gripperActionId()==0 && dry.gripperActionResult()==GripperActionResult::Idle);
         assert(dry.cameraPitchResult(300)==ActionResult::Idle);
@@ -103,27 +103,27 @@ int main() {
         c.header=0x56;
         assert(dry.cameraPitchTarget()==0 && dry.cameraPitchResult(300)==ActionResult::NoFeedback);
         c.camera_pitch_cdeg=4500;
-        assert(dry.sendMotion(c) && dry.cameraPitchTarget()==4000 && dry.gripperActionId()==2); // 改pitch不换夹爪编号
+        assert(dry.sendMotion(c) && dry.cameraPitchTarget()==3000 && dry.gripperActionId()==2); // 改pitch不换夹爪编号
         c.camera_pitch_cdeg=-20000;
-        assert(dry.sendMotion(c) && dry.cameraPitchTarget()==-4000);                           // 限幅
+        assert(dry.sendMotion(c) && dry.cameraPitchTarget()==-3000);                           // 限幅
     }
 
     {
-        // Only the two accepted logical angles are writable. Explicit retries get new IDs.
-        UARTController dry; dry.configureFrameFeedback(0,1);
+        // Only the two accepted logical angles are writable. Retries keep the ID because MCU counts offset changes only.
+        UARTController dry; dry.configureFrameFeedback(1,0);
         dry.initUART("/dev/null",115200,true,false);
         MotionCommand c;c.gripper_offset=20;assert(dry.sendMotion(c));
         c.gripper_offset=21;assert(!dry.sendMotion(c)&&dry.gripperActionId()==1);
         c.gripper_offset=-20;assert(!dry.sendMotion(c)&&dry.gripperActionId()==1);
-        c.gripper_offset=20;c.frame_transaction=1;assert(dry.sendMotion(c)&&dry.gripperActionId()==2);
-        assert(dry.sendMotion(c)&&dry.gripperActionId()==2);
-        c.frame_transaction=2;assert(dry.sendMotion(c)&&dry.gripperActionId()==3);
+        c.gripper_offset=20;c.frame_transaction=1;assert(dry.sendMotion(c)&&dry.gripperActionId()==1);
+        assert(dry.sendMotion(c)&&dry.gripperActionId()==1);
+        c.frame_transaction=2;assert(dry.sendMotion(c)&&dry.gripperActionId()==1);
     }
 
     // A virtual terminal exercises real read/write code without opening hardware.
     int master=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
     assert(master>=0 && grantpt(master)==0 && unlockpt(master)==0);
-    UARTController uart; uart.configureFrameFeedback(0,1);
+    UARTController uart; uart.configureFrameFeedback(1,0);
     uart.initUART(ptsname(master),115200,false,false);
     assert(write(master,frame.data(),2)==2);
     std::this_thread::sleep_for(Ms(20));
@@ -159,7 +159,7 @@ int main() {
         assert(fb.valid && fb.gripper_open==done && fb.gripper_action_id==id &&
                fb.camera_pitch_cdeg==cam_pitch);
     };
-    using Out=std::array<uint8_t,15>;
+    using Out=std::array<uint8_t,17>;
     auto readFrame=[&](Out &out) {
         size_t count=0;
         auto until=Clock::now()+Ms(1000);
@@ -176,27 +176,27 @@ int main() {
     assert(uart.gripperActionResult()==R::Idle);
 
     MotionCommand command;
-    command.vx_mps=0.1f; command.wz_rps=-0.25f; command.gripper_offset=0;
+    command.vx_mps=0.1f; command.wz_rps=-0.25f; command.gripper_offset=20;
     Out outgoing{};
     // 第一次关闭：编号1
     assert(uart.sendMotion(command) && uart.gripperActionId()==1);
-    assert(readFrame(outgoing)==15);
-    assert((outgoing==Out{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x00,0x01,0x00,0x00,0x48,0x35}));
+    assert(readFrame(outgoing)==17);
+    assert((outgoing==Out{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0xFB,0x01,0x00,0x00,0x00,0x80,0xE2,0x3C}));
     assert(uart.gripperActionResult()==R::NotDone);        // 反馈编号仍为0
     // 关闭过程中重复发送“关闭”：编号不变，字节完全相同
     assert(uart.sendMotion(command) && uart.gripperActionId()==1);
-    assert(readFrame(outgoing)==15);
-    assert((outgoing==Out{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x00,0x01,0x00,0x00,0x48,0x35}));
+    assert(readFrame(outgoing)==17);
+    assert((outgoing==Out{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0xFB,0x01,0x00,0x00,0x00,0x80,0xE2,0x3C}));
     mcuReport(1,1);
     assert(uart.gripperActionResult()==R::NotDone);
     mcuReport(0,1);
     assert(uart.gripperActionResult()==R::Done);           // 两次“关闭”共用一次完成
 
     // 张开：编号2；下位机仍报旧的“已完成、编号1”，不能误判
-    command.gripper_offset=20;
+    command.gripper_offset=0;
     assert(uart.sendMotion(command) && uart.gripperActionId()==2);
-    assert(readFrame(outgoing)==15);
-    assert((outgoing==Out{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x14,0x02,0x00,0x00,0xBD,0xC5}));
+    assert(readFrame(outgoing)==17);
+    assert((outgoing==Out{0x56,0xCD,0xCC,0xCC,0x3D,0x00,0x00,0x80,0xBE,0x05,0x02,0x00,0x00,0x00,0x80,0xB3,0xE2}));
     assert(uart.gripperActionResult()==R::NotDone);
     mcuReport(1,1);                           // 编号不符：即使标志为完成也不采信
     assert(uart.gripperActionResult()==R::NotDone);
@@ -204,11 +204,11 @@ int main() {
     assert(uart.gripperActionResult()==R::Done);
 
     // 再关闭：编号3；下位机报旧的“已完成、编号1”也不采信
-    command.gripper_offset=0;
+    command.gripper_offset=20;
     assert(uart.sendMotion(command) && uart.gripperActionId()==3);
-    assert(readFrame(outgoing)==15 && outgoing[9]==0 && outgoing[10]==3 && outgoing[11]==0 && outgoing[12]==0);
-    const uint16_t crc=UARTController::calculateCRC16(outgoing.data(),0,12);
-    assert(outgoing[13]==(crc&0xFF) && outgoing[14]==(crc>>8));
+    assert(readFrame(outgoing)==17 && outgoing[9]==0xFB && outgoing[10]==3 && outgoing[11]==0 && outgoing[12]==0);
+    const uint16_t crc=UARTController::calculateCRC16(outgoing.data(),0,14);
+    assert(outgoing[15]==(crc&0xFF) && outgoing[16]==(crc>>8));
     mcuReport(1,1);
     assert(uart.gripperActionResult()==R::NotDone);
     mcuReport(0x7F,3);                                     // 非1的值不算完成
@@ -224,7 +224,7 @@ int main() {
     assert(uart.cameraPitchTarget()==0 && uart.cameraPitchResult(300)==R::Done);
     command.camera_pitch_cdeg=3000;
     assert(uart.sendMotion(command) && uart.cameraPitchTarget()==3000 && uart.gripperActionId()==3);
-    assert(readFrame(outgoing)==15 && outgoing[10]==3 && outgoing[11]==30 && outgoing[12]==0);
+    assert(readFrame(outgoing)==17 && outgoing[10]==3 && outgoing[11]==30 && outgoing[12]==0);
     assert(uart.cameraPitchResult(300)==R::NotDone);
     cam_pitch=1500; mcuReport(0,3);
     assert(uart.cameraPitchResult(300)==R::NotDone);
@@ -247,11 +247,11 @@ int main() {
         int mcu=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
         assert(mcu>=0 && grantpt(mcu)==0 && unlockpt(mcu)==0);
         const std::string path=ptsname(mcu);
-        UARTController link_uart; link_uart.configureFrameFeedback(0,1);
+        UARTController link_uart; link_uart.configureFrameFeedback(1,0);
         link_uart.initUART(path,115200,false,false);
         {
             // 独占：第二个进程/对象不能同时打开同一串口。
-            UARTController second; second.configureFrameFeedback(0,1); bool owned=false;
+            UARTController second; second.configureFrameFeedback(1,0); bool owned=false;
             try { second.initUART(path,115200,false,false); } catch(const std::runtime_error&) { owned=true; }
             assert(owned);
         }
@@ -259,7 +259,7 @@ int main() {
             Frame f{}; packFeedback(f.data(),done,id,pitch);
             assert(write(mcu,f.data(),f.size())==8);
         };
-        // Collect host->MCU packets for a while; returns complete 15-byte frames.
+        // Collect host->MCU packets for a while; returns complete 17-byte frames.
         auto collect=[&](int ms) {
             std::vector<uint8_t> bytes; uint8_t buf[256];
             const auto until=Clock::now()+Ms(ms);
@@ -267,15 +267,15 @@ int main() {
                 const auto n=read(mcu,buf,sizeof(buf));
                 if(n>0) bytes.insert(bytes.end(),buf,buf+n); else std::this_thread::sleep_for(Ms(2));
             }
-            assert(bytes.size()%15==0);
-            std::vector<Out> frames(bytes.size()/15);
-            for(size_t i=0;i<frames.size();++i) std::memcpy(frames[i].data(),bytes.data()+15*i,15);
+            assert(bytes.size()%17==0);
+            std::vector<Out> frames(bytes.size()/17);
+            for(size_t i=0;i<frames.size();++i) std::memcpy(frames[i].data(),bytes.data()+17*i,17);
             return frames;
         };
         auto vx=[](const Out& o){float v; std::memcpy(&v,o.data()+1,4); return v;};
         auto pitch=[](const Out& o){return int16_t(o[11]|(o[12]<<8));};
         // 下位机已停在上次运行的编号7且为关闭：重启后的第一包要张开，必须用8，否则会被当成重复包。
-        report(0,7,1200);
+        report(1,7,1200);
         assert(link_uart.syncGripperActionId(Ms(500)));
         assert(link_uart.gripperActionId()==0 && link_uart.gripperAck().result==R::Idle && link_uart.gripperAck().target==-1);
         MotionLink link(link_uart,{40,150});
@@ -286,33 +286,52 @@ int main() {
         auto frames=collect(100);
         assert(frames.size()>=2);                             // immediate write plus periodic resend
         for(const auto& f:frames) {
-            assert(f[0]==0x56 && std::abs(vx(f)-0.1f)<1e-6f && f[9]==20 && f[10]==8 && pitch(f)==12);
-            const uint16_t c=UARTController::calculateCRC16(f.data(),0,12);
-            assert(f[13]==(c&0xFF) && f[14]==(c>>8));
+            assert(f[0]==0x56 && std::abs(vx(f)-0.1f)<1e-6f && f[9]==0xFB && f[10]==8 && pitch(f)==12);
+            const uint16_t c=UARTController::calculateCRC16(f.data(),0,14);
+            assert(f[15]==(c&0xFF) && f[16]==(c>>8));
         }
         link.submit(drive);                                   // next task frame, same command
         report(1,7,1200);                                     // old id: not an acknowledgement
         std::this_thread::sleep_for(Ms(20));
         assert(link.healthy() && link_uart.gripperAck().result==R::NotDone && link_uart.gripperAck().target==0);
-        report(1,8,1200);
+        report(0,8,1200);
         std::this_thread::sleep_for(Ms(20));
         assert(link_uart.gripperAck().result==R::Done && link_uart.gripperAck().target==0);
         // Stalled task loop: after 150 ms the resend becomes zero velocity, gripper/pitch kept.
         frames=collect(250);
-        assert(!frames.empty() && vx(frames.back())==0.0f && frames.back()[9]==20 && frames.back()[10]==8 &&
+        assert(!frames.empty() && vx(frames.back())==0.0f && frames.back()[9]==0xFB && frames.back()[10]==8 &&
                pitch(frames.back())==12);
         assert(link.stats().stale>0 && link.stats().failed==0);
         assert(!link.healthy());                              // no fresh command within the timeout
         // A new command resumes motion immediately; closing the gripper takes id 9.
         drive.gripper_offset=0; link.submit(drive);
         frames=collect(60);
-        assert(!frames.empty() && std::abs(vx(frames.front())-0.1f)<1e-6f && frames.front()[9]==0 && frames.front()[10]==9);
+        assert(!frames.empty() && std::abs(vx(frames.front())-0.1f)<1e-6f && frames.front()[9]==5 && frames.front()[10]==9);
         link.stop();
         frames=collect(120);                                  // a resend may precede the final stop packet
-        assert(!frames.empty() && frames.size()<=2 && vx(frames.back())==0.0f && frames.back()[9]==0 && frames.back()[10]==9);
+        assert(!frames.empty() && frames.size()<=2 && vx(frames.back())==0.0f && frames.back()[9]==5 && frames.back()[10]==9);
         assert(!link.healthy());
         link.submit(drive);                                   // ignored after stop
         assert(collect(80).empty());
+        {
+            // 每包注入实时航向：重发取的是写入时的值，不是提交时快照；IMU失效写无效值。
+            std::atomic<float> yaw{0.5f};
+            MotionLink yawed(link_uart,{20,150},{},[&]{return yaw.load();});
+            MotionCommand y; y.vx_mps=0.1f; y.gripper_offset=0; y.camera_pitch_cdeg=0;
+            yawed.submit(y);
+            frames=collect(50);
+            assert(!frames.empty());
+            auto wireYaw=[](const Out& o){return int16_t(o[13]|(o[14]<<8));};
+            assert(!frames.empty() && wireYaw(frames.back())==2865);   // 0.5rad = 28.648°
+            yaw=1.0f; yawed.submit(y);
+            frames=collect(50);
+            assert(wireYaw(frames.back())==5730);                      // 1.0rad = 57.296° -> 5730 附近
+            yaw=std::numeric_limits<float>::quiet_NaN(); yawed.submit(y);
+            frames=collect(50);
+            assert(wireYaw(frames.back())==kImuYawInvalid);
+            yawed.stop();                                         // 停机补发包留在管道里，先排空
+            collect(120);
+        }
         {
             // Output authorization is checked in the resend worker, not only in the task loop.
             std::atomic<bool> permit{false};
@@ -320,11 +339,11 @@ int main() {
             drive.gripper_offset=20;drive.camera_pitch_cdeg=2200;
             gated.submit(drive);assert(collect(50).empty()); // unarmed: no actuator commands at all
             permit=true;gated.submit(drive);frames=collect(50);
-            assert(!frames.empty() && vx(frames.back())>0 && frames.back()[9]==20);
+            assert(!frames.empty() && vx(frames.back())>0 && frames.back()[9]==0xFB);
             permit=false;drive.gripper_offset=0;drive.camera_pitch_cdeg=3500;gated.submit(drive);
             frames=collect(70);assert(!frames.empty());
             const auto& last=frames.back();
-            assert(vx(last)==0 && last[9]==20 && pitch(last)==22); // freeze last authorized actuator targets
+            assert(vx(last)==0 && last[9]==0xFB && pitch(last)==22); // freeze last authorized actuator targets
             gated.stop();collect(40);
         }
         link_uart.closePort();
@@ -335,7 +354,7 @@ int main() {
         // 状态变化才用编号+1，之后下位机回报的编号与上位机一致。
         int mcu=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
         assert(mcu>=0 && grantpt(mcu)==0 && unlockpt(mcu)==0);
-        UARTController sync_uart; sync_uart.configureFrameFeedback(0,1);
+        UARTController sync_uart; sync_uart.configureFrameFeedback(1,0);
         sync_uart.initUART(ptsname(mcu),115200,false,false);
         auto report=[&](uint8_t open,uint8_t id) {
             Frame f{}; packFeedback(f.data(),open,id,500);
@@ -345,34 +364,34 @@ int main() {
         auto lastId=[&] {
             uint8_t buf[256]; std::vector<uint8_t> bytes; const auto until=Clock::now()+Ms(30);
             while(Clock::now()<until) { const auto n=read(mcu,buf,sizeof(buf)); if(n>0) bytes.insert(bytes.end(),buf,buf+n); else std::this_thread::sleep_for(Ms(2)); }
-            assert(bytes.size()>=15 && bytes.size()%15==0);
-            return bytes[bytes.size()-15+10];
+            assert(bytes.size()>=17 && bytes.size()%17==0);
+            return bytes[bytes.size()-17+10];
         };
         using R=GripperActionResult;
         report(0,0);                                          // 下位机：关闭，编号0
         assert(sync_uart.syncGripperActionId(Ms(500)));
-        MotionCommand c; c.gripper_offset=0; c.camera_pitch_cdeg=500;
+        MotionCommand c; c.gripper_offset=20; c.camera_pitch_cdeg=500;
         assert(sync_uart.sendMotion(c) && lastId()==0);      // 保持关闭：沿用0，不触发动作
         assert(sync_uart.gripperAck().result==R::Idle);
         assert(sync_uart.sendMotion(c) && lastId()==0);
-        c.gripper_offset=20;
+        c.gripper_offset=0;
         assert(sync_uart.sendMotion(c) && lastId()==1 && sync_uart.gripperActionId()==1);
         report(0,0); assert(sync_uart.gripperAck().result==R::NotDone);
-        report(1,1); assert(sync_uart.gripperAck().result==R::Done && sync_uart.gripperAck().target==0);
-        c.gripper_offset=0;
+        report(1,1); assert(sync_uart.gripperAck().result==R::Done && sync_uart.gripperAck().target==1);
+        c.gripper_offset=20;
         assert(sync_uart.sendMotion(c) && lastId()==2);
         report(1,1); assert(sync_uart.gripperAck().result==R::NotDone);
-        report(0,2); assert(sync_uart.gripperAck().result==R::Done && sync_uart.gripperAck().target==1);
+        report(0,2); assert(sync_uart.gripperAck().result==R::Done && sync_uart.gripperAck().target==0);
         sync_uart.closePort();
 
         // 下位机停在编号5且已张开：首包保持张开沿用5（状态已一致即完成），关闭用6。
-        UARTController open_uart; open_uart.configureFrameFeedback(0,1);
+        UARTController open_uart; open_uart.configureFrameFeedback(1,0);
         open_uart.initUART(ptsname(mcu),115200,false,false);
         report(1,5);
         assert(open_uart.syncGripperActionId(Ms(500)));
-        c.gripper_offset=20;
-        assert(open_uart.sendMotion(c) && lastId()==5 && open_uart.gripperAck().result==R::Done);
         c.gripper_offset=0;
+        assert(open_uart.sendMotion(c) && lastId()==5 && open_uart.gripperAck().result==R::Done);
+        c.gripper_offset=20;
         assert(open_uart.sendMotion(c) && lastId()==6);
         report(1,5); assert(open_uart.gripperAck().result==R::NotDone);
         report(0,6); assert(open_uart.gripperAck().result==R::Done);
@@ -392,8 +411,8 @@ int main() {
         auto lastId=[&] {
             uint8_t buf[256]; std::vector<uint8_t> bytes; const auto until=Clock::now()+Ms(30);
             while(Clock::now()<until) { const auto n=read(mcu,buf,sizeof(buf)); if(n>0) bytes.insert(bytes.end(),buf,buf+n); else std::this_thread::sleep_for(Ms(2)); }
-            assert(bytes.size()>=15 && bytes.size()%15==0);
-            return bytes[bytes.size()-15+10];
+            assert(bytes.size()>=17 && bytes.size()%17==0);
+            return bytes[bytes.size()-17+10];
         };
         using R=GripperActionResult;
         bool rejected=false;
@@ -439,7 +458,7 @@ int main() {
         // No A6 feedback: sync fails and leaves the id untouched.
         int mcu=posix_openpt(O_RDWR|O_NOCTTY|O_NONBLOCK);
         assert(mcu>=0 && grantpt(mcu)==0 && unlockpt(mcu)==0);
-        UARTController silent; silent.configureFrameFeedback(0,1);
+        UARTController silent; silent.configureFrameFeedback(1,0);
         silent.initUART(ptsname(mcu),115200,false,false);
         const auto t0=Clock::now();
         assert(!silent.syncGripperActionId(Ms(100)));

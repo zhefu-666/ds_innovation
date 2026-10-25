@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""旧夹爪入口兼容：open=0°、close=20°；A6由验收配置定义。"""
+"""夹爪入口：open/close发送有符号偏移+5/-5；A6反馈仍为1/0。"""
 from pathlib import Path
 import runpy
 if __name__ == '__main__':

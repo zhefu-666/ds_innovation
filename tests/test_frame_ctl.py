@@ -25,7 +25,7 @@ def feedback(state, action_id, pitch):
 
 
 class FrameTests(unittest.TestCase):
-    def exercise(self, action, state=0, action_id=0, pitch=40, dry=False, reply=True, legacy=False, emit=True, config=None, timeout='.25'):
+    def exercise(self, action, state=0, action_id=0, pitch=120, dry=False, reply=True, legacy=False, emit=True, config=None, timeout='.25'):
         master, slave = pty.openpty()
         script = ROOT / 'tools/gripper/gripper_ctl.py' if legacy else SCRIPT
         cmd = [sys.executable, str(script), action, '--port', os.ttyname(slave), '--timeout', timeout, '--frame-config', str(config or ROOT / 'tests/fixtures/frame_mapping.synthetic.json')]
@@ -51,15 +51,16 @@ class FrameTests(unittest.TestCase):
                         if received[0] != 0x56:
                             del received[0]
                             continue
-                        if len(received) < 15:
+                        if len(received) < 17:
                             break
-                        packet = bytes(received[:15]);del received[:15]
+                        packet = bytes(received[:17]);del received[:17]
                         packets.append(packet)
                         if reply == 'done':
                             response_state = 1  # done_flag: echo id with 1 immediately, before any motion
                             response_id = packet[10]
                         elif reply:
-                            response_state = 1 if packet[9] == 20 else 0
+                            # The MCU consumes signed +5/-5 but returns binary state.
+                            response_state = {5: 1, -5: 0}[struct.unpack_from('<b', packet, 9)[0]]
                             response_id = packet[10]
             if process.poll() is None:
                 process.kill()
@@ -72,8 +73,9 @@ class FrameTests(unittest.TestCase):
             os.close(master);os.close(slave)
 
     def assert_packet(self, packet, offset, action_id, pitch):
-        self.assertEqual(struct.unpack('<BffbBh', packet[:13]), (0x56, 0., 0., offset, action_id, pitch-40))
-        self.assertEqual(int.from_bytes(packet[13:], 'little'), ctl.crc16(packet[:13]))
+        self.assertEqual(struct.unpack('<BffbBh', packet[:13]), (0x56, 0., 0., 5 if offset == 0 else -5, action_id, pitch-120))
+        self.assertEqual(struct.unpack('<h', packet[13:15])[0], ctl.IMU_YAW_INVALID)
+        self.assertEqual(int.from_bytes(packet[15:], 'little'), ctl.crc16(packet[:15]))
 
     def done_config(self, settle):
         import json, tempfile
@@ -82,32 +84,20 @@ class FrameTests(unittest.TestCase):
         self.addCleanup(os.unlink, f.name)
         return f.name
 
-    def test_done_flag_waits_settle_then_reports_known_frame(self):
-        start = time.monotonic()
-        code, packets, out = self.exercise('close', state=1, action_id=24, reply='done', config=self.done_config(300), timeout='1')
-        self.assertEqual(code, 0, out)
-        self.assertGreaterEqual(time.monotonic()-start, .3)
-        self.assert_packet(packets[0], 20, 25, 40)
-        self.assertIn('TEMP_ASSUMPTION', out);self.assertIn('KNOWN_FRAME angle=20 id=25', out)
-
-    def test_done_flag_settle_longer_than_timeout_fails(self):
-        code, packets, out = self.exercise('open', state=1, action_id=3, reply='done', config=self.done_config(2000), timeout='.3')
-        self.assertEqual(code, 1);self.assertNotIn('KNOWN_FRAME', out)
-        self.assertTrue(all(p[9] == 0 and p[10] == 4 for p in packets))
-
-    def test_done_flag_zero_flag_never_acknowledges(self):
-        code, _, out = self.exercise('open', state=0, action_id=3, reply=False, config=self.done_config(100), timeout='.4')
-        self.assertEqual(code, 1);self.assertNotIn('KNOWN_FRAME', out)
+    def test_legacy_done_flag_rejected_without_tx(self):
+        code, packets, out = self.exercise("close", state=1, action_id=24, config=self.done_config(300))
+        self.assertEqual(code, 1, out)
+        self.assertEqual(packets, [])
 
     def test_up(self):
         code, packets, text = self.exercise('up')
         self.assertEqual(code, 0, text);self.assertTrue(packets)
-        for packet in packets:self.assert_packet(packet, 0, 1, 40)
+        for packet in packets:self.assert_packet(packet, 0, 1, 120)
 
     def test_down_and_id_wrap(self):
-        code, packets, text = self.exercise('down', state=1, action_id=255, pitch=5)
+        code, packets, text = self.exercise('down', state=1, action_id=255, pitch=95)
         self.assertEqual(code, 0, text);self.assertTrue(packets)
-        for packet in packets:self.assert_packet(packet, 20, 1, 5)
+        for packet in packets:self.assert_packet(packet, 20, 1, 95)
 
     def test_dry_run_has_no_tx(self):
         code, packets, text = self.exercise('up', dry=True)
@@ -118,31 +108,41 @@ class FrameTests(unittest.TestCase):
         code, packets, text = self.exercise('status')
         self.assertEqual(code, 0, text);self.assertEqual(packets, [])
 
-    def test_matching_state_still_sends_fresh_command(self):
-        for action, state, offset in [('down', 1, 20), ('up', 0, 0)]:
+    def test_matching_state_keeps_existing_id(self):
+        for action, state, offset in [('down', 0, 20), ('up', 1, 0)]:
             code, packets, text = self.exercise(action, state=state, action_id=2)
             self.assertEqual(code, 0, text);self.assertTrue(packets)
-            for packet in packets:self.assert_packet(packet, offset, 3, 40)
+            for packet in packets:self.assert_packet(packet, offset, 2, 120)
 
     def test_same_state_old_id_cannot_acknowledge_new_command(self):
-        code, packets, text = self.exercise('up', state=1, action_id=2, reply=False)
+        code, packets, text = self.exercise('up', state=0, action_id=2, reply=False)
         self.assertEqual(code, 1, text);self.assertTrue(packets)
-        for packet in packets:self.assert_packet(packet, 0, 3, 40)
+        for packet in packets:self.assert_packet(packet, 0, 3, 120)
         self.assertIn('反馈超时', text)
 
     def test_missing_ack_times_out_without_reverse(self):
-        code, packets, text = self.exercise('up', reply=False)
+        code, packets, text = self.exercise('up', state=0, reply=False)
         self.assertEqual(code, 1, text);self.assertGreater(len(packets), 1)
         self.assertEqual(len(set(packets)), 1)
         self.assertIn('反馈超时', text)
 
-    def test_eighty_degree_pitch_is_preserved(self):
-        code, packets, text = self.exercise('up', pitch=80)
+    def test_close_with_matching_id_but_open_state_still_fails(self):
+        code, packets, text = self.exercise('close', state=1, action_id=1, reply='done')
+        self.assertEqual(code, 1, text)
+        self.assertGreater(len(packets), 1)
+        for packet in packets:self.assert_packet(packet, 20, 2, 120)
+        self.assertIn('目标编号2/状态0，最后编号2/状态1', text)
+        self.assertIn('最后RX=A6 01 02 78 00 AE 25 0A', text)
+        self.assertIn('TX=56 00 00 00 00 00 00 00 00 FB 02 00 00 00 80 FB 6A', text)
+        self.assertNotIn('串口工具未占用', text)
+
+    def test_maximum_pitch_preserved(self):
+        code, packets, text = self.exercise('up', pitch=150)
         self.assertEqual(code, 0, text);self.assertTrue(packets)
-        for packet in packets:self.assert_packet(packet, 0, 1, 80)
+        for packet in packets:self.assert_packet(packet, 0, 1, 150)
 
     def test_out_of_range_pitch_no_tx(self):
-        for pitch in [-1, 81]:
+        for pitch in [89, 151]:
             code, packets, text = self.exercise('up', pitch=pitch)
             self.assertEqual(code, 1, text);self.assertEqual(packets, [])
 
@@ -157,7 +157,7 @@ class FrameTests(unittest.TestCase):
     def test_old_open_entry(self):
         code, packets, text = self.exercise('open', legacy=True)
         self.assertEqual(code, 0, text);self.assertTrue(packets)
-        self.assert_packet(packets[0], 0, 1, 40)
+        self.assert_packet(packets[0], 0, 1, 120)
 
     def test_parser_split_noise_and_crc(self):
         parser = ctl.Feedback();f = feedback(1, 10, 40)
@@ -165,6 +165,12 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(parser.feed(f[3:])[0][:3], (1, 10, 40))
         bad = bytearray(f);bad[5] ^= 1
         self.assertEqual(len(parser.feed(bad+f)), 1)
+
+    def test_firmware_golden_frames_are_signed_offsets_not_feedback_states(self):
+        self.assertEqual(ctl.motion_packet(0, 1, 120),
+                         bytes.fromhex('56 00 00 00 00 00 00 00 00 05 01 00 00 00 80 AA B4'))
+        self.assertEqual(ctl.motion_packet(20, 2, 120),
+                         bytes.fromhex('56 00 00 00 00 00 00 00 00 FB 02 00 00 00 80 FB 6A'))
 
 
 if __name__ == '__main__':

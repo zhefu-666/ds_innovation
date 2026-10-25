@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""方框升降：open/up/raise=0°，close/down/lower=20°；status只读。
+"""夹爪开合：open/up/raise=0（业务值，线上偏移+5），close/down/lower=20（线上偏移-5）；status只读。
 
-a6_semantics=done_flag（临时假设）：A6=1只表示该编号动作完成，开闭都回1；须等满settle，结束打印KNOWN_FRAME。
+A6状态字节的实际含义尚待固件确认；现有配置匹配仅作协议检查，不代表机械到位。
 
-升降时车速固定为0，相机保持A6返回角度：TX=RX-40（下发偏移角，回传0..80）。
+升降时车速固定为0，相机保持A6返回角度：TX=RX-120（下发偏移角，回传90..150）。
 --dry-run只读反馈并预览，不发送。A6开闭语义由已验收配置提供，需匹配动作编号。
 """
 import argparse
+import json
 from contextlib import contextmanager
 import fcntl
 import math
@@ -33,10 +34,24 @@ def crc16(data):
     return crc
 
 
-def motion_packet(offset, action_id, pitch_deg):
-    if offset not in (0, 20) or not 0 <= action_id <= 255 or not 0 <= pitch_deg <= 80:
-        raise ValueError('方框目标、动作编号或相机实际角无效')
-    payload = struct.pack('<BffbBh', 0x56, 0., 0., offset, action_id, pitch_deg - 40)
+# 线上航向字段 0.01°、-18000..18000；-32768 表示IMU不可用。
+IMU_YAW_INVALID = -32768
+
+
+def imu_yaw_wire(yaw_deg):
+    """弧度以外的航向输入统一走这里：度数归一到(-180,180]后转0.01°。None表示无效。"""
+    if yaw_deg is None:
+        return IMU_YAW_INVALID
+    yaw = (float(yaw_deg) + 180.0) % 360.0 - 180.0
+    return max(-18000, min(18000, int(round(yaw * 100.0))))
+
+
+def motion_packet(offset, action_id, pitch_deg, imu_yaw_deg=None):
+    if offset not in (0, 20) or not 0 <= action_id <= 255 or not 90 <= pitch_deg <= 150:
+        raise ValueError('夹爪目标、动作编号或相机实际角无效')
+    # TX command offset is +5=open/-5=closed; this does not establish A6 semantics.
+    payload = struct.pack('<BffbBh', 0x56, 0., 0., 5 if offset == 0 else -5, action_id, max(-30, min(30, pitch_deg - 120)))
+    payload += struct.pack('<h', imu_yaw_wire(imu_yaw_deg))
     return payload + struct.pack('<H', crc16(payload))
 
 
@@ -140,17 +155,19 @@ def run(args):
         if action == 'status':
             return 0
         state, old_id, pitch, _ = current
-        if state not in (0, 1) or not 0 <= pitch <= 80:
+        if state not in (0, 1) or not 90 <= pitch <= 150:
             raise ValueError('反馈状态或相机实际角无效，拒绝发送')
         offset, label = TARGETS[action]
         flag_mode = done_flag(mapping)
         target_state = 1 if flag_mode else mapping[action]
         if flag_mode:
             print(DONE_FLAG_NOTE + '; settle_ms=%d' % mapping['settle_ms'], flush=True)
-        action_id = old_id % 255 + 1  # Explicit manual request: always issue a fresh action.
+        action_id = old_id if state == target_state else old_id % 255 + 1  # MCU仅在偏移变化时计数。
+        if flag_mode:
+            raise ValueError("当前实车为夹爪状态映射；done_flag配置已废弃")
         packet = motion_packet(offset, action_id, pitch)
-        print('%s: 方框=%+d°，车速=0，相机保持RX%d°（TX偏移%d°），动作编号=%d\n包: %s' %
-              (label, offset, pitch, pitch-40, action_id, packet.hex(' ').upper()), flush=True)
+        print('%s: 夹爪目标=%s（TX偏移%+d°），车速=0，相机保持RX%d°（TX偏移%d°），动作编号=%d\n包: %s' %
+              (label, '开' if offset == 0 else '关', 5 if offset == 0 else -5, pitch, pitch-120, action_id, packet.hex(' ').upper()), flush=True)
         if args.dry_run:
             print('预览完成：TX=0，未发送任何命令。')
             return 0
@@ -158,10 +175,14 @@ def run(args):
         next_send = 0.0
         last = current
         started = None
+        sent_count = 0
         while time.monotonic() < deadline:
             now = time.monotonic()
             if now >= next_send:
                 send_packet(fd, packet, deadline)
+                sent_count += 1
+                if sent_count == 1:
+                    print('GRIPPER_COMMAND_SENT ' + json.dumps({'gripper_offset': 5 if offset == 0 else -5, 'action_id': action_id, 'vx': 0, 'wz': 0, 'pitch_tx': pitch-120, 'raw': packet.hex(' '), 'meaning': 'last sent command; physical position unverified'}), flush=True)
                 started = now if started is None else started
                 next_send = now + 0.05
             for feedback in receive(fd, parser, min(0.01, max(0., deadline - time.monotonic()))):
@@ -176,8 +197,10 @@ def run(args):
                         print('KNOWN_FRAME angle=%d id=%d（TEMP_ASSUMPTION：后续传 --known-frame-angle %d --known-frame-id %d）' %
                               (offset, action_id, offset, action_id), flush=True)
                     return 0
-        raise TimeoutError('%s反馈超时：目标编号%d/状态%d，最后编号%d/状态%d；停止重发，不反向动作' %
-                           (label, action_id, target_state, last[1], last[0]))
+        raise TimeoutError('%s反馈超时：目标编号%d/状态%d，最后编号%d/状态%d；已发送%d包；'
+                           'TX=%s；最后RX=%s；停止重发，不反向动作。编号匹配不代表目标状态或机构已到位' %
+                           (label, action_id, target_state, last[1], last[0], sent_count,
+                            packet.hex(' ').upper(), last[3].hex(' ').upper()))
 
 
 def main():
@@ -193,7 +216,13 @@ def main():
         parser.error('--timeout必须为正数')
     try:
         return run(args)
-    except (OSError, ValueError, TimeoutError) as exc:
+    except TimeoutError as exc:
+        print('失败：%s' % exc, file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print('失败：%s' % exc, file=sys.stderr)
+        return 1
+    except OSError as exc:
         print('失败：%s（请确认主程序及其他串口工具未占用设备）' % exc, file=sys.stderr)
         return 1
     except KeyboardInterrupt:

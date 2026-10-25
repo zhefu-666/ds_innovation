@@ -1,5 +1,6 @@
 #include "rescue/rknn_model.hpp"
-#include "../benchmark_results/rknn_api.h"
+#include "rescue/rknn_output_layout.hpp"
+#include <rknn_api.h>
 #include <dlfcn.h>
 #include <stdexcept>
 namespace rescue {
@@ -21,6 +22,7 @@ struct RknnModel::Runtime {
     decltype(&rknn_outputs_get) outputs_get=nullptr;
     decltype(&rknn_outputs_release) outputs_release=nullptr;
     int size=0,channels=0,anchors=0;
+    std::vector<std::vector<uint32_t>> output_dims;
     ~Runtime(){if(initialized&&destroy)destroy(context);if(lib)dlclose(lib);}
 };
 RknnModel::RknnModel(const std::string &library,const std::string &model,int core_mask):r_(std::make_unique<Runtime>()) {
@@ -34,15 +36,29 @@ RknnModel::RknnModel(const std::string &library,const std::string &model,int cor
     r.initialized=true;
     if(core_mask>=0)check(r.set_core_mask(r.context,static_cast<rknn_core_mask>(core_mask)),"rknn_set_core_mask");
     rknn_input_output_num num{};check(r.query(r.context,RKNN_QUERY_IN_OUT_NUM,&num,sizeof(num)),"query counts");
-    if(num.n_input!=1 || num.n_output!=1)throw std::runtime_error("Expected one input and one output: "+model);
-    rknn_tensor_attr input{},output{};
+    if(num.n_input!=1)throw std::runtime_error("Expected one RKNN input: "+model);
+    rknn_tensor_attr input{};
     check(r.query(r.context,RKNN_QUERY_INPUT_ATTR,&input,sizeof(input)),"query input");
-    check(r.query(r.context,RKNN_QUERY_OUTPUT_ATTR,&output,sizeof(output)),"query output");
     if(input.n_dims!=4 || input.dims[0]!=1 || input.dims[1]!=input.dims[2] || input.dims[1]==0 || input.dims[3]!=3 ||
-       input.fmt!=RKNN_TENSOR_NHWC || output.n_dims!=3 || output.dims[0]!=1 || output.dims[1]==0 || output.dims[2]==0 ||
-       output.n_elems!=output.dims[1]*output.dims[2])
-        throw std::runtime_error("RKNN tensor contract mismatch (expected square NHWC RGB input and one [1,C,N] output): "+model);
-    r.size=int(input.dims[1]);r.channels=int(output.dims[1]);r.anchors=int(output.dims[2]);
+       input.fmt!=RKNN_TENSOR_NHWC)
+        throw std::runtime_error("RKNN tensor contract mismatch (expected square NHWC RGB input): "+model);
+    r.output_dims.resize(num.n_output);
+    for(unsigned i=0;i<num.n_output;++i) {
+        rknn_tensor_attr output{};output.index=i;
+        check(r.query(r.context,RKNN_QUERY_OUTPUT_ATTR,&output,sizeof(output)),"query output");
+        if(output.n_dims<1 || output.n_dims>4)
+            throw std::runtime_error("Unsupported RKNN output rank: "+model);
+        auto &shape=r.output_dims[i];
+        shape.reserve(output.n_dims);
+        size_t count=1;
+        for(unsigned j=0;j<output.n_dims;++j) {
+            shape.push_back(output.dims[j]);
+            count*=output.dims[j];
+        }
+        if(count!=output.n_elems)throw std::runtime_error("RKNN output element count mismatch: "+model);
+    }
+    const auto layout=validateRknnOutputLayout(model,r.output_dims);
+    r.size=int(input.dims[1]);r.channels=layout.channels;r.anchors=layout.anchors;
 }
 RknnModel::~RknnModel()=default;
 int RknnModel::inputSize() const {return r_->size;}
@@ -55,11 +71,25 @@ cv::Mat RknnModel::run(const cv::Mat &rgb) {
     rknn_input input{};input.index=0;input.buf=rgb.data;input.size=static_cast<uint32_t>(rgb.total()*3);
     input.type=RKNN_TENSOR_UINT8;input.fmt=RKNN_TENSOR_NHWC;input.pass_through=0;
     check(r.inputs_set(r.context,1,&input),"inputs_set");check(r.run(r.context,nullptr),"run");
-    rknn_output output{};output.want_float=1;
-    check(r.outputs_get(r.context,1,&output,nullptr),"outputs_get");
-    struct Release {Runtime &r;rknn_output &o;~Release(){r.outputs_release(r.context,1,&o);}} release{r,output};
-    if(!output.buf || output.size<size_t(r.channels)*r.anchors*sizeof(float))throw std::runtime_error("Truncated RKNN output");
-    int shape[]={1,r.channels,r.anchors};
-    return cv::Mat(3,shape,CV_32F,output.buf).clone();
+    std::vector<rknn_output> outputs(r.output_dims.size());
+    for(unsigned i=0;i<outputs.size();++i){outputs[i].index=i;outputs[i].want_float=1;}
+    check(r.outputs_get(r.context,outputs.size(),outputs.data(),nullptr),"outputs_get");
+    struct Release {
+        Runtime &r;std::vector<rknn_output> &o;
+        ~Release(){r.outputs_release(r.context,o.size(),o.data());}
+    } release{r,outputs};
+    std::vector<cv::Mat> branches;
+    branches.reserve(outputs.size());
+    for(unsigned i=0;i<outputs.size();++i) {
+        size_t elements=1;
+        std::vector<int> shape;
+        shape.reserve(r.output_dims[i].size());
+        for(const auto dim:r.output_dims[i]){shape.push_back(int(dim));elements*=dim;}
+        if(!outputs[i].buf || outputs[i].size<elements*sizeof(float))
+            throw std::runtime_error("Truncated RKNN output");
+        branches.emplace_back(static_cast<int>(shape.size()),shape.data(),CV_32F,outputs[i].buf);
+        if(!branches.back().isContinuous())throw std::runtime_error("Non-contiguous RKNN output");
+    }
+    return mergeRknnOutputBranches(branches);
 }
 } // namespace rescue

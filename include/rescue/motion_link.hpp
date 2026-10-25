@@ -22,9 +22,12 @@ struct MotionLinkStats {
 // 200 ms timeout. A command older than command_timeout (stalled loop) is replaced by zero
 // velocity. Zero-velocity substitutes and stop() keep the last gripper and pitch targets:
 // they stop the wheels and never toggle the gripper. Nothing is sent before the first submit.
+// 每包在写入前注入yaw_source的实时航向：重发、停车包和停机补发包都带当前yaw，而不是提交时的旧值。
+// yaw_source返回值非有限（IMU失效）时线上写kImuYawInvalid，不沿用上一帧角度。
 class MotionLink {
 public:
-    explicit MotionLink(UARTController &uart, MotionLinkConfig config = {}, std::function<bool()> permit = {});
+    explicit MotionLink(UARTController &uart, MotionLinkConfig config = {}, std::function<bool()> permit = {},
+                        std::function<float()> yaw_source = {});
     ~MotionLink();
     MotionLink(const MotionLink &) = delete;
     MotionLink &operator=(const MotionLink &) = delete;
@@ -39,8 +42,9 @@ public:
     }
 private:
     void run();
-    void write(const MotionCommand &command, bool stale);
+    void write(MotionCommand command, bool stale);
     std::function<bool()> permit_;
+    std::function<float()> yaw_source_;
     MotionCommand authorized_;
     bool ever_authorized_ = false;
     UARTController &uart_;

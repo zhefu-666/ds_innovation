@@ -119,8 +119,9 @@ def acceptance_issues(profile, action):
 def make_plan(args, p):
     action = args.action
     runtime = DEFAULT_RUNTIME
-    seconds = args.seconds if args.seconds is not None else (.5 if action in WHEELS else 3600 if action == 'web' else 60)
-    if not math.isfinite(seconds) or seconds <= 0 or seconds > (1 if action in WHEELS else 3600 if action == 'web' else 60):
+    # 底盘点动未给--seconds时持续以固定速度运行，直到Ctrl+C或stop；显式给值仍受1秒上限约束。
+    seconds = args.seconds if args.seconds is not None else (None if action in WHEELS else 3600 if action == 'web' else 60)
+    if seconds is not None and (not math.isfinite(seconds) or seconds <= 0 or seconds > (1 if action in WHEELS else 3600 if action == 'web' else 60)):
         raise ValueError('底盘点动时长须在(0,1]秒；其他演示须在(0,60]秒')
     if not math.isfinite(args.speed) or not 0 < args.speed <= .10:
         raise ValueError('--speed must be in (0,0.10] m/s')
@@ -164,7 +165,7 @@ def make_plan(args, p):
                     command += ['--assume-all-safe']
                     if getattr(args, 'assume_injured_trip', False):
                         command += ['--assume-injured-trip']
-                    # 目标贴近时按 5°→20°→40° 下压相机继续跟踪；几何为机械假设模型（未实测验证），同属临时假设。
+                    # 目标贴近时按旧标定 5°→20°→40° 请求下压；新协议 TX 上限 +30°，40°请求会被钳位。机械模型仍为临时假设（未实测验证）。
                     mech = Path(p['camera_calibration']).with_name('camera.mechanical_5_40.yaml')
                     if not mech.is_file():
                         issues.append('assume模式缺少机械俯仰模型文件：' + str(mech))
@@ -180,9 +181,9 @@ def make_plan(args, p):
             command += ['--frame-config', p['frame_config']]
     elif action == 'camera':
         if not -40 <= args.offset_deg <= 40:
-            raise ValueError('相机内部/TX偏移角须为-40..40°')
+            raise ValueError('相机内部/TX偏移角须为-30..30°')
         required = ['frame_config', 'acceptance']
-        command = [py, str(ROOT/'tools/camera_pitch/pitch_ctl.py'), 'set', str(args.offset_deg+40),
+        command = [py, str(ROOT/'tools/camera_pitch/pitch_ctl.py'), 'set', str(args.offset_deg+120),
                    '--port', p['port'], '--baud', str(p['baud']), '--frame-config', p['frame_config'], '--timeout', '2']
     elif action in WHEELS:
         required = ['frame_config', 'acceptance']
@@ -413,14 +414,14 @@ def parser():
     mode.add_argument('--check', action='store_true', help='仅检查文件和前提，不打开设备（默认）')
     ap.add_argument('--site-clear', action='store_true', help='确认机构/运动扫掠空间已清空；寻找搬运额外确认场内仅己方区域且无人/对手进入')
     ap.add_argument('--wheels-disabled', action='store_true', help='静止映射取证：现场已经禁用车轮输出')
-    ap.add_argument('--seconds', type=float)
+    ap.add_argument('--seconds', type=float, help='底盘点动省略时以固定速度持续运行，直到Ctrl+C或stop；显式给值须在(0,1]秒')
     ap.add_argument('--speed', type=float, default=.05)
     ap.add_argument('--wz', type=float, default=.20)
     ap.add_argument('--known-frame-angle', type=int, choices=[0, 20], help='done_flag临时假设：方框当前已知角度（默认取本脚本上次open/close记录）')
     ap.add_argument('--known-frame-id', type=int, help='done_flag临时假设：该角度对应的A6动作编号')
     ap.add_argument('--assume-all-safe', action='store_true', help='TEMP_ASSUMPTION：搬运时所有安全/净空/区域/确认证据视为成立，仅跑通决策链，非验收')
     ap.add_argument('--assume-injured-trip', action='store_true', help='TEMP_ASSUMPTION：配合--assume-all-safe，视为已送达首个普通物资并优先抓伤员块（演示右半区），非验收')
-    ap.add_argument('--offset-deg', type=int, default=5, help='相机内部/TX角度，5对应A6 RX45；范围-40..40')
+    ap.add_argument('--offset-deg', type=int, default=5, help='相机内部/TX偏移角，5对应A6 RX125；范围-30..30')
     return ap
 
 
@@ -441,10 +442,11 @@ def main(argv=None):
                 any_blocked |= bool(plan['issues'])
             return 2 if any_blocked else 0
         plan = make_plan(args, p)
-        print('动作：%s；预算：%ss；模式：%s' % (args.action, plan['seconds'], 'PREVIEW_RX_ONLY' if args.preview else 'EXECUTE' if args.run else 'CHECK_NO_DEVICES'))
+        budget = '持续运行' if plan['seconds'] is None else '%ss' % plan['seconds']
+        print('动作：%s；预算：%s；模式：%s' % (args.action, budget, 'PREVIEW_RX_ONLY' if args.preview else 'EXECUTE' if args.run else 'CHECK_NO_DEVICES'))
         if plan['command']:print('命令：' + shlex.join(plan['command']))
         if '--assume-all-safe' in (plan['command'] or []):print('[TEMP_ASSUMPTION] assume_all_safe=1：净空/区域/抓取/投放证据默认成立，结果不构成验收。')
-        if args.action in WHEELS:print('底盘点动：%s，速度<=0.10m/s、角速度<=0.25rad/s；结束补零速且保持机构。' % args.action)
+        if args.action in WHEELS:print('底盘点动：%s，速度<=0.10m/s、角速度<=0.25rad/s；未给--seconds时持续运行，Ctrl+C或stop结束并按零速补发且保持机构。' % args.action)
         if args.action.startswith('commission-'):print('车速固定0；仅取证原始角度/动作编号/A6状态，不判断机构已到位，不自动写验收结果。')
         if not args.run and not args.preview:
             for issue in plan['issues']:print('BLOCKED: ' + issue)

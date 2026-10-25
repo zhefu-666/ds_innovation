@@ -52,10 +52,10 @@ Foxglove WebSocket：ws://127.0.0.1:18765
 | 抬起/开框0° | `tool/demo/frame_open.sh` | 无 |
 | 放下/关框20° | `tool/demo/frame_close.sh` | 无 |
 | 原始反馈 | `tool/demo/frame_status.sh` | `--run`只读 |
-| 前进 | `tool/demo/move_forward.sh` | `--speed 0.05 --seconds 0.5` |
-| 后退 | `tool/demo/move_backward.sh` | `--speed 0.05 --seconds 0.5` |
-| 左转 | `tool/demo/turn_left.sh` | `--wz 0.20 --seconds 0.5` |
-| 右转 | `tool/demo/turn_right.sh` | `--wz 0.20 --seconds 0.5` |
+| 前进 | `tool/demo/move_forward.sh` | `--speed 0.05`，持续到Ctrl+C；`--seconds 0.5`为点动 |
+| 后退 | `tool/demo/move_backward.sh` | `--speed 0.05`，持续到Ctrl+C；`--seconds 0.5`为点动 |
+| 左转 | `tool/demo/turn_left.sh` | `--wz 0.20`，持续到Ctrl+C；`--seconds 0.5`为点动 |
+| 右转 | `tool/demo/turn_right.sh` | `--wz 0.20`，持续到Ctrl+C；`--seconds 0.5`为点动 |
 | 相机前方档 | `tool/demo/camera.sh` | `--offset-deg 5`，RX45° |
 | 相机观察档 | `tool/demo/camera.sh` | `--offset-deg 20`或`40`，RX60°/80° |
 

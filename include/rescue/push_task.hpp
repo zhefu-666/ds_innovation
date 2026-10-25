@@ -4,6 +4,14 @@
 #include "rescue/zone_estimate.hpp"
 #include "rescue/zone_dead_reckoning.hpp"
 #include "rescue/planner.hpp"
+#include "rescue/task/capture_verification_stage.hpp"
+#include "rescue/task/delivery_verification_stage.hpp"
+#include "rescue/task/release_retreat_stage.hpp"
+#include "rescue/task/push_in_stage.hpp"
+#include "rescue/task/sweep_ledger.hpp"
+#include "rescue/task/disperse_turn_stage.hpp"
+#include "rescue/task/disperse_swing_stage.hpp"
+#include "rescue/task/disperse_rush_stage.hpp"
 #include <map>
 #include <string>
 
@@ -360,9 +368,9 @@ public:
     std::string takeDropZoneEvent() { std::string s; s.swap(dropzone_evt_); return s; }
     static const char *name(PushState state);
     // Sweep ledger read-out (diagnostics / tests): finished sweeps this trip, ledger time including a running sweep, and whether a sweep chain is open.
-    int sweepDone() const { return sweep_done_; }
-    uint64_t sweepSpentUs(uint64_t now) const { return sweepSpentNow(now); }
-    bool sweepChainOpen() const { return sweep_chain_t0_ != 0; }
+    int sweepDone() const { return sweep_ledger_.done(); }
+    uint64_t sweepSpentUs(uint64_t now) const { return sweep_ledger_.spentUs(now); }
+    bool sweepChainOpen() const { return sweep_ledger_.chainOpen(); }
     std::vector<int> rejectedTargets(uint64_t now_us) const;
     struct RejectedBearing { float world_yaw; float range_m; uint64_t until_us; };
     std::vector<RejectedBearing> rejectedBearings(uint64_t now_us) const;
@@ -378,8 +386,6 @@ private:
     int target_id_ = -1, confirmations_ = 0, misses_ = 0, step_ = 0;
     float last_range_ = 0; // last tracked range in MID_APPROACH, inf when none
     int total_ = 0, baseline_ = 0, baseline_other_ = 0, hold_misses_ = 0;
-    int delivery_delta_ = 0;
-    uint64_t delivery_frame_ = 0, delivery_stable_since_ = 0;
     std::string delivery_geometry_id_;
     std::string label_, reason_;
     Inventory trip_, pending_, seen_;
@@ -390,7 +396,7 @@ private:
     uint64_t sweep_open_us_=0, sweep_close_us_=0;
     uint64_t frame_transaction_=0,attempt_started_=0;
     uint64_t inplace_since_us_=0, inplace_last_us_=0; // continuous in-place turn tracking (demo APPROACH/RUSH turn escalation)
-    bool swing_plan_pending_=false, swing_plan_active_=false; float swing_cap_pos_=99.f, swing_cap_neg_=99.f; int dense_seen_=0; // outside-block swing limits for the current SCATTER sweep
+    int dense_seen_=0; // dense-group confirmation frames
     int wire_last_=-1; uint64_t wire_txn_=0; // wire-level target/transaction: only a real open<->close change is a new action for the MCU
     float bounded_approach_=0,bounded_retreat_=0;
     int16_t multi_view_pitch_=kCameraPitchInvalid;
@@ -398,7 +404,6 @@ private:
     uint64_t rebind_since_us_ = 0;
     uint64_t approach_last_us_ = 0;
     // PILE state
-    int disperse_turn_phase_ = 0, disperse_clear_n_ = 0; float disperse_turn_dir_ = 1; uint64_t disperse_look_ready_us_ = 0, disperse_frame_ts_us_ = 0; float disperse_frame_turned0_ = 0.f; // 1: camera lift + look, 2: turning, 3: push on, 4: low-camera frame-zone check + turning (only meaningful while sweep_phase_ == 5)
     int pile_phase_ = 0, pile_runs_ = 0, pile_seen_ = 0; uint64_t pile_phase_us_ = 0, pile_cool_until_us_ = 0;
     float pile_yaw0_ = 0, pile_travel0_ = 0, pile_cut_yaw_ = 0, pile_cut_m_ = 0, pile_push0_ = -1.f;
     int pile_chain_n_ = 0, pile_chain_look_ = 0; float pile_chain_in_m_ = 0, pile_chain_yaw_pre_ = 0, pile_chain_yaw_mid_ = 0; // PILE chain: rounds spent / looks spent this round / metres driven in this round / heading before the turn / middle of the turn
@@ -422,7 +427,6 @@ private:
     float travel_ = 0, travel_limit_ = 0, turned_ = 0, last_heading_ = 0, carried_ = 0;
     float last_vx_ = 0, last_wz_ = 0;
     bool drop_locked_ = false;
-    bool prepush_back_ = false; float prepush_hold_y_ = 0; // 假设模式：松开后的“先退再推”阶段
     std::string anchor_dbg_;
     bool half_locked_ = false, half_injured_ = false; float half_x_ = 0; // 本趟目标半区（进入搬运时锁定，整趟不变）
     std::string dropzone_evt_;
@@ -438,11 +442,10 @@ private:
     bool burst_drive_used_ = false, burst_fast_ = false, burst_swing_armed_ = false, burst_swing_ = false; // first_burst: drive spent / this far drive is fast / swing waiting for the next near scatter / this scatter swings fast
     int vis_hits_ = 0, vis_miss_ = 0; uint64_t vis_chase_t0_ = 0, vis_cool_until_us_ = 0, vis_last_seen_us_ = 0; float vis_bearing_ = 0;
     uint64_t scan_hold_t0_ = 0, scan_hold_last_sight_us_ = 0, scan_hold_cool_until_us_ = 0;
-    int disperse_pass_ = 0, disperse_passes_ = 1, disperse_swings_ = 6, scatter_count_ = 0, scatter_seen_ = 0, far_seen_ = 0; bool scatter_commit_ = false; uint64_t sweep_gap_until_us_ = 0, sweep_spent_us_ = 0; int sweep_done_ = 0; uint64_t scatter_cool_until_us_ = 0, scatter_idle_since_us_ = 0; float scatter_yaw_ = 0, scatter_range_ = 0, scatter_back_ = 0, scan_turn_acc_ = 0, scan_last_heading_ = 0; bool scan_last_valid_ = false; float scan_mid_limit_ = 0; bool post_disperse_mid_ = false; bool disperse_small_ = false; int mid_clear_n_ = 0; int precheck_seen_ = 0, precheck_rejects_ = 0;
-    uint64_t sweep_chain_t0_ = 0, sweep_chain_seg_ = 0, sweep_chain_acc_ = 0, sweep_chain_end_ = 0, sweep_match_spent_us_ = 0, confirm_since_us_ = 0; bool sweep_chain_active_ = false, sweep_chain_swung_ = false;
-    uint64_t sweep_observe_until_us_ = 0;
+    int scatter_count_ = 0, scatter_seen_ = 0, far_seen_ = 0; bool scatter_commit_ = false; uint64_t scatter_cool_until_us_ = 0, scatter_idle_since_us_ = 0; float scatter_yaw_ = 0, scatter_range_ = 0, scatter_back_ = 0, scan_turn_acc_ = 0, scan_last_heading_ = 0; bool scan_last_valid_ = false; float scan_mid_limit_ = 0; bool post_disperse_mid_ = false; bool disperse_small_ = false; int mid_clear_n_ = 0; int precheck_seen_ = 0, precheck_rejects_ = 0;
+    uint64_t confirm_since_us_ = 0;
     bool rush_stall_phase_ = false; int rush_stall_id_ = -1, rush_stall_samples_ = 0, rush_stall_obs_frames_ = 0; float rush_stall_ref_m_ = 0; uint64_t rush_stall_ref_us_ = 0, rush_stall_last_us_ = 0, rush_stall_obs_us_ = 0; int16_t rush_stall_pitch_ = kCameraPitchInvalid;
-    int sweep_phase_ = 0, sweep_attempts_ = 0, sweep_seen_ = 0; float sweep_creep_m_ = 0, sweep_travel0_ = 0; int disperse_swing_n_ = 0; float disperse_rush_m_ = 0, disperse_sign_ = 1; uint64_t disperse_cool_until_us_ = 0; float sweep_yaw0_ = 0, sweep_sign_ = 1; uint64_t sweep_start_us_ = 0, sweep_t0_us_ = 0;
+    int sweep_phase_ = 0, sweep_attempts_ = 0, sweep_seen_ = 0; float sweep_creep_m_ = 0, sweep_travel0_ = 0; float disperse_rush_m_ = 0, disperse_sign_ = 1; uint64_t disperse_cool_until_us_ = 0; float sweep_yaw0_ = 0, sweep_sign_ = 1; uint64_t sweep_start_us_ = 0, sweep_t0_us_ = 0;
     int unstick_step_ = 0; uint64_t unstick_us_ = 0;
     bool rush_yaw_ref_set_ = false; float rush_yaw_ref_ = 0; uint64_t prelower_us_ = 0;
     int rush_pulse_phase_ = 0, rush_pulse_count_ = 0; float rush_pulse_yaw0_ = 0, rush_pulse_delta_ = 0; uint64_t rush_pulse_start_us_ = 0, rush_pulse_t0_us_ = 0;
@@ -453,19 +456,22 @@ private:
     bool rushLogic() const { return t_.assume_all_safe || t_.field_rush; }
     bool carryLogic() const { return t_.assume_all_safe || t_.field_carry; }
     bool assumeView() const { return carryLogic() && t_.assume_view_pitch_cdeg != kCameraPitchInvalid; }
-    int repush_n_ = 0, verify_in_ = 0, verify_out_ = 0; bool verify_far_view_ = false; uint64_t verify_fix_us_ = 0; int inside_obs_ = 0; uint64_t inside_obs_ts_ = 0;
-    uint64_t cargo_last_ts_ = 0, cargo_ref_us_ = 0, cargo_seen_us_ = 0, verify_ts_ = 0;
+    int repush_n_ = 0;
+    uint64_t cargo_last_ts_ = 0, cargo_ref_us_ = 0, cargo_seen_us_ = 0;
     cv::Point2f cargo_ref_body_, cargo_ref_zone_; bool cargo_fix_=false, cargo_clipped_=false; float cargo_rear_x_ = 0, cargo_rear_y_ = 0;
-    cv::Point2f cargo_body_; bool align_pending_ = false, push_hold_valid_ = false; uint64_t align_start_us_ = 0; float push_hold_phi_ = 0;
-    uint64_t probe_until_us_ = 0, probe_next_us_ = 0; float probe_sign_ = 1.f; bool delivery_visual_ = false;
-    bool enter_unconfirmed_ = false; // 本趟推入已因“未确认进区”延长过
+    cv::Point2f cargo_body_; bool delivery_visual_ = false;
     bool assume_pushed_ = false; // 假设模式：已完成“松开后再用下压姿态向区内推”
     bool assume_blind_ = false; // TEMP_ASSUMPTION blind leg active in this phase
     float assume_rush_end_ = 0;
     cv::Point2f last_target_xy_; bool last_target_valid_ = false; // body-frame position of the locked target on its last tracked frame
-    int vc_obs_frames_ = 0, vc_label_frames_ = 0, vc_bad_frames_ = 0; // VERIFY_CAPTURE: frame-region evidence latched while the multi-view waits
-    RuleVerdict vc_bad_verdict_ = RuleVerdict::OK;
-    bool vc_re_active_ = false; int vc_re_track_ = -1, vc_re_frames_ = 0, vc_re_strong_ = 0, vc_re_clear_ = 0; uint64_t vc_re_start_us_ = 0;
+    CaptureVerificationStage capture_verification_;
+    DeliveryVerificationStage delivery_verification_;
+    ReleaseRetreatStage release_retreat_;
+    PushInStage push_in_;
+    SweepLedger sweep_ledger_;
+    DisperseRushStage disperse_rush_;
+    DisperseTurnStage disperse_turn_;
+    DisperseSwingStage disperse_swing_;
     // 假设模式：YOLO-pose粗略区域位姿锚定在里程系，视野丢失后用IMU航向+缩放后的指令位移继续推算。
     AnchoredZone zone_;
     float odo_ = 0, ratio_est_ = 0, ratio_odo_ = 0, last_imu_yaw_ = 0;
@@ -488,13 +494,6 @@ private:
     std::map<int, uint64_t> rejected_; // primary track id -> blacklist expiry
 
     void enter(PushState s, uint64_t now, const char *why);
-    // Sweep chain accounting. Close is idempotent and returns whether a swing actually ran; the elapsed active time is added to the trip and match ledgers exactly once.
-    void sweepChainBegin(uint64_t now);
-    void sweepChainPause(uint64_t now);
-    bool sweepChainClose(uint64_t now);
-    void sweepChainSettle(uint64_t now);
-    uint64_t sweepSpentNow(uint64_t now) const;
-    uint64_t sweepMatchSpentNow(uint64_t now) const;
     void clearTrip();
     void blacklist(uint64_t now);
     void fail(const char *why);

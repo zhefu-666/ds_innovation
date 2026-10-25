@@ -21,7 +21,9 @@ from typing import Optional
 
 HEADER = 0x56
 MAX_LINEAR_SPEED_MPS = 0.2
-MAX_PITCH_DEG = 80
+MAX_PITCH_DEG = 150
+# 线上航向字段 0.01°、-18000..18000；-32768 表示IMU不可用，收端不得当角度用。
+IMU_YAW_INVALID = -32768
 BAUDRATES = {
     9600: termios.B9600,
     19200: termios.B19200,
@@ -78,8 +80,8 @@ class FeedbackParser:
         if not self.show_rx and state == self._last_actuator:
             return
         self._last_actuator = state
-        pitch = "invalid" if not 0 <= pitch_wire <= 80 else f"{pitch_wire} deg"
-        gripper_text = {0: "lowered (assumed)", 1: "raised (assumed)"}.get(gripper, f"invalid({gripper})")
+        pitch = "invalid" if not 90 <= pitch_wire <= 150 else f"{pitch_wire} deg"
+        gripper_text = {0: "closed", 1: "open"}.get(gripper, f"invalid({gripper})")
         if self.show_rx:
             print(f"RX A6 [CRC OK]: {packet_text(frame)}", flush=True)
         print(f"反馈执行器: gripper={gripper_text}, "
@@ -123,28 +125,40 @@ def rounded_integer(value: float) -> int:
     return math.floor(value + 0.5) if value >= 0 else math.ceil(value - 0.5)
 
 
+def connected_yaw_wire(yaw_deg: float) -> int:
+    """航向归一到(-180,180]后转0.01°，与C++ imuYawToWire()同口径。"""
+    if not math.isfinite(yaw_deg):
+        return IMU_YAW_INVALID
+    yaw = (float(yaw_deg) + 180.0) % 360.0 - 180.0
+    return max(-18000, min(18000, rounded_integer(yaw * 100.0)))
+
+
 def build_latest_packet(
     vx_mps: float,
     wz_rps: float,
-    gripper: int,
+    gripper_offset: int,
     action_id: int,
     pitch_deg: float,
+    yaw_deg: Optional[float] = None,
 ) -> bytes:
     if not math.isfinite(vx_mps) or not math.isfinite(wz_rps):
         vx_mps = wz_rps = 0.0
-    vx_mps = max(-MAX_LINEAR_SPEED_MPS, min(MAX_LINEAR_SPEED_MPS, vx_mps))
-    pitch_deg = max(0, min(MAX_PITCH_DEG, pitch_deg))
-    pitch_wire = rounded_integer(pitch_deg) - 40
+    if type(gripper_offset) is not int or not -5 <= gripper_offset <= 5:
+        raise ValueError('gripper_offset must be an integer in -5..5')
+    pitch_deg = max(90, min(MAX_PITCH_DEG, pitch_deg))
+    pitch_wire = rounded_integer(pitch_deg) - 120
     payload = struct.pack(
         "<BffbBh",
         HEADER,
         vx_mps,
         wz_rps,
-        max(-20, min(20, int(gripper))),
+        gripper_offset,
         action_id,
         pitch_wire,
     )
-    return payload + struct.pack("<H", crc16_modbus(payload))
+    # 航向：0.01°，-18000..18000；None表示本工具无可信yaw，写无效值。
+    yaw_wire = IMU_YAW_INVALID if yaw_deg is None else connected_yaw_wire(yaw_deg)
+    return payload + struct.pack("<hH", yaw_wire, crc16_modbus(payload + struct.pack('<h', yaw_wire)))
 
 
 def build_legacy6_packet(vx_mps: float, wz_rps: float, gripper: str) -> bytes:
@@ -159,8 +173,14 @@ def build_legacy6_packet(vx_mps: float, wz_rps: float, gripper: str) -> bytes:
 
 def build_packet(args: argparse.Namespace, vx_mps: float, wz_rps: float) -> bytes:
     if args.protocol == "latest15":
-        return build_latest_packet(vx_mps, wz_rps, args.frame_offset,
-                                   args.action_id, args.pitch)
+        if args.gripper is not None:
+            gripper_offset = 5 if args.gripper == "open" else -5
+        elif args.frame_offset is not None:
+            gripper_offset = args.frame_offset
+        else:
+            gripper_offset = -5
+        return build_latest_packet(vx_mps, wz_rps, gripper_offset,
+                                   args.action_id, args.pitch, args.yaw)
     return build_legacy6_packet(vx_mps, wz_rps, args.gripper or "closed")
 
 
@@ -270,17 +290,19 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", default="/dev/ttyACM0", help="串口设备，默认 /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=115200, help="波特率，默认 115200")
     parser.add_argument("--vx", type=parse_finite_float, default=0.0,
-                        help="线速度 m/s，默认 0；latest15 限幅 ±0.2")
+                        help="线速度 m/s，默认 0；latest15 协议透传有限值")
     parser.add_argument("--wz", type=parse_finite_float, default=0.0,
                         help="角速度 rad/s，默认 0")
     parser.add_argument("--gripper", choices=("open", "closed"), default=None,
-                        help="仅供legacy6历史协议使用")
-    parser.add_argument("--frame-offset", type=int, default=0,
-                        help="latest15方框角度：0开、20关（候选版仅预览）")
+                        help="夹爪目标；latest15发送有符号偏移+5=开、-5=关")
+    parser.add_argument("--frame-offset", type=int, default=None,
+                        help="latest15线上夹爪偏移-5..5；0=85°中位，+5开、-5关")
     parser.add_argument("--action-id", type=int, default=0,
-                        help="latest15 夹爪动作编号 0..255；0 表示不触发新动作")
-    parser.add_argument("--pitch", type=parse_finite_float, default=40.0,
-                        help="latest15 相机目标角度，真实度数，界面0..80，发送减40；默认40（TX0）")
+                        help="latest15 夹爪动作编号 0..255；上位机可填0，下位机按偏移变化计数")
+    parser.add_argument("--pitch", type=parse_finite_float, default=120.0,
+                        help="latest15 相机目标角度，真实度数，范围90..150，发送减120；默认120（TX0）")
+    parser.add_argument("--yaw", type=parse_finite_float, default=None,
+                        help="latest15 航向字段，真实度数，发送转0.01°；省略或--yaw-invalid写无效值-32768")
     parser.add_argument("--rate", type=parse_finite_float, default=25.0,
                         help="重复发送频率 Hz，默认 25")
     parser.add_argument("--duration", type=parse_finite_float, default=1.0,
@@ -293,7 +315,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--show-rx", action="store_true",
                         help="发送期间逐次打印原始RX字节、有效A6帧及解析状态；不会请求固件新增速度反馈")
     parser.add_argument("--send", action="store_true",
-                        help="真正打开串口并发送；不加此项只打印帧")
+                        help="候选版已禁止实际发送；该选项将报错退出")
     return parser
 
 
@@ -301,10 +323,12 @@ def main() -> int:
     args = make_parser().parse_args()
     if args.send:
         raise SystemExit("候选版速度工具仅允许预览；动作请用带反馈的frame工具，运动须通过主程序验收门槛")
-    if args.protocol=="latest15" and args.frame_offset not in (0,20):
-        raise SystemExit("方框仅支持0开、20关")
-    if args.protocol == "latest15" and args.gripper is not None:
-        raise SystemExit("latest15请使用--frame-offset角度；--gripper仅供legacy6")
+    if args.frame_offset is not None and not -5 <= args.frame_offset <= 5:
+        raise SystemExit("--frame-offset须为-5..5；+5开、-5关、0中位")
+    if args.gripper is not None and args.frame_offset is not None:
+        raise SystemExit("--gripper与--frame-offset不能同时指定")
+    if args.protocol == "legacy6" and args.frame_offset is not None:
+        raise SystemExit("legacy6请使用--gripper")
     if args.rate <= 0:
         raise SystemExit("--rate must be greater than 0")
     if args.duration < 0:
@@ -316,11 +340,13 @@ def main() -> int:
         packet = build_packet(args, args.vx, args.wz)
         stop_packet = build_packet(args, 0.0, 0.0)
         print(f"协议: {args.protocol}; 帧 ({len(packet)} bytes): {packet_text(packet)}")
-        print(f"请求: vx={args.vx:g} m/s, wz={args.wz:g} rad/s, frame_offset={args.frame_offset} deg")
+        gripper_text = args.gripper or ({5: "open", -5: "closed", 0: "neutral"}.get(
+            args.frame_offset, "closed" if args.frame_offset is None else f"offset={args.frame_offset}"))
+        print(f"请求: vx={args.vx:g} m/s, wz={args.wz:g} rad/s, gripper={gripper_text}")
         if args.protocol == "latest15":
             print(f"动作编号: {args.action_id}; pitch={args.pitch:g} deg")
         if not args.send:
-            print("预览模式：未打开串口。需要实际下发时显式添加 --send。")
+            print("预览模式：未打开串口。候选版禁止--send；动作使用带反馈的frame/demo工具。")
             return 0
         transmit(args, packet, stop_packet)
         return 0

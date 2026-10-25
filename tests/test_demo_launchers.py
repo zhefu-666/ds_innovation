@@ -77,7 +77,7 @@ class DemoTests(unittest.TestCase):
 
     def test_camera_converts_at_tool_boundary(self):
         _, plan = self.plan('camera', '--offset-deg', '5')
-        command = plan['command'];self.assertEqual(command[command.index('set')+1], '45')
+        command = plan['command'];self.assertEqual(command[command.index('set')+1], '125')
         self.assertIn('--frame-config', command)
 
     def test_reject_limits_and_invalid_mode_combinations(self):
@@ -146,20 +146,20 @@ class DemoTests(unittest.TestCase):
 
     def test_packet_limits_crc_and_angle(self):
         for vx, wz in [(float('nan'), 0), (.11, 0), (0, .26)]:
-            with self.assertRaises(ValueError):demo_serial.packet(vx, wz, 0, 7, 45)
-        packet = demo_serial.packet(.05, -.2, 20, 7, 45)
-        self.assertEqual(len(packet), 15);self.assertEqual(packet[9:11], bytes([20, 7]))
+            with self.assertRaises(ValueError):demo_serial.packet(vx, wz, 0, 7, 125)
+        packet = demo_serial.packet(.05, -.2, 20, 7, 125)
+        self.assertEqual(len(packet), 17);self.assertEqual(packet[9:11], bytes([0xFB, 7]));self.assertEqual(struct.unpack('<h', packet[13:15])[0], demo_serial.frame.IMU_YAW_INVALID)
         self.assertEqual(struct.unpack('<h', packet[11:13])[0], 5)
-        self.assertEqual(int.from_bytes(packet[13:], 'little'), demo_serial.frame.crc16(packet[:13]))
+        self.assertEqual(int.from_bytes(packet[15:], 'little'), demo_serial.frame.crc16(packet[:15]))
 
-    def exercise_motion(self, stop_feedback=False, wrong_id=False):
+    def exercise_motion(self, stop_feedback=False, wrong_id=False, state=1, action_id_start=7):
         master, slave = pty.openpty();stop = threading.Event();packets = []
         def feedback():
             buf = bytearray();started = time.monotonic()
             while not stop.is_set():
                 if not stop_feedback or not packets:
-                    ident = 8 if wrong_id and packets else 7
-                    raw = struct.pack('<BBBh', 0xa6, 1, ident, 45)
+                    ident = 8 if wrong_id and packets else action_id_start
+                    raw = struct.pack('<BBBh', 0xa6, state, ident, 125)
                     raw += struct.pack('<H', demo_serial.frame.crc16(raw))+b'\n'
                     os.write(master, raw)
                 if select.select([master], [], [], .01)[0]:
@@ -167,32 +167,63 @@ class DemoTests(unittest.TestCase):
                     except OSError:return
                     while buf:
                         if buf[0] != 0x56:del buf[0];continue
-                        if len(buf)<15:break
-                        packet=bytes(buf[:15]);del buf[:15]
-                        if demo_serial.frame.crc16(packet[:13])==int.from_bytes(packet[13:],'little'):packets.append(packet)
+                        if len(buf)<17:break
+                        packet=bytes(buf[:17]);del buf[:17]
+                        if demo_serial.frame.crc16(packet[:15])==int.from_bytes(packet[15:],'little'):packets.append(packet)
                 if time.monotonic()-started>3:return
         worker = threading.Thread(target=feedback);worker.start()
         error = None
+        logs = []
         try:
-            try:demo_serial.manual_motion(os.ttyname(slave),115200,{'open':1,'close':0},.05,0,.35,lambda _:None)
+            try:demo_serial.manual_motion(os.ttyname(slave),115200,{'open':1,'close':0},.05,0,.35,logs.append)
             except (ValueError,TimeoutError) as exc:error=exc
             time.sleep(.05)
         finally:
             stop.set();worker.join();os.close(master);os.close(slave)
+        if action_id_start == 0:
+            # 编号0会被拒绝，合理结果是零TX：不验证运动包，只验证没有发出任何指令。
+            self.assertEqual(packets, [])
+            return error
         self.assertTrue(packets)
         self.assertTrue(any(struct.unpack('<f', p[1:5])[0]>.01 for p in packets))
         self.assertEqual(struct.unpack('<ff',packets[-1][1:9]),(0.,0.))
-        self.assertTrue(all(p[9]==0 and p[10]==7 for p in packets))
+        self.assertTrue(all(p[9]==(5 if state else 0xFB) and p[10]==action_id_start for p in packets))
+        self.assertTrue(any('INITIAL_RX' in line for line in logs))
+        self.assertTrue(any('HOLD_TX_PLAN' in line for line in logs))
         return error
+
+    def test_action_id_zero_is_not_mapped_to_open_or_closed(self):
+        # 上电后 id=0：state 字节是默认值，不得按开闭映射解释，否则会误发一次真实夹爪动作。
+        import frame_semantics as fs
+        m = {'open': 1, 'close': 0}
+        for state in (0, 1):
+            with self.assertRaises(ValueError) as ctx:fs.hold_angle(state, m, action_id=0)
+            self.assertIn('received no action since power-up', str(ctx.exception))
+        self.assertEqual(fs.hold_angle(1, m, action_id=3), 0)
+        self.assertEqual(fs.hold_angle(0, m, action_id=3), 20)
+        self.assertEqual(fs.hold_angle(1, m), 0)
+
+    def test_action_id_zero_refuses_before_any_tx(self):
+        # 复现 2026-10-25 实车：上电后 A6=00 00，旧逻辑误发 -5 导致夹爪真的关了一次。
+        error = self.exercise_motion(state=0, action_id_start=0)
+        self.assertIsInstance(error, ValueError)
+        self.assertIn('received no action since power-up', str(error))
 
     def test_virtual_serial_motion_ends_with_zero_and_preserves_open(self):
         self.assertIsNone(self.exercise_motion())
+
+    def test_virtual_serial_motion_preserves_closed_state(self):
+        self.assertIsNone(self.exercise_motion(state=0))
 
     def test_virtual_serial_stale_feedback_stops_early(self):
         self.assertIsInstance(self.exercise_motion(stop_feedback=True),TimeoutError)
 
     def test_virtual_serial_changed_action_id_stops_early(self):
-        self.assertIsInstance(self.exercise_motion(wrong_id=True),ValueError)
+        error = self.exercise_motion(wrong_id=True)
+        self.assertIsInstance(error,ValueError)
+        self.assertIn('expected state=1 id=7 pitch=125', str(error))
+        self.assertIn('received state=1 id=8 pitch=125', str(error))
+        self.assertIn('RX=A6 01 08 7D 00', str(error))
 
 
 if __name__ == '__main__':

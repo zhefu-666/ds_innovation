@@ -1,6 +1,7 @@
 #include "rescue/motion_link.hpp"
 #include "rescue/utils.hpp"
 #include <iostream>
+#include <limits>
 
 namespace rescue {
 namespace {
@@ -10,7 +11,9 @@ uint64_t nowUs() {
 }
 } // namespace
 
-MotionLink::MotionLink(UARTController &uart, MotionLinkConfig config, std::function<bool()> permit) : permit_(std::move(permit)), uart_(uart), config_(config) {
+MotionLink::MotionLink(UARTController &uart, MotionLinkConfig config, std::function<bool()> permit,
+                       std::function<float()> yaw_source)
+    : permit_(std::move(permit)), yaw_source_(std::move(yaw_source)), uart_(uart), config_(config) {
     if (config_.period_ms == 0 || config_.command_timeout_ms == 0 || config_.command_timeout_ms >= 200)
         throw std::invalid_argument("MotionLink needs period > 0 and command timeout in 1..199 ms");
     worker_ = std::thread(&MotionLink::run, this);
@@ -25,12 +28,14 @@ void MotionLink::submit(const MotionCommand &command) {
     }
     wake_.notify_one();
 }
-void MotionLink::write(const MotionCommand &command, bool stale) {
+void MotionLink::write(MotionCommand command, bool stale) {
     MotionCommand guarded = command;
     if (permit_ && !permit_()) {
         if (!ever_authorized_) return; // no implicit gripper close or pitch move before START
         guarded = stopped(authorized_);
     } else { authorized_ = guarded; ever_authorized_ = true; }
+    // 航向在真正写串口的这一刻取值：停发替代包和停机补发包也带当前yaw。
+    guarded.imu_yaw_rad = yaw_source_ ? yaw_source_() : std::numeric_limits<float>::quiet_NaN();
     bool ok = false;
     try { ok = uart_.sendMotion(guarded); } catch (const std::exception &e) {
         std::cerr << "[MCU] send rejected: " << e.what() << "\n";

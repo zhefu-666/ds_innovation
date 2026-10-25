@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """User-authorized clear-straight test: fixed 0.4 m/s, at most 0.2 s, no rotation.
-Not an autonomous approach policy. Keeps session-known frame angle 0/id24/RX45.
+Not an autonomous approach policy. Keeps the session gripper state open/id24/RX120.
 """
 import signal,struct,sys,time,json
 import demo_serial as s
@@ -8,19 +8,20 @@ from demo import demo_lock
 
 def packet(vx):
     if vx not in (0,.4):raise ValueError('Only zero or 0.4 m/s')
-    raw=struct.pack('<BffbBh',0x56,vx,0.,0,24,5)
+    raw=struct.pack('<BffbBh',0x56,vx,0.,5,24,0)
+    raw+=struct.pack('<h',s.frame.IMU_YAW_INVALID)  # 不接IMU，航向字段写无效值
     return raw+struct.pack('<H',s.frame.crc16(raw))
 
 def run(fd,parser,emit=print):
     initial=s.initial_feedback(fd,parser)
-    if initial[:3]!=(1,24,45):raise ValueError('Session state differs; NO TX')
+    if initial[:3]!=(1,24,120):raise ValueError('Session state differs; NO TX')
     stop=packet(0);forward=packet(.4)
     start=last_rx=time.monotonic();count=0
     try:
         while time.monotonic()-start<.2:
             frames=s.frame.receive(fd,parser,.005)
             for fb in frames:
-                if fb[:3]!=(1,24,45):raise ValueError('Feedback changed')
+                if fb[:3]!=(1,24,120):raise ValueError('Feedback changed')
                 last_rx=time.monotonic()
             now=time.monotonic()
             if now-last_rx>.10:raise TimeoutError('A6 stale')

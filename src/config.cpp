@@ -44,6 +44,8 @@ void printUsage(const char *program) {
         << "Usage: " << program << " [options]\n\n"
         << "Ground-pushing task\n"
         << "Options:\n"
+        << "  --config FILE       Load schema-v1 runtime JSON before explicit CLI arguments\n"
+        << "  --dump-config FILE|- Export final configuration and exit before device initialization\n"
         << "  --demo-mode MODE    recognize (no serial), search (stop on lock), carry_once (stop after one trip)\n"
         << "  --demo-seconds N    Demonstration wall limit, 1..60 seconds (default 60)\n"
         << "  --assume-all-safe   TEMP_ASSUMPTION carry_once only: treat clearance/zone/capture evidence as true\n"

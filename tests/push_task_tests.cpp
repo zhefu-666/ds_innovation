@@ -11,7 +11,13 @@
 #include <iostream>
 #include <set>
 #include <vector>
+#include "rescue/task/capture_verification_stage.hpp"
+#include "rescue/task/delivery_verification_stage.hpp"
+#include "rescue/task/release_retreat_stage.hpp"
 #define private public // test-only: seed first_ so an injured target is selectable
+#if __has_include("rescue/task/disperse_rush_stage.hpp")
+#define RESCUE_HAS_RUSH_STAGE 1
+#endif
 #include "rescue/push_task.hpp"
 #undef private
 #include "rescue/capture_monitor.hpp"
@@ -584,23 +590,23 @@ void precisionMotionTests() {
         TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.blind_scatter_passes=1;
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=phase;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_chain_swung_=phase!=7;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_ledger_.setSwung(phase!=7);
         s.task.sweep_start_us_=s.in.now_us;s.task.disperse_rush_m_=.5f;
         s.in.clutter_body.clear();s.in.clutter_ts_us=0;
         s.tick();assert(s.out.state==PushState::SCAN && stopped(s.out.motion));
         assert(s.out.reason=="blind_scatter_observation_lost");
-        const auto spent=s.task.sweep_spent_us_;assert(spent>0);
+        const auto spent=s.task.sweepSpentUs(s.in.now_us);assert(spent>0);
         s.in.target_valid=true;
         for(int i=0;i<8;++i){s.tick();assert(stopped(s.out.motion)&&s.out.reason=="sweep_reobserve");}
-        assert(s.task.sweep_spent_us_==spent);
+        assert(s.task.sweepSpentUs(s.in.now_us)==spent);
         assert(s.until(PushState::APPROACH,50)); // observation pause is bounded, not a new deadlock
     }
     {
         TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_swing");s.task.sweep_phase_=5;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
-        s.task.sweep_yaw0_=s.phi;s.task.disperse_swings_=3;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(),3);
         s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};s.in.clutter_ts_us=s.in.now_us;
         s.tick();assert(s.out.motion.vx_mps==0 && s.out.motion.wz_rps!=0); // pure swing, no hidden forward creep
     }
@@ -609,8 +615,8 @@ void precisionMotionTests() {
         TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.disperse_single_turn=true;t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=4000;
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_single_turn");s.task.sweep_phase_=5;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
-        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_phase_=1;s.task.disperse_sign_=blocks_left?1.f:-1.f;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_.begin(true);s.task.disperse_sign_=blocks_left?1.f:-1.f;
         const auto feed=[&]{ // blocks on the left (x<0) only when requested; right side empty
             s.in.clutter_body.clear();
             if(blocks_left) s.in.clutter_body={{-.2f,.5f},{-.25f,.6f},{-.15f,.45f}};
@@ -623,26 +629,26 @@ void precisionMotionTests() {
             feed();s.tick();
             if(s.out.reason=="disperse_look"){assert(!turned&&stopped(s.out.motion));looked=true;}
             if(s.out.reason=="disperse_turn"){assert(looked&&s.out.motion.vx_mps==0&&s.out.motion.camera_pitch_cdeg==s.tune.intermediate_pitch_cdeg);turned=true;dir_seen=s.out.motion.wz_rps;}
-            if(s.task.disperse_turn_phase_==0&&turned)break;
+            if(!s.task.disperse_turn_.active()&&turned)break;
         }
-        assert(looked&&turned&&s.task.disperse_turn_phase_==0);
+        assert(looked&&turned&&!s.task.disperse_turn_.active());
         assert(dir_seen*(blocks_left?-1.f:1.f)>0); // fewer blocks on the right: turn right; fewer on the left: turn left
         const float done=std::abs(s.phi-phi0);
         assert(done>=s.tune.disperse_turn_rad-s.tune.disperse_swing_tol_rad-.2f && done<=s.tune.disperse_turn_rad+.4f); // one turn, not three swings
-        assert(s.task.disperse_swing_n_==0);
+        assert(s.task.disperse_swing_.swingCount()==0);
     }
     {   // thin view: stops after the minimum turn instead of the full angle
         TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.disperse_single_turn=true;t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=4000;
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_single_turn_thin");s.task.sweep_phase_=5;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
-        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_phase_=1;s.task.disperse_sign_=1.f;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_.begin(true);s.task.disperse_sign_=1.f;
         const float phi0=s.phi;
         for(int i=0;i<400;++i){
             s.in.clutter_body.clear();s.in.clutter_ts_us=s.in.now_us;s.tick();
-            if(s.task.disperse_turn_phase_==0&&s.out.reason!="disperse_look"&&std::abs(s.phi-phi0)>.1f)break;
+            if(!s.task.disperse_turn_.active()&&s.out.reason!="disperse_look"&&std::abs(s.phi-phi0)>.1f)break;
         }
-        assert(s.task.disperse_turn_phase_==0);
+        assert(!s.task.disperse_turn_.active());
         const float done=std::abs(s.phi-phi0);
         assert(done>=s.tune.disperse_turn_min_rad-.1f && done<s.tune.disperse_turn_rad-.3f);
     }
@@ -650,18 +656,18 @@ void precisionMotionTests() {
         TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.disperse_single_turn=true;t.disperse_turn_frame_check=true;t.disperse_turn_rad=1.8f;t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=4000;
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_frame_zone");s.task.sweep_phase_=5;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
-        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_phase_=1;s.task.disperse_sign_=1.f;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_.begin(true);s.task.disperse_sign_=1.f;
         const float phi0=s.phi;bool low_turn=false,low_look=false;
         for(int i=0;i<600;++i){
             s.in.clutter_body.clear();
-            if(s.task.disperse_turn_phase_==4&&zone_blocks) for(int k=0;k<zone_blocks;++k) s.in.clutter_body.push_back({.03f*float(k),.2f}); // only the low camera sees the zone
+            if(s.task.disperse_turn_.needsFrameView()&&zone_blocks) for(int k=0;k<zone_blocks;++k) s.in.clutter_body.push_back({.03f*float(k),.2f}); // only the low camera sees the zone
             s.in.clutter_ts_us=s.in.now_us;s.tick();
             if(s.out.reason=="disperse_frame_look"){assert(stopped(s.out.motion));low_look=true;}
             if(s.out.reason=="disperse_turn_frame"){assert(s.out.motion.vx_mps==0&&s.out.motion.camera_pitch_cdeg==s.tune.track_pitch_cdeg);low_turn=true;}
-            if(s.task.disperse_turn_phase_==0&&low_look)break;
+            if(!s.task.disperse_turn_.active()&&low_look)break;
         }
-        assert(s.task.disperse_turn_phase_==0&&low_look);
+        assert(!s.task.disperse_turn_.active()&&low_look);
         const float done=std::abs(s.phi-phi0);
         if(zone_blocks==0){assert(!low_turn&&done<s.tune.disperse_turn_rad-.3f);} // zone clear at once: stops at the minimum turn
         else {assert(low_turn&&done>=s.tune.disperse_turn_min_rad+s.tune.disperse_turn_frame_extra_rad-.1f&&done<s.tune.disperse_turn_min_rad+s.tune.disperse_turn_frame_extra_rad+.25f);} // zone stays crowded: only the extra allowance past the minimum turn, not the cap
@@ -670,18 +676,18 @@ void precisionMotionTests() {
         TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;t.disperse_single_turn=true;t.disperse_turn_push_m=.2f;t.far_pitch_cdeg=500;t.intermediate_pitch_cdeg=2000;t.track_pitch_cdeg=4000;
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_single_turn_push");s.task.sweep_phase_=5;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
-        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_phase_=1;s.task.disperse_sign_=1.f;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;
+        s.task.sweep_yaw0_=s.phi;s.task.disperse_turn_.begin(true);s.task.disperse_sign_=1.f;
         bool pushed=false;float phi_push=0;
         for(int i=0;i<600;++i){
             s.in.clutter_body.clear();s.in.clutter_ts_us=s.in.now_us;s.tick();
             if(s.out.reason=="disperse_turn_push"){
                 if(!pushed)phi_push=s.phi;
-                pushed=true;if(s.task.disperse_turn_phase_==3)assert(s.out.motion.vx_mps>0&&s.out.motion.wz_rps==0); // the last tick finishes the push and ends the sweep
+                pushed=true;if(s.task.disperse_turn_.phase()==DisperseTurnPhase::Push)assert(s.out.motion.vx_mps>0&&s.out.motion.wz_rps==0); // the last tick finishes the push and ends the sweep
             }
-            if(pushed&&s.task.disperse_turn_phase_==0)break;
+            if(pushed&&!s.task.disperse_turn_.active())break;
         }
-        assert(pushed&&s.task.disperse_turn_phase_==0);
+        assert(pushed&&!s.task.disperse_turn_.active());
         assert(std::abs(s.phi-phi_push)<.05f); // no turning while pushing
     }
 }
@@ -692,8 +698,8 @@ void sweepFrameOpenTests() {
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         assert(s.out.motion.gripper_offset==20);
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=phase;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;
-        s.task.disperse_rush_m_=.5f;s.task.disperse_swings_=2;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;
+        s.task.disperse_rush_m_=.5f;s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(),2);
         s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};
         auto step=[&]{s.in.clutter_ts_us=s.in.now_us;s.tick();};
         step();assert(stopped(s.out.motion)&&s.out.reason=="sweep_frame_open_wait"); // nothing moves until the open is acknowledged
@@ -711,7 +717,7 @@ void sweepFrameOpenTests() {
         TaskTuning t;t.sweep_observation_guard=true;t.sweep_frame_open=true;t.disperse_swing_vx=0;t.gripper_timeout_us=500000;
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=5;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swings_=2;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(),2);
         s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};
         s.gripper_responds=false;
         for(int i=0;i<40;++i){s.in.clutter_ts_us=s.in.now_us;s.tick();}
@@ -723,7 +729,7 @@ void sweepFrameOpenTests() {
         TaskTuning t;t.sweep_observation_guard=true;t.disperse_swing_vx=0;
         Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
         s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=5;
-        s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swings_=2;
+        s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(),2);
         s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};s.in.clutter_ts_us=s.in.now_us;
         s.tick();assert(s.out.motion.wz_rps!=0&&s.out.motion.gripper_offset==20);
     }
@@ -761,7 +767,7 @@ void defaultOpenFrameTests() {
             TaskTuning t;t.disperse_swing_vx=0;t.disperse_turn_rad=rad;t.sweep_observation_guard=true;
             Sim s(t);s.in.target_valid=false;assert(s.until(PushState::SCAN,30));for(int i=0;i<20;++i)s.tick();
             s.task.enter(PushState::SCATTER,s.in.now_us,"test_sweep");s.task.sweep_phase_=5;
-            s.task.sweepChainBegin(s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swings_=2;
+            s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_start_us_=s.in.now_us;s.task.sweep_yaw0_=s.phi;s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(),2);
             s.in.clutter_body={{0,.3f},{.1f,.3f},{-.1f,.3f}};
             const float phi0=s.phi;float peak=0;
             for(int i=0;i<400&&s.task.sweep_phase_==5;++i){s.in.clutter_ts_us=s.in.now_us;s.tick();peak=std::max(peak,std::fabs(s.phi-phi0));}
@@ -874,9 +880,17 @@ void sweepViewTests() {
     { // 摆角上限只属于本次SCATTER扫动：离开SCATTER后不能残留到后面的APPROACH/MID扫动里。
         TaskTuning t=base();Sim s(t);
         s.task.enter(PushState::SCATTER,s.in.now_us,"test");
+#ifdef RESCUE_HAS_RUSH_STAGE
+        s.task.disperse_rush_.active_=true;s.task.disperse_rush_.pending_=true;s.task.disperse_rush_.cap_negative_=.3f;s.task.disperse_rush_.cap_positive_=.2f;
+#else
         s.task.swing_plan_active_=true;s.task.swing_plan_pending_=true;s.task.swing_cap_neg_=.3f;s.task.swing_cap_pos_=.2f;
+#endif
         s.task.enter(PushState::APPROACH,s.in.now_us,"test");
+#ifdef RESCUE_HAS_RUSH_STAGE
+        assert(!s.task.disperse_rush_.active_&&!s.task.disperse_rush_.pending_&&s.task.disperse_rush_.cap_negative_>=99.f&&s.task.disperse_rush_.cap_positive_>=99.f);
+#else
         assert(!s.task.swing_plan_active_&&!s.task.swing_plan_pending_&&s.task.swing_cap_neg_>=99.f&&s.task.swing_cap_pos_>=99.f);
+#endif
     }
     { // 有很多目标时不锁定：锁定目标附近成团则进入拆分(SCATTER)而不是APPROACH；关闭开关则照常锁定。
         for(int on=0;on<2;++on){
@@ -897,7 +911,7 @@ void sweepViewTests() {
         const auto run=[&](int max_visible,bool ignore_gap,bool gap_active,std::vector<cv::Point2f> others){
             TaskTuning t=base();t.sweep_view_cap_mid=true;t.dense_no_lock=true;t.lock_max_visible=max_visible;t.dense_multi_ignore_gap=ignore_gap;
             Sim s(t);s.in.target_valid=true;s.in.distance_m=.45f;
-            if(gap_active)s.task.sweep_gap_until_us_=s.in.now_us+20000000;
+            if(gap_active)s.task.sweep_ledger_.setGapUntil(s.in.now_us+20000000);
             std::string why;bool approach=false,split=false;
             for(int i=0;i<400;++i){
                 s.in.clutter_body=others;s.in.clutter_ts_us=s.in.now_us;s.tick();
@@ -1078,7 +1092,7 @@ void pileTests() {
         for(bool on : {true,false}){
             TaskTuning t=base();t.pile_chain=on;t.disperse_single_turn=true;t.disperse_turn_push_m=.2f;
             Sim s(t);s.all_ordinary=false;s.in.distance_m=.5f;assert(s.until(PushState::APPROACH,80));
-            s.task.sweepChainBegin(s.in.now_us);s.task.sweep_chain_swung_=true;s.task.sweep_phase_=5;s.task.disperse_turn_phase_=3;
+            s.task.sweep_ledger_.begin(s.task.t_,s.in.now_us);s.task.sweep_ledger_.setSwung(true);s.task.sweep_phase_=5;s.task.disperse_turn_.phase_=DisperseTurnPhase::Push;
             s.task.sweep_start_us_=s.in.now_us;s.task.sweep_travel0_=s.task.travel_-1.f;
             for(int i=0;i<60&&s.out.state==PushState::APPROACH;++i)s.tick();
             assert((s.out.state==PushState::PILE)==on);

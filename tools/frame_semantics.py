@@ -1,14 +1,17 @@
-"""Only logical Open=0 degrees and Close=20 degrees. A6 meaning is configuration data.
+"""Keep the historical task values Open=0 and Close=20 internally.
 
-a6_semantics="done_flag" (TEMP_ASSUMPTION 2026-10-08): A6 byte 1 is an action-finished flag that reads 1
-after either open or close; it is not a position sensor. The frame angle can then only come from the
-last completed command, so holding tools need the operator-known angle and action id of this session.
+TX uses signed gripper_offset (+5=open, -5=closed); A6 uses binary state (1/0).
+The feedback mapping is explicit configuration and cannot be inferred from TX.
+
+A6 state mapping is a configured protocol assumption, not measured physical position.
+The existing mapping checks remain in force pending firmware confirmation. Legacy done_flag
+profiles remain rejected by the hardware launcher.
 """
 import json
 from pathlib import Path
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / 'config/frame_20261007.pending.json'
 ANGLES = {'open': 0, 'close': 20}
-DONE_FLAG_NOTE = 'TEMP_ASSUMPTION a6_semantics=done_flag: A6=1 only means the id finished; angle is the known/last sent target'
+DONE_FLAG_NOTE = 'Legacy a6_semantics=done_flag is unsupported for the physical gripper'
 
 
 def load_mapping(path):
@@ -32,10 +35,14 @@ def done_flag(mapping):
     return isinstance(mapping, dict) and mapping.get('semantics') == 'done_flag'
 
 
-def hold_angle(state, mapping, known=None):
-    """known=(angle, action_id) is required in done_flag mode; state must be the finished flag 1."""
+def hold_angle(state, mapping, known=None, action_id=None):
+    """Resolve the logical target from a configured A6 state mapping."""
     if mapping is None:
         raise ValueError('Cannot infer hold angle without accepted A6 mapping')
+    # 编号0表示下位机上电后未收到任何动作：此时状态字节是上电默认值，不能按开闭映射解释。
+    if action_id == 0:
+        raise ValueError('A6 action id 0 means the MCU has received no action since power-up; '
+                         'state byte cannot be mapped to open/close; move the frame once, then retry')
     if done_flag(mapping):
         if known is None or known[0] not in ANGLES.values():
             raise ValueError('Done-flag A6 cannot tell open from close; pass --known-frame-angle/--known-frame-id')

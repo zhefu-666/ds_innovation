@@ -1,4 +1,5 @@
 #include "rescue/telemetry_publisher.hpp"
+#include <nlohmann/json.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <algorithm>
@@ -31,7 +32,12 @@ void writeU32(int fd, uint32_t value) {
     writeAll(fd, bytes, 4);
 }
 }
-TelemetryPublisher::TelemetryPublisher(const Config& config) : config_(config) {
+TelemetryPublisher::TelemetryPublisher(const Config& config, const std::string& effective_config_json) : config_(config) {
+    if (!effective_config_json.empty()) {
+        auto effective = nlohmann::json::parse(effective_config_json);
+        if (!effective.is_object()) throw std::runtime_error("Effective telemetry configuration must be a JSON object");
+        effective_config_ = std::make_unique<nlohmann::json>(std::move(effective));
+    }
     const auto lock_path = config_.telemetry_file + ".lock";
     lock_fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (lock_fd_ < 0) throw std::runtime_error("Cannot open telemetry lock: " + lock_path);
@@ -314,7 +320,12 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
     vector("body_rpy_rad", p.body_rpy_rad);
     vector("body_quaternion_wxyz", p.body_quaternion_wxyz);
     f << "}";
-    const auto metadata = f.releaseAndGetString();
+    auto metadata = f.releaseAndGetString();
+    if (effective_config_) {
+        auto document = nlohmann::json::parse(metadata);
+        document.at("config")["effective"] = *effective_config_;
+        metadata = document.dump();
+    }
     if (metadata.size() > 1024 * 1024 || jpeg.size() > 8 * 1024 * 1024)
         throw std::runtime_error("Telemetry snapshot exceeds size limit");
     std::string name = config_.telemetry_file + ".XXXXXX";

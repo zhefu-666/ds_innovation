@@ -2,11 +2,13 @@
 #include "rescue/config.hpp"
 #include "rescue/hipnuc_imu.hpp"
 #include "rescue/push_task.hpp"
+#include <nlohmann/json_fwd.hpp>
 #include <opencv2/core.hpp>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -23,7 +25,7 @@ struct DecisionTelemetry {
 // One atomic snapshot in tmpfs is consumed by the separate Foxglove bridge.
 class TelemetryPublisher {
 public:
-    explicit TelemetryPublisher(const Config& config);
+    explicit TelemetryPublisher(const Config& config, const std::string& effective_config_json = {});
     ~TelemetryPublisher();
     TelemetryPublisher(const TelemetryPublisher&) = delete;
     TelemetryPublisher& operator=(const TelemetryPublisher&) = delete;
@@ -46,6 +48,7 @@ private:
     void run() noexcept;
     void writeSnapshot(const Snapshot& snapshot);
     Config config_;
+    std::unique_ptr<nlohmann::json> effective_config_;
     std::mutex mutex_;
     std::condition_variable ready_;
     Snapshot pending_;
