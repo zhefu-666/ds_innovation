@@ -108,6 +108,9 @@ rescue_add_task_test(rescue_capture_verification_tests task/stages/capture_verif
 rescue_add_task_test(rescue_capture_task_integration_tests task/integration/capture_task_integration_tests.cpp)
 set_tests_properties(rescue_capture_verification_tests rescue_capture_task_integration_tests PROPERTIES TIMEOUT 10)
 
+rescue_add_task_test(rescue_task_phase_tests task/integration/task_phase_tests.cpp)
+set_tests_properties(rescue_task_phase_tests PROPERTIES TIMEOUT 10 LABELS "integration;task")
+
 add_executable(rescue_push_tests ${PROJECT_SOURCE_DIR}/tests/task/regression/push_task_tests.cpp
     task/regression/push_task_capture_cases.cpp
     task/regression/push_task_search_cases.cpp
@@ -258,7 +261,7 @@ add_test(NAME rescue_runtime_config_integration
         $<TARGET_FILE:rescue_upper_host> ${PROJECT_SOURCE_DIR})
 set_tests_properties(rescue_runtime_config_integration PROPERTIES TIMEOUT 30)
 set(RESCUE_PROTOCOL_BASELINE_ARGS --protocol-baseline
-    ${PROJECT_SOURCE_DIR}/tests/fixtures/runtime_protocol_20261023.json)
+    ${PROJECT_SOURCE_DIR}/tests/fixtures/runtime_four_phase_20261026.json)
 set(RESCUE_PLATFORM_BASELINE_ARGS)
 if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     list(APPEND RESCUE_PLATFORM_BASELINE_ARGS --platform-baseline

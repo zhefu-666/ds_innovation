@@ -19,23 +19,23 @@ void check(bool condition, const char* expression, int line) {
 }
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
-const char* stateName(PushState s) {
+const char* stateName(SearchAction s) {
     switch (s) {
-        case PushState::SCAN:
+        case SearchAction::Scan:
             return "SCAN";
-        case PushState::LOST_SEARCH:
+        case SearchAction::LostSearch:
             return "LOST_SEARCH";
-        case PushState::MID_REACQUIRE:
+        case SearchAction::MidReacquire:
             return "MID_REACQUIRE";
-        case PushState::NEAR_REACQUIRE:
+        case SearchAction::NearReacquire:
             return "NEAR_REACQUIRE";
-        case PushState::SELECT_CARGO:
+        case SearchAction::SelectCargo:
             return "SELECT_CARGO";
-        case PushState::CUE_APPROACH:
+        case SearchAction::CueApproach:
             return "CUE_APPROACH";
-        case PushState::MID_APPROACH:
+        case SearchAction::MidApproach:
             return "MID_APPROACH";
-        case PushState::APPROACH:
+        case SearchAction::Approach:
             return "APPROACH";
         default:
             return "OTHER";
@@ -46,20 +46,42 @@ struct Fixture {
     SearchStage stage;
     TaskTuning tuning;
     PushObservation in;
-    SearchContext context;
+    SearchPhaseData data;
+    TripContext trip_data;
+    MotionCommand motion;
+    SweepLedger ledger_state;
+    std::string reason_text;
+    SearchContext context{data, data.progress, trip_data, motion, ledger_state, reason_text};
+    decltype(trip_data.pending_)& pending = trip_data.pending_;
+    decltype(trip_data.target_id_)& target_id = trip_data.target_id_;
+    decltype(trip_data.label_)& label = trip_data.label_;
+    decltype(data.progress.confirmations)& confirmations = data.progress.confirmations;
+    decltype(data.cue_mode_)& cue_mode = data.cue_mode_;
+    decltype(data.search_cue_id_)& search_cue_id = data.search_cue_id_;
+    decltype(trip_data.capture_target_id_)& capture_target_id = trip_data.capture_target_id_;
+    decltype(data.progress.step)& step = data.progress.step;
+    decltype(data.progress.started_us)& phase_us = data.progress.started_us;
+    decltype(data.progress.turned)& turned = data.progress.turned;
+    decltype(data.progress.heading_seen)& heading_seen = data.progress.heading_seen;
+    decltype(data.progress.last_heading)& last_heading = data.progress.last_heading;
+    decltype(data.lost_round_)& lost_round = data.lost_round_;
+    decltype(data.scatter_seen_)& scatter_seen = data.scatter_seen_;
+    decltype(data.near_failures_)& near_failures = data.near_failures_;
+    decltype(data.scan_turn_acc_)& scan_turn_acc = data.scan_turn_acc_;
+    decltype(data.scatter_count_)& dummy_best_n = data.scatter_count_;
+    decltype(data.scatter_approach_n_)& scatter_approach_n = data.scatter_approach_n_;
+    decltype(data.clear_attempts_)& clear_attempts = data.clear_attempts_;
+    decltype(data.scatter_idle_since_us_)& scatter_idle_since_us = data.scatter_idle_since_us_;
+    decltype(data.burst_drive_used_)& burst_drive_used = data.burst_drive_used_;
+    decltype(data.burst_swing_armed_)& burst_swing_armed = data.burst_swing_armed_;
+    decltype(trip_data.approach_forward_)& approach_forward = trip_data.approach_forward_;
+    decltype(reason_text)& reason = reason_text;
+
     SearchServices services;
 
-    int target_id = -1, search_cue_id = -1, capture_target_id = -1, step = 0;
-    int lost_round = 0, scatter_seen = 0, near_failures = 0, scatter_approach_n = 0;
-    int clear_attempts = 0;
-    int confirmations = 0, frame_raised = 0, dummy_best_n = 0;
-    bool cue_mode = false, heading_seen = false, burst_drive_used = false;
-    bool burst_swing_armed = true;
-    float turned = 0, last_heading = 0, approach_forward = 0, scan_turn_acc = 0;
+    int frame_raised = 0;
+
     float far_y = 1.f;
-    uint64_t phase_us = 0, scatter_idle_since_us = 0;
-    std::string label, reason;
-    Inventory pending;
 
     bool candidate_now = false, cue_now = false, weak_now = false, unstick_now = false;
     int eval_group_now = 0;
@@ -72,6 +94,7 @@ struct Fixture {
     int frames = 0, drives = 0, spins = 0, lost_calls = 0, rejections = 0;
 
     Fixture() {
+        burst_swing_armed = true;
         tuning.confirm_frames = 2;
         tuning.blind_scatter_min = 2;
         tuning.blind_scatter_far_min = 2;
@@ -89,30 +112,6 @@ struct Fixture {
         context.now_us = in.now_us;
         context.far_y = far_y;
         context.frame_raised = frame_raised;
-        context.pending = &pending;
-        context.target_id = &target_id;
-        context.label = &label;
-        context.confirmations = &confirmations;
-        context.cue_mode = &cue_mode;
-        context.search_cue_id = &search_cue_id;
-        context.capture_target_id = &capture_target_id;
-        context.step = &step;
-        context.phase_us = &phase_us;
-        context.turned = &turned;
-        context.heading_seen = &heading_seen;
-        context.last_heading = &last_heading;
-        context.lost_round = &lost_round;
-        context.scatter_seen = &scatter_seen;
-        context.near_failures = &near_failures;
-        context.scan_turn_acc = &scan_turn_acc;
-        context.scatter_count = &dummy_best_n;
-        context.scatter_approach_n = &scatter_approach_n;
-        context.clear_attempts = &clear_attempts;
-        context.scatter_idle_since_us = &scatter_idle_since_us;
-        context.burst_drive_used = &burst_drive_used;
-        context.burst_swing_armed = &burst_swing_armed;
-        context.approach_forward = &approach_forward;
-        context.reason = &reason;
 
         services.candidate = [&](const PushObservation&, uint64_t) {
             return candidate_now;
@@ -146,7 +145,7 @@ struct Fixture {
         services.unstick = [&] {
             return unstick_now;
         };
-        services.enter = [&](PushState s, uint64_t, const char* why) {
+        services.enter = [&](SearchAction s, uint64_t, const char* why) {
             enters.push_back(std::string(stateName(s)) + ":" + why);
         };
         services.fail_stop = [&](const char* why) {
@@ -166,7 +165,7 @@ struct Fixture {
         };
     }
 
-    void tick(PushState state, uint64_t now) {
+    void tick(SearchAction state, uint64_t now) {
         in.now_us = now;
         context.now_us = now;
         context.elapsed_us = now - phase_us;
@@ -179,7 +178,7 @@ void scanWithoutCandidateSpinsAndClearsTheLock() {
     f.target_id = 4;
     f.confirmations = 1;
     f.context.scan_ok = true;
-    f.tick(PushState::SCAN, f.in.now_us);
+    f.tick(SearchAction::Scan, f.in.now_us);
     CHECK(f.reason == "searching_target");
     CHECK(f.target_id == -1 && f.confirmations == 0);
     CHECK(f.spins == 1);
@@ -192,9 +191,9 @@ void scanConfirmsALockAndStartsTheCueApproach() {
     f.cue_now = true;
     f.in.target_id = 7;
     f.in.label = "ordinary_supply";
-    f.tick(PushState::SCAN, f.in.now_us);
+    f.tick(SearchAction::Scan, f.in.now_us);
     CHECK(f.confirmations == 1 && f.enters.empty());
-    f.tick(PushState::SCAN, f.in.now_us + 1);
+    f.tick(SearchAction::Scan, f.in.now_us + 1);
     CHECK(f.enters.size() == 1);
     CHECK(f.enters[0] == "CUE_APPROACH:search_cue_locked");
     CHECK(f.search_cue_id == 7 && f.capture_target_id == -1 && f.cue_mode);
@@ -206,8 +205,8 @@ void scanConfirmsAnOrdinaryLock() {
     f.candidate_now = true;
     f.in.target_id = 3;
     f.in.label = "ordinary_supply";
-    f.tick(PushState::SCAN, f.in.now_us);
-    f.tick(PushState::SCAN, f.in.now_us + 1);
+    f.tick(SearchAction::Scan, f.in.now_us);
+    f.tick(SearchAction::Scan, f.in.now_us + 1);
     CHECK(f.enters.size() == 1);
     CHECK(f.enters[0] == "APPROACH:target_locked");
     CHECK(f.capture_target_id == 3 && f.search_cue_id == -1 && !f.cue_mode);
@@ -224,7 +223,7 @@ void scanFarGroupStartsAFarScatter() {
     f.tuning.blind_scatter_max_y_m = 1.f;
     f.tuning.blind_scatter_far_chase_m = .5f;
     f.best_group = BestGroup{2, 1.5f};
-    f.tick(PushState::SCAN, f.in.now_us);
+    f.tick(SearchAction::Scan, f.in.now_us);
     CHECK(f.scatters.size() == 1);
     CHECK(f.scatters[0] == "far:blind_scatter_far_group");
 }
@@ -238,7 +237,7 @@ void scanDenseGroupDefersWithoutAFreshCluster() {
     f.tuning.dense_no_lock = true;
     f.tuning.sweep_confirm = 2;
     f.eval_group_now = 1;
-    f.tick(PushState::SCAN, f.in.now_us);
+    f.tick(SearchAction::Scan, f.in.now_us);
     CHECK(f.scatters.empty());
     CHECK(f.reason == "dense_group_confirm");
     CHECK(f.confirmations == 0);
@@ -249,7 +248,7 @@ void lostSearchTiltsToTheMidViewOnce() {
     f.context.mid_pitch = true;
     f.step = 1;
     f.phase_us = f.in.now_us - 20000000;
-    f.tick(PushState::LOST_SEARCH, f.in.now_us);
+    f.tick(SearchAction::LostSearch, f.in.now_us);
     CHECK(f.enters.size() == 1);
     CHECK(f.enters[0] == "LOST_SEARCH:lost_search_mid_pitch");
     CHECK(f.lost_round == 1);
@@ -261,7 +260,7 @@ void lostSearchRescansWhenNothingIsFound() {
     f.phase_us = f.in.now_us - 20000000;
     f.tuning.lost_search_rescan = true;
     f.context.trip_empty = true;
-    f.tick(PushState::LOST_SEARCH, f.in.now_us);
+    f.tick(SearchAction::LostSearch, f.in.now_us);
     CHECK(f.enters.size() == 1);
     CHECK(f.enters[0] == "SCAN:lost_search_rescan");
 }
@@ -270,7 +269,7 @@ void lostSearchExhaustsIntoAFault() {
     Fixture f;
     f.step = 1;
     f.phase_us = f.in.now_us - 20000000;
-    f.tick(PushState::LOST_SEARCH, f.in.now_us);
+    f.tick(SearchAction::LostSearch, f.in.now_us);
     CHECK(f.faults.size() == 1 && f.faults[0] == "lost_search_exhausted");
 }
 
@@ -278,7 +277,7 @@ void lostSearchNeedsClosedFrameFeedback() {
     Fixture f;
     f.in.gripper_closed_observed = false;
     f.context.sweep_open = false;
-    f.tick(PushState::LOST_SEARCH, f.in.now_us);
+    f.tick(SearchAction::LostSearch, f.in.now_us);
     CHECK(f.faults.size() == 1 && f.faults[0] == "lost_search_feedback_missing");
 }
 
@@ -291,8 +290,8 @@ void lostSearchReacquiresAtCloseRange() {
     f.in.target_id = 9;
     f.in.label = "ordinary_supply";
     f.tuning.track_near_m = .5f;
-    f.tick(PushState::LOST_SEARCH, f.in.now_us);
-    f.tick(PushState::LOST_SEARCH, f.in.now_us + 1);
+    f.tick(SearchAction::LostSearch, f.in.now_us);
+    f.tick(SearchAction::LostSearch, f.in.now_us + 1);
     CHECK(f.enters.size() == 1);
     CHECK(f.enters[0] == "MID_REACQUIRE:lost_target_reacquired_mid");
 }
@@ -305,7 +304,7 @@ void lostSearchGroupStartsACommittedScatter() {
     f.context.trip_empty = true;
     f.tuning.blind_scatter_far_min = 1;
     f.eval_group_now = 2;
-    f.tick(PushState::LOST_SEARCH, f.in.now_us);
+    f.tick(SearchAction::LostSearch, f.in.now_us);
     CHECK(f.scatters.size() == 1);
     CHECK(f.scatters[0] == "far:lost_group_far");
 }
@@ -316,8 +315,8 @@ void reacquireConfirmsTheNewCameraLock() {
     f.candidate_now = true;
     f.in.target_id = 5;
     f.in.label = "ordinary_supply";
-    f.tick(PushState::MID_REACQUIRE, f.in.now_us);
-    f.tick(PushState::MID_REACQUIRE, f.in.now_us + 1);
+    f.tick(SearchAction::MidReacquire, f.in.now_us);
+    f.tick(SearchAction::MidReacquire, f.in.now_us + 1);
     CHECK(f.enters.size() == 1);
     CHECK(f.enters[0] == "MID_APPROACH:mid_cargo_reacquired");
     CHECK(f.target_id == 5);
@@ -328,7 +327,7 @@ void reacquireTimesOutIntoASearch() {
     f.step = 1;
     f.phase_us = f.in.now_us - 3000000;
     f.tuning.enable_lost_search = true;
-    f.tick(PushState::NEAR_REACQUIRE, f.in.now_us);
+    f.tick(SearchAction::NearReacquire, f.in.now_us);
     CHECK(f.lost_calls == 1);
 }
 
@@ -338,7 +337,7 @@ void reacquireWithAnOpenJawFaults() {
     f.phase_us = f.in.now_us - 3000000;
     f.frame_raised = 1;
     f.context.frame_raised = 1;
-    f.tick(PushState::NEAR_REACQUIRE, f.in.now_us);
+    f.tick(SearchAction::NearReacquire, f.in.now_us);
     CHECK(f.faults.size() == 1 && f.faults[0] == "open_jaw_reacquire_timeout");
 }
 
@@ -346,7 +345,7 @@ void reacquireRejectsABlockedPath() {
     Fixture f;
     f.candidate_now = true;
     f.context.forward_ok = false;
-    f.tick(PushState::MID_REACQUIRE, f.in.now_us);
+    f.tick(SearchAction::MidReacquire, f.in.now_us);
     CHECK(f.reason == "mid_cargo_path_blocked");
     CHECK(f.confirmations == 0);
 }
@@ -356,8 +355,8 @@ void selectCargoLocksTheApproach() {
     f.candidate_now = true;
     f.in.target_id = 2;
     f.in.label = "ordinary_supply";
-    f.tick(PushState::SELECT_CARGO, f.in.now_us);
-    f.tick(PushState::SELECT_CARGO, f.in.now_us + 1);
+    f.tick(SearchAction::SelectCargo, f.in.now_us);
+    f.tick(SearchAction::SelectCargo, f.in.now_us + 1);
     CHECK(f.enters.size() == 1);
     CHECK(f.enters[0] == "APPROACH:cargo_locked");
     CHECK(f.target_id == 2);
@@ -367,7 +366,7 @@ void selectCargoBudgetRejectsTheCue() {
     Fixture f;
     f.tuning.prepare_budget_us = 100;
     f.context.elapsed_us = 101;
-    f.tick(PushState::SELECT_CARGO, f.in.now_us);
+    f.tick(SearchAction::SelectCargo, f.in.now_us);
     CHECK(f.rejections == 1);
     CHECK(f.clears.size() == 1 && f.clears[0] == "no_eligible_cargo");
 }
@@ -376,7 +375,7 @@ void unstickOwnsTheScanTick() {
     Fixture f;
     f.unstick_now = true;
     f.context.scan_ok = true;
-    f.tick(PushState::SCAN, f.in.now_us);
+    f.tick(SearchAction::Scan, f.in.now_us);
     CHECK(f.spins == 0);
     CHECK(f.reason == "searching_target");
 }

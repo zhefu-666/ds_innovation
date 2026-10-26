@@ -164,8 +164,7 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
     }
     AuditScope overlay_audit("telemetry.overlay");
     // Highlight the state machine's lock, never an unrelated current-frame candidate.
-    const bool active =
-        s.output.state != PushState::WAIT_START && s.output.state != PushState::SAFE_STOP;
+    const bool active = s.output.run_status == RunStatus::Running;
     const int locked = active ? s.output.target_id : -1;
     const bool cue = s.output.target_is_search_cue;
     const cv::Scalar color = cue ? cv::Scalar(255, 220, 0) : cv::Scalar(0, 220, 255);
@@ -186,16 +185,14 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
             cv::drawMarker(preview, centre, color, cv::MARKER_CROSS, 18, 2);
             tracking = std::string(cue ? "TRACK CUE #" : "TRACK CARGO #") + std::to_string(locked) +
                        " " + d.label;
-            if (s.output.state == PushState::SCAN)
+            if (s.output.phase == TaskPhase::Search && s.output.search_action == SearchAction::Scan)
                 tracking = "SELECTING CUE #" + std::to_string(locked) + " " + d.label;
             seen = true;
             break;
         }
     if (locked >= 0 && !seen)
         tracking = "TRACK LOST #" + std::to_string(locked);
-    if (active &&
-        (s.output.state == PushState::MID_REACQUIRE ||
-         s.output.state == PushState::NEAR_REACQUIRE || s.output.state == PushState::SELECT_CARGO))
+    if (active && s.output.target_reselecting)
         tracking = "TRACK: RESELECTING CARGO";
     const int top = std::min(26, std::max(0, preview.rows - 25));
     cv::rectangle(preview,
@@ -232,11 +229,16 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
           << "}" << "}";
     }
     const auto& in = s.observation;
-    f << "]" << "state" << "{" << "name" << PushTask::name(s.output.state) << "batch_size"
-      << s.output.batch_size << "delivered_total" << s.output.delivered_total
-      << "first_ordinary_delivered" << static_cast<int>(s.output.first_ordinary_delivered)
-      << "match_state" << s.output.match_state << "match_reason" << s.output.match_reason
-      << "match_remaining_ms" << double(s.output.match_remaining_us / 1000) << "target_region_valid"
+    f << "]" << "state" << "{" << "name" << PushTask::name(s.output.state) << "phase"
+      << phaseName(s.output.phase) << "run_status" << runStatusName(s.output.run_status) << "action"
+      << PushTask::name(s.output.state) << "recovering" << int(s.output.recovering)
+      << "capture_evidence" << int(s.output.capture_evidence) << "delivery_credited"
+      << s.output.delivery_credited << "delivery_expected" << s.output.delivery_expected
+      << "delivery_visual" << int(s.output.delivery_visual) << "batch_size" << s.output.batch_size
+      << "delivered_total" << s.output.delivered_total << "first_ordinary_delivered"
+      << static_cast<int>(s.output.first_ordinary_delivered) << "match_state"
+      << s.output.match_state << "match_reason" << s.output.match_reason << "match_remaining_ms"
+      << double(s.output.match_remaining_us / 1000) << "target_region_valid"
       << int(in.target_region_valid) << "target_in_zone" << int(in.target_in_zone)
       << "zone_identity_verified" << int(in.zone_identity_verified) << "retreat_safe"
       << int(in.retreat_safe) << "opponent_zone_clear" << int(in.opponent_zone_clear)
@@ -278,9 +280,9 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
       << "startup_forward_commanded_ms" << double(s.output.startup_commanded_us / 1000)
       << "clear_forward_commanded_ms" << double(s.output.clear_commanded_us / 1000)
       << "clearing_attempts" << s.output.clearing_attempts << "cue_contact_allowed"
-      << int(s.output.cue_contact_allowed) << "phase" << PushTask::name(s.output.state)
-      << "phase_reason" << s.output.reason << "match_state" << s.output.match_state
-      << "match_reason" << s.output.match_reason << "match_remaining_ms"
+      << int(s.output.cue_contact_allowed) << "phase" << phaseName(s.output.phase) << "action"
+      << PushTask::name(s.output.state) << "phase_reason" << s.output.reason << "match_state"
+      << s.output.match_state << "match_reason" << s.output.match_reason << "match_remaining_ms"
       << double(s.output.match_remaining_us / 1000) << "preflight_ready"
       << int(s.decision.preflight_reason.empty()) << "preflight_reason"
       << s.decision.preflight_reason << "run_permitted" << int(in.run) << "safety_ok"

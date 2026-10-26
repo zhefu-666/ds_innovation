@@ -15,12 +15,13 @@ void sweepFrameOpenTests() {
             s.tick();
         assert(s.out.motion.gripper_offset == 20);
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_sweep");
-        s.task.sweep_phase_ = phase;
+        s.task.search_phase_.sweep_phase_ = phase;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.sweep_yaw0_ = s.phi;
-        s.task.disperse_rush_m_ = .5f;
-        s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(), 2);
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.sweep_yaw0_ = s.phi;
+        s.task.search_phase_.disperse_rush_m_ = .5f;
+        s.task.search_phase_.disperse_swing_.configure(
+            s.task.search_phase_.disperse_swing_.passLimit(), 2);
         s.in.clutter_body = {{0, .3f}, {.1f, .3f}, {-.1f, .3f}};
         auto step = [&] {
             s.in.clutter_ts_us = s.in.now_us;
@@ -65,11 +66,12 @@ void sweepFrameOpenTests() {
         for (int i = 0; i < 20; ++i)
             s.tick();
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_sweep");
-        s.task.sweep_phase_ = 5;
+        s.task.search_phase_.sweep_phase_ = 5;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.sweep_yaw0_ = s.phi;
-        s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(), 2);
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.sweep_yaw0_ = s.phi;
+        s.task.search_phase_.disperse_swing_.configure(
+            s.task.search_phase_.disperse_swing_.passLimit(), 2);
         s.in.clutter_body = {{0, .3f}, {.1f, .3f}, {-.1f, .3f}};
         s.gripper_responds = false;
         for (int i = 0; i < 40; ++i) {
@@ -92,11 +94,12 @@ void sweepFrameOpenTests() {
         for (int i = 0; i < 20; ++i)
             s.tick();
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_sweep");
-        s.task.sweep_phase_ = 5;
+        s.task.search_phase_.sweep_phase_ = 5;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.sweep_yaw0_ = s.phi;
-        s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(), 2);
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.sweep_yaw0_ = s.phi;
+        s.task.search_phase_.disperse_swing_.configure(
+            s.task.search_phase_.disperse_swing_.passLimit(), 2);
         s.in.clutter_body = {{0, .3f}, {.1f, .3f}, {-.1f, .3f}};
         s.in.clutter_ts_us = s.in.now_us;
         s.tick();
@@ -175,15 +178,16 @@ void defaultOpenFrameTests() {
             for (int i = 0; i < 20; ++i)
                 s.tick();
             s.task.enter(PushState::SCATTER, s.in.now_us, "test_sweep");
-            s.task.sweep_phase_ = 5;
+            s.task.search_phase_.sweep_phase_ = 5;
             s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-            s.task.sweep_start_us_ = s.in.now_us;
-            s.task.sweep_yaw0_ = s.phi;
-            s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(), 2);
+            s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+            s.task.search_phase_.sweep_yaw0_ = s.phi;
+            s.task.search_phase_.disperse_swing_.configure(
+                s.task.search_phase_.disperse_swing_.passLimit(), 2);
             s.in.clutter_body = {{0, .3f}, {.1f, .3f}, {-.1f, .3f}};
             const float phi0 = s.phi;
             float peak = 0;
-            for (int i = 0; i < 400 && s.task.sweep_phase_ == 5; ++i) {
+            for (int i = 0; i < 400 && s.task.search_phase_.sweep_phase_ == 5; ++i) {
                 s.in.clutter_ts_us = s.in.now_us;
                 s.tick();
                 peak = std::max(peak, std::fabs(s.phi - phi0));
@@ -291,10 +295,10 @@ void sweepViewTests() {
         Sim s(t);
         s.task.enter(PushState::SCATTER, s.in.now_us, "test");
 #ifdef RESCUE_HAS_RUSH_STAGE
-        s.task.disperse_rush_.active_ = true;
-        s.task.disperse_rush_.pending_ = true;
-        s.task.disperse_rush_.cap_negative_ = .3f;
-        s.task.disperse_rush_.cap_positive_ = .2f;
+        s.task.search_phase_.disperse_rush_.active_ = true;
+        s.task.search_phase_.disperse_rush_.pending_ = true;
+        s.task.search_phase_.disperse_rush_.cap_negative_ = .3f;
+        s.task.search_phase_.disperse_rush_.cap_positive_ = .2f;
 #else
         s.task.swing_plan_active_ = true;
         s.task.swing_plan_pending_ = true;
@@ -303,9 +307,10 @@ void sweepViewTests() {
 #endif
         s.task.enter(PushState::APPROACH, s.in.now_us, "test");
 #ifdef RESCUE_HAS_RUSH_STAGE
-        assert(!s.task.disperse_rush_.active_ && !s.task.disperse_rush_.pending_ &&
-               s.task.disperse_rush_.cap_negative_ >= 99.f &&
-               s.task.disperse_rush_.cap_positive_ >= 99.f);
+        assert(!s.task.search_phase_.disperse_rush_.active_ &&
+               !s.task.search_phase_.disperse_rush_.pending_ &&
+               s.task.search_phase_.disperse_rush_.cap_negative_ >= 99.f &&
+               s.task.search_phase_.disperse_rush_.cap_positive_ >= 99.f);
 #else
         assert(!s.task.swing_plan_active_ && !s.task.swing_plan_pending_ &&
                s.task.swing_cap_neg_ >= 99.f && s.task.swing_cap_pos_ >= 99.f);
@@ -398,7 +403,7 @@ void sweepViewTests() {
             assert(s.until(PushState::APPROACH, 80));
             for (int i = 0; i < 10; ++i)
                 s.tick();
-            s.task.approach_rebind_ =
+            s.task.search_phase_.approach_rebind_ =
                 false; // isolate the occlusion hold from the pitch-change rebind window
             s.in.target_valid = false;
             bool waited = false, rebound = false;
@@ -544,7 +549,7 @@ void pileTests() {
                 if (s.out.reason == "pile_measure" && r.y_measure == 0)
                     r.y_measure = s.py;
                 if (s.out.reason == "pile_cut_align" || s.out.reason == "pile_cut_drive") {
-                    r.cut_yaw = s.task.sweep_.pile_cut_yaw_;
+                    r.cut_yaw = s.task.search_phase_.sweep_.pile_cut_yaw_;
                     r.phi_cut = s.phi;
                 }
             }
@@ -647,12 +652,12 @@ void pileTests() {
                     s.tick();
                 const float x0 = s.px, y0 = s.py, phi0 = s.phi;
                 s.task.enter(PushState::PILE, s.in.now_us, "test_pile_chain");
-                s.task.pile_yaw0_ = s.phi;
-                s.task.pile_phase_ = 7;
-                s.task.pile_seen_ = 0;
-                s.task.pile_push0_ = -1.f;
-                s.task.pile_chain_n_ = 0;
-                s.task.pile_phase_us_ = s.in.now_us;
+                s.task.search_phase_.pile_yaw0_ = s.phi;
+                s.task.search_phase_.pile_phase_ = 7;
+                s.task.search_phase_.pile_seen_ = 0;
+                s.task.search_phase_.pile_push0_ = -1.f;
+                s.task.search_phase_.pile_chain_n_ = 0;
+                s.task.search_phase_.pile_phase_us_ = s.in.now_us;
                 std::set<std::string> reasons;
                 std::string end;
                 int rounds = 0;
@@ -678,7 +683,7 @@ void pileTests() {
                         left = true;
                         end = s.out.reason;
                     }
-                    rounds = s.task.pile_chain_n_;
+                    rounds = s.task.search_phase_.pile_chain_n_;
                 }
                 assert(left);
                 return std::make_tuple(reasons, end, rounds);
@@ -723,15 +728,15 @@ void pileTests() {
             assert(s.until(PushState::APPROACH, 80));
             s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
             s.task.sweep_ledger_.setSwung(true);
-            s.task.sweep_phase_ = 5;
-            s.task.disperse_turn_.phase_ = DisperseTurnPhase::Push;
-            s.task.sweep_start_us_ = s.in.now_us;
-            s.task.sweep_travel0_ = s.task.travel_ - 1.f;
+            s.task.search_phase_.sweep_phase_ = 5;
+            s.task.search_phase_.disperse_turn_.phase_ = DisperseTurnPhase::Push;
+            s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+            s.task.search_phase_.sweep_travel0_ = s.task.actionProgress().travel - 1.f;
             for (int i = 0; i < 60 && s.out.state == PushState::APPROACH; ++i)
                 s.tick();
             assert((s.out.state == PushState::PILE) == on);
             if (on)
-                assert(s.task.pile_phase_ == 7);
+                assert(s.task.search_phase_.pile_phase_ == 7);
         }
     }
 }

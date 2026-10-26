@@ -479,7 +479,7 @@ void demoCaptureMotionTests() {
         s.toRush();
         s.in.target_valid = false;
         s.in.corridor = inv(1, 0, 0, 1);
-        s.task.travel_limit_ = 0;
+        s.task.actionProgress().travel_limit = 0;
         s.tick();
         assert(s.out.state == PushState::CAPTURE_FAIL &&
                s.out.reason == "rush_corridor_dangerous" && stopped(s.out.motion));

@@ -49,20 +49,20 @@ struct Rig {
         input.gripper_done = true;
         input.gripper_feedback_open = 0;
         task.enter(PushState::VERIFY_CAPTURE, kStart, "seed_reason");
-        task.target_id_ = kTarget;
-        task.label_ = "ordinary_supply";
-        task.pending_ = ordinary();
-        task.verdict_ = RuleVerdict::DANGEROUS;
+        task.trip_context_.target_id_ = kTarget;
+        task.trip_context_.label_ = "ordinary_supply";
+        task.trip_context_.pending_ = ordinary();
+        task.trip_context_.verdict_ = RuleVerdict::DANGEROUS;
         task.last_us_ = kStart;
         task.pitch_cmd_ = tuning.near_pitch_cdeg;
         task.pitch_wait_us_ = kStart;
         task.frame_transaction_ = task.wire_txn_ = kTransaction;
         task.wire_last_ = 0;
-        task.carry_us_ = 333;
-        task.carry_approach_.seedProgressUs(kProgress);
-        task.hold_seen_us_ = 444;
-        task.zone_search_started_us_ = 555;
-        task.carried_ = 2.f;
+        task.transport_phase_.carry_us_ = 333;
+        task.transport_phase_.carry_approach_.seedProgressUs(kProgress);
+        task.transport_phase_.hold_seen_us_ = 444;
+        task.transport_phase_.zone_search_started_us_ = 555;
+        task.transport_phase_.carried_ = 2.f;
     }
 
     PushOutput tick() {
@@ -106,11 +106,20 @@ struct Rig {
 
     void carry(bool assumed, const char* reason) const {
         assert(output.state == PushState::CARRY && output.reason == reason);
-        assert(task.trip_ == ordinary() && output.batch_size == 1);
-        assert(task.carry_us_ == input.now_us && task.hold_seen_us_ == input.now_us);
-        assert(task.zone_search_started_us_ == 0 && task.carried_ == 0);
-        assert(task.phase_us_ == input.now_us);
-        assert(task.carry_approach_.progressUs() == (assumed ? 0 : kProgress));
+        assert(output.phase == TaskPhase::Transport && output.run_status == RunStatus::Running);
+        assert(output.transport_action == TransportAction::Carry && !output.recovering);
+        assert(output.capture_evidence ==
+               (assumed ? CaptureEvidence::Assumed : CaptureEvidence::Verified));
+        assert(output.navigation_requested && output.navigation_approach);
+        assert(!output.capture_observation_requested);
+
+        assert(task.trip_context_.trip_ == ordinary() && output.batch_size == 1);
+        assert(task.transport_phase_.carry_us_ == input.now_us &&
+               task.transport_phase_.hold_seen_us_ == input.now_us);
+        assert(task.transport_phase_.zone_search_started_us_ == 0 &&
+               task.transport_phase_.carried_ == 0);
+        assert(task.actionProgress().started_us == input.now_us);
+        assert(task.transport_phase_.carry_approach_.progressUs() == (assumed ? 0 : kProgress));
         assert(!task.fault_);
         closed();
         blacklisted(false);
@@ -123,11 +132,12 @@ struct Rig {
                   << " frame=" << int(output.motion.gripper_offset)
                   << " transaction=" << output.motion.frame_transaction
                   << " blacklisted=" << rejected.size() << " fault=" << task.fault_
-                  << " phase_us=" << task.phase_us_ << " carry_us=" << task.carry_us_
-                  << " carry_progress_us=" << task.carry_approach_.progressUs()
-                  << " hold_seen_us=" << task.hold_seen_us_
-                  << " zone_search_us=" << task.zone_search_started_us_
-                  << " carried=" << task.carried_ << '\n';
+                  << " phase_us=" << task.actionProgress().started_us
+                  << " carry_us=" << task.transport_phase_.carry_us_
+                  << " carry_progress_us=" << task.transport_phase_.carry_approach_.progressUs()
+                  << " hold_seen_us=" << task.transport_phase_.hold_seen_us_
+                  << " zone_search_us=" << task.transport_phase_.zone_search_started_us_
+                  << " carried=" << task.transport_phase_.carried_ << '\n';
     }
 };
 
@@ -151,7 +161,8 @@ void verifiedTests() {
         rig.tick();
         assert(rig.output.state == PushState::VERIFY_CAPTURE);
         assert(rig.output.reason == "seed_reason" && rig.output.verdict == RuleVerdict::DANGEROUS);
-        assert(rig.task.phase_us_ == kStart && rig.task.carry_approach_.progressUs() == kProgress);
+        assert(rig.task.actionProgress().started_us == kStart &&
+               rig.task.transport_phase_.carry_approach_.progressUs() == kProgress);
         rig.closed();
         rig.report("continue_single");
         rig.tick();
@@ -186,7 +197,7 @@ void failureTests() {
         assert(rig.output.state == PushState::ABORT_DROP);
         assert(rig.output.reason == "multi_grab_inventory_mismatch" &&
                rig.output.verdict == RuleVerdict::OK);
-        assert(rig.task.phase_us_ == rig.input.now_us && !rig.task.fault_);
+        assert(rig.task.actionProgress().started_us == rig.input.now_us && !rig.task.fault_);
         const auto bearings = rig.task.rejectedBearings(rig.input.now_us);
         assert(bearings.size() == 1 && std::abs(bearings.front().world_yaw - .4f) < 1e-6f);
         assert(std::abs(bearings.front().range_m - std::sqrt(.05f)) < 1e-6f);
@@ -207,7 +218,7 @@ void failureTests() {
         assert(rig.output.state == PushState::CAPTURE_FAIL &&
                rig.output.reason == "capture_unverified");
         assert(rig.output.verdict == RuleVerdict::DANGEROUS && !rig.task.fault_);
-        assert(rig.task.phase_us_ == rig.input.now_us);
+        assert(rig.task.actionProgress().started_us == rig.input.now_us);
         rig.closed();
         rig.blacklisted(false);
         rig.report("capture_fail_timeout");
@@ -223,7 +234,7 @@ void failureTests() {
         assert(rig.output.state == PushState::CAPTURE_FAIL &&
                rig.output.reason == "capture_target_not_in_frame");
         assert(rig.output.verdict == RuleVerdict::DANGEROUS && !rig.task.fault_);
-        assert(rig.task.phase_us_ == rig.input.now_us);
+        assert(rig.task.actionProgress().started_us == rig.input.now_us);
         rig.closed();
         rig.blacklisted(true);
         rig.report("capture_fail_missing_target");
@@ -240,7 +251,7 @@ void failureTests() {
         rig.atElapsed(8000001);
         assert(rig.output.state == PushState::SAFE_STOP &&
                rig.output.reason == "multi_view_unconfirmed");
-        assert(rig.task.fault_ && rig.task.phase_us_ == kStart);
+        assert(rig.task.fault_ && rig.task.actionProgress().started_us == kStart);
         assert(rig.output.verdict == RuleVerdict::DANGEROUS);
         rig.closed();
         rig.blacklisted(false);
@@ -284,7 +295,7 @@ void lifecycleTests() {
         rig.tick();
         assert(rig.output.state == PushState::VERIFY_CAPTURE);
         assert(rig.output.reason == "seed_reason" && rig.output.verdict == RuleVerdict::DANGEROUS);
-        assert(rig.task.phase_us_ == kStart);
+        assert(rig.task.actionProgress().started_us == kStart);
         rig.closed();
         rig.report("continue_multi");
         rig.input.run = false;
@@ -296,7 +307,7 @@ void lifecycleTests() {
         rig.input.run = true;
         rig.tick();
         assert(rig.output.state == PushState::ABORT_DROP && rig.output.reason == "resume");
-        assert(rig.task.phase_us_ == rig.input.now_us && !rig.task.fault_);
+        assert(rig.task.actionProgress().started_us == rig.input.now_us && !rig.task.fault_);
         rig.closed();
         rig.blacklisted(false);
         rig.report("resumed");
@@ -322,7 +333,7 @@ void lifecycleTests() {
         rig.input.safety_ok = false;
         rig.tick();
         assert(rig.output.state == PushState::SAFE_STOP && rig.output.reason == "safety_veto");
-        assert(rig.task.fault_ && rig.task.phase_us_ == kStart);
+        assert(rig.task.fault_ && rig.task.actionProgress().started_us == kStart);
         rig.closed();
         rig.report("safety_fault");
         rig.input.reset = true;
@@ -338,17 +349,18 @@ void lifecycleTests() {
         rig.input.hold_observable = rig.input.captured = rig.input.held_complete = false;
         rig.input.held = {};
         rig.input.held_objects.clear();
-        rig.task.target_id_ = kTarget;
-        rig.task.label_ = "ordinary_supply";
-        rig.task.pending_ = ordinary();
+        rig.task.trip_context_.target_id_ = kTarget;
+        rig.task.trip_context_.label_ = "ordinary_supply";
+        rig.task.trip_context_.pending_ = ordinary();
         rig.task.enter(PushState::VERIFY_CAPTURE, rig.input.now_us, "new_capture");
         rig.summary(2, {});
         rig.tick();
         assert(rig.output.state == PushState::CARRY && rig.output.reason == "assumed_capture");
-        assert(rig.task.trip_ == ordinary() && !rig.task.fault_);
-        assert(rig.task.carry_us_ == rig.input.now_us &&
-               rig.task.hold_seen_us_ == rig.input.now_us);
-        assert(rig.task.carry_approach_.progressUs() == 0 && rig.task.carried_ == 0);
+        assert(rig.task.trip_context_.trip_ == ordinary() && !rig.task.fault_);
+        assert(rig.task.transport_phase_.carry_us_ == rig.input.now_us &&
+               rig.task.transport_phase_.hold_seen_us_ == rig.input.now_us);
+        assert(rig.task.transport_phase_.carry_approach_.progressUs() == 0 &&
+               rig.task.transport_phase_.carried_ == 0);
         rig.closed();
         rig.blacklisted(false);
         rig.report("new_capture_after_reset");

@@ -14,7 +14,7 @@ void precisionMotionTests() {
         Sim s(tune());
         s.in.distance_m = .30f;
         s.toRush();
-        const float bound = s.task.travel_limit_;
+        const float bound = s.task.actionProgress().travel_limit;
         s.in.distance_m = .18f;
         s.in.heading_error = .01745f;
         s.tick();
@@ -23,7 +23,7 @@ void precisionMotionTests() {
         assert(s.out.motion.wz_rps == 0 && s.out.reason == "rush_straight_near");
         for (int i = 0; i < 10; ++i)
             s.tick();
-        assert(s.task.travel_limit_ ==
+        assert(s.task.actionProgress().travel_limit ==
                bound); // a frozen distance cannot move the hard bound forward
         s.in.heading_error = .10f;
         s.tick();
@@ -42,17 +42,17 @@ void precisionMotionTests() {
         s.in.distance_m = .30f;
         s.toRush();
         if (mode == 0)
-            s.task.travel_limit_ = 0; // distance bound
+            s.task.actionProgress().travel_limit = 0; // distance bound
         if (mode == 2)
             s.in.target_valid = false; // lost target cannot authorize blind drive
         if (mode == 3) {
-            s.task.travel_limit_ = 0;
+            s.task.actionProgress().travel_limit = 0;
             s.hold(inv(1));
         } // positive held-region evidence still permits enclosure
         if (mode == 1) {
             s.in.now_us += s.tune.rush_budget_us;
             s.task.last_us_ = s.in.now_us;
-            s.task.phase_us_ = s.in.now_us - s.tune.rush_budget_us - 1;
+            s.task.actionProgress().started_us = s.in.now_us - s.tune.rush_budget_us - 1;
         }
         s.tick();
         assert(s.out.state == PushState::RUSH && stopped(s.out.motion));
@@ -197,11 +197,11 @@ void precisionMotionTests() {
         for (int i = 0; i < 20; ++i)
             s.tick();
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_sweep");
-        s.task.sweep_phase_ = phase;
+        s.task.search_phase_.sweep_phase_ = phase;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
         s.task.sweep_ledger_.setSwung(phase != 7);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.disperse_rush_m_ = .5f;
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.disperse_rush_m_ = .5f;
         s.in.clutter_body.clear();
         s.in.clutter_ts_us = 0;
         s.tick();
@@ -228,11 +228,12 @@ void precisionMotionTests() {
         for (int i = 0; i < 20; ++i)
             s.tick();
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_swing");
-        s.task.sweep_phase_ = 5;
+        s.task.search_phase_.sweep_phase_ = 5;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.sweep_yaw0_ = s.phi;
-        s.task.disperse_swing_.configure(s.task.disperse_swing_.passLimit(), 3);
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.sweep_yaw0_ = s.phi;
+        s.task.search_phase_.disperse_swing_.configure(
+            s.task.search_phase_.disperse_swing_.passLimit(), 3);
         s.in.clutter_body = {{0, .3f}, {.1f, .3f}, {-.1f, .3f}};
         s.in.clutter_ts_us = s.in.now_us;
         s.tick();
@@ -255,12 +256,12 @@ void precisionMotionTests() {
         for (int i = 0; i < 20; ++i)
             s.tick();
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_single_turn");
-        s.task.sweep_phase_ = 5;
+        s.task.search_phase_.sweep_phase_ = 5;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.sweep_yaw0_ = s.phi;
-        s.task.disperse_turn_.begin(true);
-        s.task.disperse_sign_ = blocks_left ? 1.f : -1.f;
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.sweep_yaw0_ = s.phi;
+        s.task.search_phase_.disperse_turn_.begin(true);
+        s.task.search_phase_.disperse_sign_ = blocks_left ? 1.f : -1.f;
         const auto feed = [&] { // blocks on the left (x<0) only when requested; right side empty
             s.in.clutter_body.clear();
             if (blocks_left)
@@ -286,16 +287,16 @@ void precisionMotionTests() {
                 turned = true;
                 dir_seen = s.out.motion.wz_rps;
             }
-            if (!s.task.disperse_turn_.active() && turned)
+            if (!s.task.search_phase_.disperse_turn_.active() && turned)
                 break;
         }
-        assert(looked && turned && !s.task.disperse_turn_.active());
+        assert(looked && turned && !s.task.search_phase_.disperse_turn_.active());
         assert(dir_seen * (blocks_left ? -1.f : 1.f) >
                0); // fewer blocks on the right: turn right; fewer on the left: turn left
         const float done = std::abs(s.phi - phi0);
         assert(done >= s.tune.disperse_turn_rad - s.tune.disperse_swing_tol_rad - .2f &&
                done <= s.tune.disperse_turn_rad + .4f); // one turn, not three swings
-        assert(s.task.disperse_swing_.swingCount() == 0);
+        assert(s.task.search_phase_.disperse_swing_.swingCount() == 0);
     }
     { // thin view: stops after the minimum turn instead of the full angle
         TaskTuning t;
@@ -311,22 +312,22 @@ void precisionMotionTests() {
         for (int i = 0; i < 20; ++i)
             s.tick();
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_single_turn_thin");
-        s.task.sweep_phase_ = 5;
+        s.task.search_phase_.sweep_phase_ = 5;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.sweep_yaw0_ = s.phi;
-        s.task.disperse_turn_.begin(true);
-        s.task.disperse_sign_ = 1.f;
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.sweep_yaw0_ = s.phi;
+        s.task.search_phase_.disperse_turn_.begin(true);
+        s.task.search_phase_.disperse_sign_ = 1.f;
         const float phi0 = s.phi;
         for (int i = 0; i < 400; ++i) {
             s.in.clutter_body.clear();
             s.in.clutter_ts_us = s.in.now_us;
             s.tick();
-            if (!s.task.disperse_turn_.active() && s.out.reason != "disperse_look" &&
+            if (!s.task.search_phase_.disperse_turn_.active() && s.out.reason != "disperse_look" &&
                 std::abs(s.phi - phi0) > .1f)
                 break;
         }
-        assert(!s.task.disperse_turn_.active());
+        assert(!s.task.search_phase_.disperse_turn_.active());
         const float done = std::abs(s.phi - phi0);
         assert(done >= s.tune.disperse_turn_min_rad - .1f && done < s.tune.disperse_turn_rad - .3f);
     }
@@ -347,17 +348,17 @@ void precisionMotionTests() {
         for (int i = 0; i < 20; ++i)
             s.tick();
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_frame_zone");
-        s.task.sweep_phase_ = 5;
+        s.task.search_phase_.sweep_phase_ = 5;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.sweep_yaw0_ = s.phi;
-        s.task.disperse_turn_.begin(true);
-        s.task.disperse_sign_ = 1.f;
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.sweep_yaw0_ = s.phi;
+        s.task.search_phase_.disperse_turn_.begin(true);
+        s.task.search_phase_.disperse_sign_ = 1.f;
         const float phi0 = s.phi;
         bool low_turn = false, low_look = false;
         for (int i = 0; i < 600; ++i) {
             s.in.clutter_body.clear();
-            if (s.task.disperse_turn_.needsFrameView() && zone_blocks)
+            if (s.task.search_phase_.disperse_turn_.needsFrameView() && zone_blocks)
                 for (int k = 0; k < zone_blocks; ++k)
                     s.in.clutter_body.push_back(
                         {.03f * float(k), .2f}); // only the low camera sees the zone
@@ -372,10 +373,10 @@ void precisionMotionTests() {
                        s.out.motion.camera_pitch_cdeg == s.tune.track_pitch_cdeg);
                 low_turn = true;
             }
-            if (!s.task.disperse_turn_.active() && low_look)
+            if (!s.task.search_phase_.disperse_turn_.active() && low_look)
                 break;
         }
-        assert(!s.task.disperse_turn_.active() && low_look);
+        assert(!s.task.search_phase_.disperse_turn_.active() && low_look);
         const float done = std::abs(s.phi - phi0);
         if (zone_blocks == 0) {
             assert(!low_turn && done < s.tune.disperse_turn_rad - .3f);
@@ -403,12 +404,12 @@ void precisionMotionTests() {
         for (int i = 0; i < 20; ++i)
             s.tick();
         s.task.enter(PushState::SCATTER, s.in.now_us, "test_single_turn_push");
-        s.task.sweep_phase_ = 5;
+        s.task.search_phase_.sweep_phase_ = 5;
         s.task.sweep_ledger_.begin(s.task.t_, s.in.now_us);
-        s.task.sweep_start_us_ = s.in.now_us;
-        s.task.sweep_yaw0_ = s.phi;
-        s.task.disperse_turn_.begin(true);
-        s.task.disperse_sign_ = 1.f;
+        s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+        s.task.search_phase_.sweep_yaw0_ = s.phi;
+        s.task.search_phase_.disperse_turn_.begin(true);
+        s.task.search_phase_.disperse_sign_ = 1.f;
         bool pushed = false;
         float phi_push = 0;
         for (int i = 0; i < 600; ++i) {
@@ -419,15 +420,15 @@ void precisionMotionTests() {
                 if (!pushed)
                     phi_push = s.phi;
                 pushed = true;
-                if (s.task.disperse_turn_.phase() == DisperseTurnPhase::Push)
+                if (s.task.search_phase_.disperse_turn_.phase() == DisperseTurnPhase::Push)
                     assert(s.out.motion.vx_mps > 0 &&
                            s.out.motion.wz_rps ==
                                0); // the last tick finishes the push and ends the sweep
             }
-            if (pushed && !s.task.disperse_turn_.active())
+            if (pushed && !s.task.search_phase_.disperse_turn_.active())
                 break;
         }
-        assert(pushed && !s.task.disperse_turn_.active());
+        assert(pushed && !s.task.search_phase_.disperse_turn_.active());
         assert(std::abs(s.phi - phi_push) < .05f); // no turning while pushing
     }
 }
@@ -1285,7 +1286,7 @@ void approachCases() {
             s.tick();
         assert(s.out.state == PushState::SCAN);
     }
-    { // Requested startup duration/speed and angular cap must reach real task output.
+    { // Deferred startup ignores legacy motion settings; search angular cap still applies.
         TaskTuning t;
         t.startup_advance_us = 15000000;
         t.startup_advance_speed = 1.f;
@@ -1309,7 +1310,7 @@ void approachCases() {
             if (out.state == PushState::SCAN)
                 break;
         }
-        assert(forward_frames == 150 && out.startup_commanded_us == 15000000);
+        assert(forward_frames == 0 && out.startup_commanded_us == 0);
         in.now_us += 100000;
         out = task.update(in);
         assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 3.f);

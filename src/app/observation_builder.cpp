@@ -399,9 +399,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             std::cout << "\n";
         }
     }
-    if (input.target_valid && input.geometry_valid &&
-        (previous.state == PushState::MID_APPROACH || previous.state == PushState::APPROACH ||
-         previous.state == PushState::PREPARE || previous.state == PushState::RUSH)) {
+    if (input.target_valid && input.geometry_valid && previous.corridor_observation_requested) {
         // Event log: only when the set of counted neighbours changes, or once a second as a
         // heartbeat.
         static std::string last_signature;
@@ -428,7 +426,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             std::cout << "\n";
         }
     }
-    if (previous.state == PushState::VERIFY_CAPTURE) {
+    if (previous.capture_observation_requested) {
         const auto fb = feedback ? feedback->latestActuatorFeedback() : ActuatorFeedback{};
         if (!observing) {
             multi_view.begin(observed_at, fb.gripper_action_id, ++observation_round);

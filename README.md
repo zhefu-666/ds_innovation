@@ -27,7 +27,24 @@ IMU + MCU反馈 ─────────────────────�
 任务与感知快照 → 遥测文件 → 网页 / Foxglove
 ~~~
 
-主要搬运流程：`SCAN → APPROACH → PREPARE → RUSH → LOWER_FRAME → VERIFY_CAPTURE → CARRY → GATE → ENTER → RAISE_RELEASE → BACK_OUT → VERIFY_DELIVERY`。捕获、交付、搜索、清扫、重试和停止条件以当前阶段实现及测试为准。
+业务主流程为 `Startup（冲出）→ Search（搜索）→ Capture（捕获）→ Transport（搬运）→ Search`。
+
+| 业务阶段 | 阶段内动作 | 实现 |
+| --- | --- | --- |
+| Startup | 暂不实现冲出；保持底盘零速度和方框原命令，下一次更新转入搜索 | `src/task/startup_phase.cpp` |
+| Search | 扫描、候选重找、接近、准备、清扫；交付后的离区转向也归搜索 | `src/task/search_phase.cpp`，`search_stage.cpp`，`sweep_stage.cpp` |
+| Capture | 前冲、落框、捕获核验 | `src/task/capture_phase.cpp` |
+| Transport | 搬运寻区、门口对齐、入区、抬框释放、后退、交付核验 | `src/task/transport_phase.cpp` |
+
+`include/rescue/task/task_phase.hpp` 定义四个 `TaskPhase`、阶段内动作及运行状态；`src/task/push_task.cpp` 的 `PushTask::update()` 负责公共输入处理、运行许可和阶段调度。阶段通过 `PhaseOutcome` 请求交接，由主调度统一应用。`SearchPhaseData`、`CapturePhaseData`、`TransportPhaseData` 分别保存动作进度和阶段数据，`TripContext` 保存跨阶段目标与本趟货物；`TaskTick` 只存本次更新的输入、权限与输出。
+
+暂停/等待/故障由独立 `RunStatus` 表示，不增加业务阶段。失败恢复保留所属阶段并运行 `src/task/recovery_phase.cpp`，完成后回到搜索；暂停恢复仍执行原有重新观察/安全退回规则。捕获结果区分 `Verified` 与 `Assumed`，交付结果分别记录应交数量、记账数量、视觉确认，视觉通过不自动等于计分成功。清扫预算、限时、黑名单、帧事务及核验策略沿用已有实现与测试。
+
+当前 Startup 是有意跳过的占位实现；旧 `startup_advance_*` 配置暂不驱动运动，后续冲出动作在 `startup_phase.cpp` 中实现。正常完成一趟或暂停恢复不会重新执行 Startup，显式 reset 才回到启动等待。
+
+遥测提供 `decision.phase`、`decision.action`、`state.run_status`、恢复标志和捕获/交付结果。感知、导航与运动就绪层改读明确的请求字段。`PushState` 暂保留为兼容动作编号，用于既有硬件辅助逻辑、日志及离线回放；主流程已按四阶段调度，但本轮没有删除全部旧动作兼容代码。
+
+回归入口 `rescue_task_phase_tests` 验证启动占位、搜索到捕获的行程/货物交接、暂停保货、恢复归属和故障停止；捕获/交付集成测试覆盖真实证据与假设证据、全部/部分/未确认交付。冻结历史基线保留，`runtime_four_phase_20261026.json` 仅在原协议补充基础上声明 Startup 占位造成的启动输出差异。
 
 | 位置 | 职责 |
 | --- | --- |

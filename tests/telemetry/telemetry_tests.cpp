@@ -94,7 +94,10 @@ int main() {
         assert(data["config"]["effective"].empty());
         assert(static_cast<int>(data["config"]["requested_width"]) == config.frame_width);
         assert(static_cast<std::string>(data["config"]["model"]) == config.model_path);
-        assert(static_cast<std::string>(data["decision"]["phase"]) == "WAIT_START");
+        assert(static_cast<std::string>(data["decision"]["phase"]) == "STARTUP");
+        assert(static_cast<std::string>(data["decision"]["action"]) == "WAIT_START");
+        assert(static_cast<std::string>(data["state"]["phase"]) == "STARTUP");
+        assert(static_cast<std::string>(data["state"]["run_status"]) == "WAITING");
         assert(static_cast<std::string>(data["decision"]["preflight_reason"]) ==
                decision.preflight_reason);
         assert(static_cast<int>(data["decision"]["target_id"]) == 42);
@@ -167,7 +170,9 @@ int main() {
         assert(std::abs(expected.at("task").at("turn_wz").get<double>() - .55) < 1e-6);
         assert(std::abs(expected.at("request").at("turn_wz_rps").get<double>() - .3) < 1e-6);
         assert(document.at("motion").at("hardware_output_enabled") == 0);
-        assert(document.at("decision").at("phase") == "WAIT_START");
+        assert(document.at("decision").at("phase") == "STARTUP");
+        assert(document.at("decision").at("action") == "WAIT_START");
+        assert(document.at("state").at("run_status") == "WAITING");
     }
     assert(access(config.telemetry_file.c_str(), F_OK) != 0);
     unlink((config.telemetry_file + ".lock").c_str());

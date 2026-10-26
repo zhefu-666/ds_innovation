@@ -19,31 +19,31 @@ void SearchStage::resetConfirmSince() {
     confirm_since_us_ = 0;
 }
 
-void SearchStage::update(PushState state,
+void SearchStage::update(SearchAction state,
                          const TaskTuning& t,
                          const PushObservation& in,
                          const SearchContext& c,
                          const SearchServices& s) {
     switch (state) {
-        case PushState::SCAN:
+        case SearchAction::Scan:
             scan(t, in, c, s);
             break;
-        case PushState::LOST_SEARCH:
+        case SearchAction::LostSearch:
             lostSearch(t, in, c, s);
             break;
-        case PushState::MID_REACQUIRE:
+        case SearchAction::MidReacquire:
             reacquire(t, in, c, s, true);
             break;
-        case PushState::NEAR_REACQUIRE:
+        case SearchAction::NearReacquire:
             reacquire(t, in, c, s, false);
             break;
-        case PushState::SELECT_CARGO:
+        case SearchAction::SelectCargo:
             selectCargo(t, in, c, s);
             break;
-        case PushState::MID_APPROACH:
+        case SearchAction::MidApproach:
             midApproach(t, in, c, s);
             break;
-        case PushState::APPROACH:
+        case SearchAction::Approach:
             approach(t, in, c, s);
             break;
         default:
@@ -55,18 +55,18 @@ void SearchStage::scan(const TaskTuning& t,
                        const PushObservation& in,
                        const SearchContext& c,
                        const SearchServices& s) {
-    int& target_id = *c.target_id;
-    std::string& label = *c.label;
-    int& confirmations = *c.confirmations;
-    bool& cue_mode = *c.cue_mode;
-    int& search_cue_id = *c.search_cue_id;
-    int& capture_target_id = *c.capture_target_id;
-    float& scan_turn_acc = *c.scan_turn_acc;
-    uint64_t& scatter_idle_since_us = *c.scatter_idle_since_us;
-    bool& burst_drive_used = *c.burst_drive_used;
-    bool& burst_swing_armed = *c.burst_swing_armed;
-    float& approach_forward = *c.approach_forward;
-    std::string& reason = *c.reason;
+    int& target_id = c.trip_data.target_id_;
+    std::string& label = c.trip_data.label_;
+    int& confirmations = c.progress.confirmations;
+    bool& cue_mode = c.search.cue_mode_;
+    int& search_cue_id = c.search.search_cue_id_;
+    int& capture_target_id = c.trip_data.capture_target_id_;
+    float& scan_turn_acc = c.search.scan_turn_acc_;
+    uint64_t& scatter_idle_since_us = c.search.scatter_idle_since_us_;
+    bool& burst_drive_used = c.search.burst_drive_used_;
+    bool& burst_swing_armed = c.search.burst_swing_armed_;
+    float& approach_forward = c.trip_data.approach_forward_;
+    std::string& reason = c.reason;
     const uint64_t now = c.now_us;
 
     s.command_frame(0, now);
@@ -177,7 +177,8 @@ void SearchStage::scan(const TaskTuning& t,
         target_id = -1;
         cue_mode = false;
         reason = c.scan_ok ? "searching_target" : "scan_path_blocked";
-        if (c.scan_ok && in.target_is_search_cue && *c.clear_attempts >= t.max_clear_attempts)
+        if (c.scan_ok && in.target_is_search_cue &&
+            c.search.clear_attempts_ >= t.max_clear_attempts)
             reason = "cue_attempt_limit";
         if (weak_hold)
             reason = "weak_target_scatter_wait";
@@ -226,7 +227,7 @@ void SearchStage::scan(const TaskTuning& t,
         if (c.scatter_ok) {
             if (!scatter_idle_since_us)
                 scatter_idle_since_us = now;
-            const bool looked = weak_hold || *c.scatter_count > 0 ||
+            const bool looked = weak_hold || c.search.scatter_count_ > 0 ||
                                 scan_turn_acc >= t.blind_scatter_first_turn_rad;
             const bool fresh =
                 weak_hold || (looked && in.clutter_ts_us && now >= in.clutter_ts_us &&
@@ -242,18 +243,18 @@ void SearchStage::scan(const TaskTuning& t,
                 const int g =
                     s.eval_group(pts, need_n, weak_hold ? 1 : t.blind_scatter_far_min, -1.f);
                 if (g) {
-                    if (++*c.scatter_seen < t.sweep_confirm) {
+                    if (++c.search.scatter_seen_ < t.sweep_confirm) {
                         reason = "blind_scatter_confirm";
                         return;
                     }
-                    *c.scatter_seen = 0;
+                    c.search.scatter_seen_ = 0;
                     // far: too far for the rush budget, drive closer first, then the normal
                     // trigger fires from the short range
                     s.begin_scatter(
                         g == 2, false, g == 2 ? "blind_scatter_far_start" : "blind_scatter_start");
                     return;
                 }
-                *c.scatter_seen = 0;
+                c.search.scatter_seen_ = 0;
             }
         }
         if (t.scan_sighting_hold && !cue && now >= vis_cool_until_us_) {
@@ -281,9 +282,9 @@ void SearchStage::scan(const TaskTuning& t,
         return;
     }
     scatter_idle_since_us = 0;
-    *c.scatter_seen = 0;
+    c.search.scatter_seen_ = 0;
     if (confirmations + 1 >= t.confirm_frames)
-        *c.scatter_approach_n = 0;
+        c.search.scatter_approach_n_ = 0;
     if (target_id != in.target_id || label != in.label || cue_mode != cue) {
         target_id = in.target_id;
         label = in.label;
@@ -303,7 +304,7 @@ void SearchStage::scan(const TaskTuning& t,
         if (t.demo_search_only) {
             s.fail_stop("demo_target_found");
         } else
-            s.enter(cue ? PushState::CUE_APPROACH : PushState::APPROACH,
+            s.enter(cue ? SearchAction::CueApproach : SearchAction::Approach,
                     now,
                     cue ? "search_cue_locked" : "target_locked");
     }
@@ -313,20 +314,20 @@ void SearchStage::lostSearch(const TaskTuning& t,
                              const PushObservation& in,
                              const SearchContext& c,
                              const SearchServices& s) {
-    int& target_id = *c.target_id;
-    std::string& label = *c.label;
-    int& confirmations = *c.confirmations;
-    bool& cue_mode = *c.cue_mode;
-    int& search_cue_id = *c.search_cue_id;
-    int& capture_target_id = *c.capture_target_id;
-    int& step = *c.step;
-    uint64_t& phase_us = *c.phase_us;
-    float& turned = *c.turned;
-    bool& heading_seen = *c.heading_seen;
-    float& last_heading = *c.last_heading;
-    int& lost_round = *c.lost_round;
-    float& approach_forward = *c.approach_forward;
-    std::string& reason = *c.reason;
+    int& target_id = c.trip_data.target_id_;
+    std::string& label = c.trip_data.label_;
+    int& confirmations = c.progress.confirmations;
+    bool& cue_mode = c.search.cue_mode_;
+    int& search_cue_id = c.search.search_cue_id_;
+    int& capture_target_id = c.trip_data.capture_target_id_;
+    int& step = c.progress.step;
+    uint64_t& phase_us = c.progress.started_us;
+    float& turned = c.progress.turned;
+    bool& heading_seen = c.progress.heading_seen;
+    float& last_heading = c.progress.last_heading;
+    int& lost_round = c.search.lost_round_;
+    float& approach_forward = c.trip_data.approach_forward_;
+    std::string& reason = c.reason;
     const uint64_t now = c.now_us;
 
     approach_forward = 0;
@@ -348,7 +349,7 @@ void SearchStage::lostSearch(const TaskTuning& t,
         // again.
         if (!lost_round && c.mid_pitch) {
             lost_round = 1;
-            s.enter(PushState::LOST_SEARCH, now, "lost_search_mid_pitch");
+            s.enter(SearchAction::LostSearch, now, "lost_search_mid_pitch");
             return;
         }
         if (t.lost_search_rescan && c.frame_raised == 0 && c.trip_empty) {
@@ -357,7 +358,7 @@ void SearchStage::lostSearch(const TaskTuning& t,
             lost_round = 0;
             target_id = -1;
             confirmations = 0;
-            s.enter(PushState::SCAN, now, "lost_search_rescan");
+            s.enter(SearchAction::Scan, now, "lost_search_rescan");
             return;
         }
         s.fail_stop("lost_search_exhausted");
@@ -379,7 +380,7 @@ void SearchStage::lostSearch(const TaskTuning& t,
                 // FAR.
                 target_id = capture_target_id = -1;
                 cue_mode = false;
-                s.enter(PushState::MID_REACQUIRE, now, "lost_target_reacquired_mid");
+                s.enter(SearchAction::MidReacquire, now, "lost_target_reacquired_mid");
                 return;
             }
             if (!t.enable_search_cues) {
@@ -387,13 +388,13 @@ void SearchStage::lostSearch(const TaskTuning& t,
                 capture_target_id = target_id;
                 search_cue_id = -1;
                 cue_mode = false;
-                s.enter(PushState::APPROACH, now, "lost_target_reacquired");
+                s.enter(SearchAction::Approach, now, "lost_target_reacquired");
                 return;
             }
             search_cue_id = target_id;
             capture_target_id = -1;
             cue_mode = true;
-            s.enter(PushState::CUE_APPROACH, now, "lost_target_reacquired");
+            s.enter(SearchAction::CueApproach, now, "lost_target_reacquired");
         }
         return; // stop while confirming a newly seen cargo candidate
     }
@@ -404,16 +405,16 @@ void SearchStage::lostSearch(const TaskTuning& t,
         const int g =
             s.eval_group(in.clutter_body, t.blind_scatter_min, t.blind_scatter_far_min, -1.f);
         if (g) {
-            if (++*c.scatter_seen < t.sweep_confirm) {
+            if (++c.search.scatter_seen_ < t.sweep_confirm) {
                 reason = "lost_group_confirm";
                 return;
             }
-            *c.scatter_seen = 0;
+            c.search.scatter_seen_ = 0;
             s.begin_scatter(g == 2, true, g == 2 ? "lost_group_far" : "lost_group_sweep");
             return;
         }
     }
-    *c.scatter_seen = 0;
+    c.search.scatter_seen_ = 0;
     if (s.unstick())
         return;
     reason = c.scan_ok ? (lost_round ? "rotating_for_lost_target_mid" : "rotating_for_lost_target")
@@ -426,14 +427,14 @@ void SearchStage::reacquire(const TaskTuning& t,
                             const SearchContext& c,
                             const SearchServices& s,
                             bool mid) {
-    int& target_id = *c.target_id;
-    std::string& label = *c.label;
-    int& confirmations = *c.confirmations;
-    int& capture_target_id = *c.capture_target_id;
-    int& step = *c.step;
-    uint64_t& phase_us = *c.phase_us;
-    int& near_failures = *c.near_failures;
-    std::string& reason = *c.reason;
+    int& target_id = c.trip_data.target_id_;
+    std::string& label = c.trip_data.label_;
+    int& confirmations = c.progress.confirmations;
+    int& capture_target_id = c.trip_data.capture_target_id_;
+    int& step = c.progress.step;
+    uint64_t& phase_us = c.progress.started_us;
+    int& near_failures = c.search.near_failures_;
+    std::string& reason = c.reason;
     const uint64_t now = c.now_us;
 
     // Preserve an already open jaw across a camera change; never close blindly.
@@ -465,7 +466,7 @@ void SearchStage::reacquire(const TaskTuning& t,
         reason = mid ? "mid_no_valid_cargo" : "near_no_valid_cargo";
         return;
     }
-    if (c.frame_raised == 1 && (!in.corridor_complete || in.corridor != *c.pending ||
+    if (c.frame_raised == 1 && (!in.corridor_complete || in.corridor != c.trip_data.pending_ ||
                                 checkTrip(in.corridor, c.first_ordinary) != RuleVerdict::OK)) {
         confirmations = 0;
         reason = "near_open_jaw_batch_unconfirmed";
@@ -483,7 +484,7 @@ void SearchStage::reacquire(const TaskTuning& t,
     }
     if (++confirmations >= t.confirm_frames) {
         target_id = capture_target_id;
-        s.enter(mid ? PushState::MID_APPROACH : PushState::APPROACH,
+        s.enter(mid ? SearchAction::MidApproach : SearchAction::Approach,
                 now,
                 mid ? "mid_cargo_reacquired" : "near_cargo_reacquired");
     }
@@ -493,11 +494,11 @@ void SearchStage::selectCargo(const TaskTuning& t,
                               const PushObservation& in,
                               const SearchContext& c,
                               const SearchServices& s) {
-    int& target_id = *c.target_id;
-    std::string& label = *c.label;
-    int& confirmations = *c.confirmations;
-    int& capture_target_id = *c.capture_target_id;
-    std::string& reason = *c.reason;
+    int& target_id = c.trip_data.target_id_;
+    std::string& label = c.trip_data.label_;
+    int& confirmations = c.progress.confirmations;
+    int& capture_target_id = c.trip_data.capture_target_id_;
+    std::string& reason = c.reason;
     const uint64_t now = c.now_us;
 
     s.command_frame(0, now);
@@ -518,7 +519,7 @@ void SearchStage::selectCargo(const TaskTuning& t,
     }
     if (++confirmations >= t.confirm_frames) {
         target_id = capture_target_id;
-        s.enter(PushState::APPROACH, now, "cargo_locked");
+        s.enter(SearchAction::Approach, now, "cargo_locked");
     }
 }
 
@@ -537,34 +538,34 @@ void SearchStage::midApproach(const TaskTuning& t,
     const float target_forward_m = c.target_forward_m;
     const int frame_raised_ = c.frame_raised;
     const bool first_ = c.first_ordinary;
-    auto& pending_ = *c.pending;
-    auto& misses_ = *c.misses;
-    auto& travel_ = *c.travel;
-    auto& target_id_ = *c.target_id;
-    auto& label_ = *c.label;
-    auto& confirmations_ = *c.confirmations;
-    auto& capture_target_id_ = *c.capture_target_id;
-    auto& near_failures_ = *c.near_failures;
-    auto& scan_turn_acc_ = *c.scan_turn_acc;
-    auto& clear_attempts_ = *c.clear_attempts;
-    auto& reason_ = *c.reason;
-    auto& sweep_phase_ = *c.sweep_phase;
-    auto& mid_clear_n_ = *c.mid_clear_n;
-    auto& sweep_travel0_ = *c.sweep_travel0;
-    auto& last_range_ = *c.last_range;
-    auto& disperse_sign_ = *c.disperse_sign;
-    auto& disperse_rush_m_ = *c.disperse_rush_m;
-    auto& scan_mid_limit_ = *c.scan_mid_limit;
-    auto& sweep_start_us_ = *c.sweep_start_us;
-    auto& sweep_t0_us_ = *c.sweep_t0_us;
-    auto& disperse_cool_until_us_ = *c.disperse_cool_until_us;
-    auto& sweep_non_supply_active_ = *c.sweep_non_supply_active;
-    auto& post_disperse_mid_ = *c.post_disperse_mid;
-    auto& disperse_small_ = *c.disperse_small;
-    auto& verdict_ = *c.verdict;
-    auto& seen_ = *c.seen;
-    auto& sweep_ledger_ = *c.sweep_ledger;
-    auto& disperse_swing_ = *c.disperse_swing;
+    auto& pending_ = c.trip_data.pending_;
+    auto& misses_ = c.progress.misses;
+    auto& travel_ = c.progress.travel;
+    auto& target_id_ = c.trip_data.target_id_;
+    auto& label_ = c.trip_data.label_;
+    auto& confirmations_ = c.progress.confirmations;
+    auto& capture_target_id_ = c.trip_data.capture_target_id_;
+    auto& near_failures_ = c.search.near_failures_;
+    auto& scan_turn_acc_ = c.search.scan_turn_acc_;
+    auto& clear_attempts_ = c.search.clear_attempts_;
+    auto& reason_ = c.reason;
+    auto& sweep_phase_ = c.search.sweep_phase_;
+    auto& mid_clear_n_ = c.search.mid_clear_n_;
+    auto& sweep_travel0_ = c.search.sweep_travel0_;
+    auto& last_range_ = c.progress.last_range;
+    auto& disperse_sign_ = c.search.disperse_sign_;
+    auto& disperse_rush_m_ = c.search.disperse_rush_m_;
+    auto& scan_mid_limit_ = c.search.scan_mid_limit_;
+    auto& sweep_start_us_ = c.search.sweep_start_us_;
+    auto& sweep_t0_us_ = c.search.sweep_t0_us_;
+    auto& disperse_cool_until_us_ = c.search.disperse_cool_until_us_;
+    auto& sweep_non_supply_active_ = c.search.sweep_non_supply_active_;
+    auto& post_disperse_mid_ = c.search.post_disperse_mid_;
+    auto& disperse_small_ = c.search.disperse_small_;
+    auto& verdict_ = c.trip_data.verdict_;
+    auto& seen_ = c.trip_data.seen_;
+    auto& sweep_ledger_ = c.ledger;
+    auto& disperse_swing_ = c.search.disperse_swing_;
     const auto candidate = [&](const PushObservation& o, uint64_t at) {
         return s.candidate(o, at);
     };
@@ -574,7 +575,7 @@ void SearchStage::midApproach(const TaskTuning& t,
     const auto drive = [&](float vx, float wz) {
         s.drive(vx, wz);
     };
-    const auto enter = [&](PushState st, uint64_t at, const char* why) {
+    const auto enter = [&](SearchAction st, uint64_t at, const char* why) {
         s.enter(st, at, why);
     };
     const auto failStop = [&](const char* why) {
@@ -620,7 +621,7 @@ void SearchStage::midApproach(const TaskTuning& t,
                 sweep_phase_ = 0;
                 disperse_small_ = false;
                 clearTrip();
-                enter(PushState::MID_REACQUIRE, now, "sweep_observation_lost");
+                enter(SearchAction::MidReacquire, now, "sweep_observation_lost");
                 break;
             }
             if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
@@ -642,7 +643,7 @@ void SearchStage::midApproach(const TaskTuning& t,
                     sweep_ledger_.setGapUntil(now + t_.sweep_gap_us);
                     if (!sweepOver && swung && beginPileFromSweep("pile_chain_non_supply"))
                         break;
-                    enter(PushState::SCAN, now, "non_supply_swept");
+                    enter(SearchAction::Scan, now, "non_supply_swept");
                     break;
                 }
                 sweep_phase_ = 0;
@@ -651,7 +652,7 @@ void SearchStage::midApproach(const TaskTuning& t,
                 s.clear_rejected_bearings();
                 post_disperse_mid_ = t_.post_clear_mid_view;
                 target_id_ = capture_target_id_ = -1;
-                enter(PushState::MID_REACQUIRE, now, "mid_neighbour_clear_done");
+                enter(SearchAction::MidReacquire, now, "mid_neighbour_clear_done");
             }
             break;
         }
@@ -659,7 +660,7 @@ void SearchStage::midApproach(const TaskTuning& t,
             reason_ = trackingReason();
             if (frame_raised_ == 1 && last_range_ <= t_.open_jaw_handoff_m) {
                 target_id_ = capture_target_id_ = -1;
-                enter(PushState::NEAR_REACQUIRE, now, "open_jaw_lost_at_mouth_near_handoff");
+                enter(SearchAction::NearReacquire, now, "open_jaw_lost_at_mouth_near_handoff");
                 break;
             }
             if (lostTarget()) {
@@ -673,7 +674,7 @@ void SearchStage::midApproach(const TaskTuning& t,
                     failStop("mid_tracking_failed_stop");
                 } else {
                     target_id_ = capture_target_id_ = -1;
-                    enter(PushState::MID_REACQUIRE, now, "mid_target_lost_reacquire");
+                    enter(SearchAction::MidReacquire, now, "mid_target_lost_reacquire");
                 }
             }
             break;
@@ -682,7 +683,7 @@ void SearchStage::midApproach(const TaskTuning& t,
         last_range_ = in.distance_m;
         if (!forward_ok && frame_raised_ == 0 && t_.enable_short_push && clear_attempts_ < 2 &&
             in.clear_push_safe && std::abs(in.heading_error) <= t_.rush_heading_rad) {
-            enter(PushState::CUE_PREPARE, now, "closed_push_prepare");
+            enter(SearchAction::CuePrepare, now, "closed_push_prepare");
             break;
         }
         if (!forward_ok) {
@@ -692,7 +693,7 @@ void SearchStage::midApproach(const TaskTuning& t,
             }
             blacklist(now);
             target_id_ = capture_target_id_ = -1;
-            enter(PushState::MID_REACQUIRE, now, "blocked_cargo_reselect");
+            enter(SearchAction::MidReacquire, now, "blocked_cargo_reselect");
             break;
         }
         if (elapsed > t_.approach_budget_us) {
@@ -734,7 +735,7 @@ void SearchStage::midApproach(const TaskTuning& t,
                     in.corridor_complete && in.corridor.unknown == 0 &&
                     (in.corridor.dangerous > 0 || in.corridor.injured > 0 ||
                      in.corridor.core > 0)) {
-                    enter(PushState::CUE_PREPARE, now, "closed_push_prepare");
+                    enter(SearchAction::CuePrepare, now, "closed_push_prepare");
                     break;
                 }
                 const bool neighbour_verdict =
@@ -779,7 +780,7 @@ void SearchStage::midApproach(const TaskTuning& t,
                 if (++near_failures_ >= 2) {
                     failStop("mid_open_corridor_rejected");
                 } else
-                    enter(PushState::MID_REACQUIRE, now, "mid_open_corridor_reselect");
+                    enter(SearchAction::MidReacquire, now, "mid_open_corridor_reselect");
                 break;
             }
             if (confirmations_ == 0 || seen_ != in.corridor) {
@@ -829,7 +830,7 @@ void SearchStage::midApproach(const TaskTuning& t,
             confirmations_ = 0;
             if (in.distance_m <= t_.intermediate_to_near_m) {
                 target_id_ = capture_target_id_ = -1;
-                enter(PushState::NEAR_REACQUIRE, now, "near_reacquire_pitch_wait");
+                enter(SearchAction::NearReacquire, now, "near_reacquire_pitch_wait");
                 break;
             }
         }
@@ -856,50 +857,50 @@ void SearchStage::approach(const TaskTuning& t,
     const int frame_raised_ = c.frame_raised;
     const bool first_ = c.first_ordinary;
     const int16_t pitch_cmd_ = c.pitch_cmd;
-    float& motion_wz = *c.motion_wz;
-    auto& trip_ = *c.trip;
-    auto& misses_ = *c.misses;
-    auto& track_close_ = *c.track_close;
-    auto& travel_ = *c.travel;
-    auto& target_id_ = *c.target_id;
-    auto& label_ = *c.label;
-    auto& cue_mode_ = *c.cue_mode;
-    auto& capture_target_id_ = *c.capture_target_id;
-    auto& phase_us_ = *c.phase_us;
-    auto& near_failures_ = *c.near_failures;
-    auto& scan_turn_acc_ = *c.scan_turn_acc;
-    auto& reason_ = *c.reason;
-    auto& sweep_phase_ = *c.sweep_phase;
-    auto& sweep_attempts_ = *c.sweep_attempts;
-    auto& sweep_seen_ = *c.sweep_seen;
-    auto& pile_runs_ = *c.pile_runs;
-    auto& pile_seen_ = *c.pile_seen;
-    auto& approach_last_id_ = *c.approach_last_id;
-    auto& rush_pulse_phase_ = *c.rush_pulse_phase;
-    auto& rush_pulse_count_ = *c.rush_pulse_count;
-    auto& precheck_seen_ = *c.precheck_seen;
-    auto& precheck_rejects_ = *c.precheck_rejects;
-    auto& sweep_travel0_ = *c.sweep_travel0;
-    auto& sweep_yaw0_ = *c.sweep_yaw0;
-    auto& approach_last_heading_ = *c.approach_last_heading;
-    auto& approach_last_distance_ = *c.approach_last_distance;
-    auto& approach_last_world_yaw_ = *c.approach_last_world_yaw;
-    auto& disperse_sign_ = *c.disperse_sign;
-    auto& disperse_rush_m_ = *c.disperse_rush_m;
-    auto& scan_mid_limit_ = *c.scan_mid_limit;
-    auto& sweep_start_us_ = *c.sweep_start_us;
-    auto& sweep_t0_us_ = *c.sweep_t0_us;
-    auto& pile_cool_until_us_ = *c.pile_cool_until_us;
-    auto& disperse_cool_until_us_ = *c.disperse_cool_until_us;
-    auto& sweep_non_supply_active_ = *c.sweep_non_supply_active;
-    auto& post_disperse_mid_ = *c.post_disperse_mid;
-    auto& approach_rebind_ = *c.approach_rebind;
-    auto& approach_last_world_valid_ = *c.approach_last_world_valid;
-    auto& approach_pitch_ = *c.approach_pitch;
-    auto& verdict_ = *c.verdict;
-    auto& sweep_ledger_ = *c.sweep_ledger;
-    auto& disperse_turn_ = *c.disperse_turn;
-    auto& disperse_swing_ = *c.disperse_swing;
+    float& motion_wz = c.motion.wz_rps;
+    auto& trip_ = c.trip_data.trip_;
+    auto& misses_ = c.progress.misses;
+    auto& track_close_ = c.progress.track_close;
+    auto& travel_ = c.progress.travel;
+    auto& target_id_ = c.trip_data.target_id_;
+    auto& label_ = c.trip_data.label_;
+    auto& cue_mode_ = c.search.cue_mode_;
+    auto& capture_target_id_ = c.trip_data.capture_target_id_;
+    auto& phase_us_ = c.progress.started_us;
+    auto& near_failures_ = c.search.near_failures_;
+    auto& scan_turn_acc_ = c.search.scan_turn_acc_;
+    auto& reason_ = c.reason;
+    auto& sweep_phase_ = c.search.sweep_phase_;
+    auto& sweep_attempts_ = c.search.sweep_attempts_;
+    auto& sweep_seen_ = c.search.sweep_seen_;
+    auto& pile_runs_ = c.search.pile_runs_;
+    auto& pile_seen_ = c.search.pile_seen_;
+    auto& approach_last_id_ = c.search.approach_last_id_;
+    auto& rush_pulse_phase_ = c.search.rush_pulse_phase_;
+    auto& rush_pulse_count_ = c.search.rush_pulse_count_;
+    auto& precheck_seen_ = c.search.precheck_seen_;
+    auto& precheck_rejects_ = c.search.precheck_rejects_;
+    auto& sweep_travel0_ = c.search.sweep_travel0_;
+    auto& sweep_yaw0_ = c.search.sweep_yaw0_;
+    auto& approach_last_heading_ = c.search.approach_last_heading_;
+    auto& approach_last_distance_ = c.search.approach_last_distance_;
+    auto& approach_last_world_yaw_ = c.search.approach_last_world_yaw_;
+    auto& disperse_sign_ = c.search.disperse_sign_;
+    auto& disperse_rush_m_ = c.search.disperse_rush_m_;
+    auto& scan_mid_limit_ = c.search.scan_mid_limit_;
+    auto& sweep_start_us_ = c.search.sweep_start_us_;
+    auto& sweep_t0_us_ = c.search.sweep_t0_us_;
+    auto& pile_cool_until_us_ = c.search.pile_cool_until_us_;
+    auto& disperse_cool_until_us_ = c.search.disperse_cool_until_us_;
+    auto& sweep_non_supply_active_ = c.search.sweep_non_supply_active_;
+    auto& post_disperse_mid_ = c.search.post_disperse_mid_;
+    auto& approach_rebind_ = c.search.approach_rebind_;
+    auto& approach_last_world_valid_ = c.search.approach_last_world_valid_;
+    auto& approach_pitch_ = c.search.approach_pitch_;
+    auto& verdict_ = c.trip_data.verdict_;
+    auto& sweep_ledger_ = c.ledger;
+    auto& disperse_turn_ = c.search.disperse_turn_;
+    auto& disperse_swing_ = c.search.disperse_swing_;
     const auto candidate = [&](const PushObservation& o, uint64_t at) {
         return s.candidate(o, at);
     };
@@ -909,7 +910,7 @@ void SearchStage::approach(const TaskTuning& t,
     const auto drive = [&](float vx, float wz) {
         s.drive(vx, wz);
     };
-    const auto enter = [&](PushState st, uint64_t at, const char* why) {
+    const auto enter = [&](SearchAction st, uint64_t at, const char* why) {
         s.enter(st, at, why);
     };
     const auto failStop = [&](const char* why) {
@@ -1020,7 +1021,7 @@ void SearchStage::approach(const TaskTuning& t,
                         sweep_ledger_.setGapUntil(now + t_.sweep_gap_us);
                         if (!cut && swung && beginPileFromSweep("pile_chain_non_supply"))
                             break;
-                        enter(PushState::SCAN, now, "non_supply_swept");
+                        enter(SearchAction::Scan, now, "non_supply_swept");
                         break;
                     }
                     phase_us_ += now - sweep_t0_us_;
@@ -1165,7 +1166,7 @@ void SearchStage::approach(const TaskTuning& t,
                     } else {
                         target_id_ = capture_target_id_ = -1;
                         cue_mode_ = false;
-                        enter(PushState::NEAR_REACQUIRE, now, "near_target_lost_reacquire");
+                        enter(SearchAction::NearReacquire, now, "near_target_lost_reacquire");
                     }
                 } else {
                     scanAfterClear("target_lost");
@@ -1339,7 +1340,7 @@ void SearchStage::approach(const TaskTuning& t,
                         blacklist(now);
                         clearTrip();
                         const std::string why = std::string("corridor_precheck_") + verdictName(v);
-                        enter(PushState::SCAN, now, why.c_str());
+                        enter(SearchAction::Scan, now, why.c_str());
                         break;
                     }
                     precheck_seen_ = 0;
@@ -1357,7 +1358,7 @@ void SearchStage::approach(const TaskTuning& t,
                     if (now - prep_ref_us_ >= t_.approach_stall_us &&
                         in.distance_m <= t_.approach_stall_accept_m) {
                         prep_last_us_ = 0;
-                        enter(PushState::PREPARE, now, "approach_range_stalled");
+                        enter(SearchAction::Prepare, now, "approach_range_stalled");
                         commandFrame(1, now);
                         break;
                     }
@@ -1366,7 +1367,7 @@ void SearchStage::approach(const TaskTuning& t,
                     break;
                 }
                 prep_last_us_ = 0;
-                enter(PushState::PREPARE, now, "rush_aligned");
+                enter(SearchAction::Prepare, now, "rush_aligned");
                 commandFrame(1, now); // PREPARE output is stationary and opens immediately.
             } else if (t_.rush_pulse_turn && rush_pulse_count_ < t_.rush_pulse_max &&
                        in.heading_valid && std::isfinite(in.heading_rad) &&

@@ -83,7 +83,7 @@ struct Rig {
     void seed(PushState state) {
         task.enter(state, input.now_us, "seed_sweep");
         if (state == PushState::APPROACH)
-            task.approach_pitch_ = task.t_.track_pitch_cdeg;
+            task.search_phase_.approach_pitch_ = task.t_.track_pitch_cdeg;
         task.last_us_ = input.now_us;
         task.last_vx_ = task.last_wz_ = 0;
         const auto pitch = task.desiredPitch();
@@ -129,8 +129,8 @@ struct Rig {
 
     void target(const char* label = "ordinary_supply", float distance = .25f) {
         input.target_valid = input.geometry_valid = input.target_region_valid = true;
-        input.target_id = task.target_id_ = task.capture_target_id_ = 7;
-        input.label = task.label_ = label;
+        input.target_id = task.trip_context_.target_id_ = task.trip_context_.capture_target_id_ = 7;
+        input.label = task.trip_context_.label_ = label;
         input.distance_m = distance;
         input.heading_error = 0;
     }
@@ -159,7 +159,8 @@ struct Rig {
         farStart();
         tick();
         assert(output.state == PushState::SCATTER && output.reason == "blind_scatter_approach");
-        task.travel_ = task.sweep_travel0_ + task.scatter_approach_m_ * task.motionRatio();
+        task.actionProgress().travel = task.search_phase_.sweep_travel0_ +
+                                       task.search_phase_.scatter_approach_m_ * task.motionRatio();
         task.last_vx_ = 0;
         tick();
         assert(output.state == PushState::SCAN && output.reason == "blind_scatter_approached");
@@ -169,22 +170,25 @@ struct Rig {
     }
 
     void toSwing() {
-        if (task.sweep_phase_ == 0)
+        if (task.search_phase_.sweep_phase_ == 0)
             tick();
-        assert(task.sweep_phase_ == 4);
-        task.travel_ = task.sweep_travel0_ + task.disperse_rush_m_ * task.motionRatio() + .001f;
+        assert(task.search_phase_.sweep_phase_ == 4);
+        task.actionProgress().travel = task.search_phase_.sweep_travel0_ +
+                                       task.search_phase_.disperse_rush_m_ * task.motionRatio() +
+                                       .001f;
         task.last_vx_ = 0;
         tick();
-        assert(task.sweep_phase_ == 5 && task.sweepChainOpen());
+        assert(task.search_phase_.sweep_phase_ == 5 && task.sweepChainOpen());
         assert(output.motion.wz_rps != 0);
     }
 
     void finishSwing() {
-        assert(task.sweep_phase_ == 5);
-        const auto origin = task.sweep_yaw0_;
-        const auto magnitude =
-            task.disperse_small_ ? task.t_.mid_neighbour_clear_turn_rad : task.t_.disperse_turn_rad;
-        input.heading_rad = origin + task.disperse_sign_ * magnitude;
+        assert(task.search_phase_.sweep_phase_ == 5);
+        const auto origin = task.search_phase_.sweep_yaw0_;
+        const auto magnitude = task.search_phase_.disperse_small_
+                                   ? task.t_.mid_neighbour_clear_turn_rad
+                                   : task.t_.disperse_turn_rad;
+        input.heading_rad = origin + task.search_phase_.disperse_sign_ * magnitude;
         tick();
         input.heading_rad = origin;
         tick();
@@ -220,13 +224,14 @@ struct Rig {
         std::cout << "case=" << test << " state=" << PushTask::name(output.state)
                   << " reason=" << output.reason << " fault=" << task.fault_
                   << " done=" << task.sweepDone() << " spent=" << task.sweepSpentUs(input.now_us)
-                  << " open=" << task.sweepChainOpen() << " phase=" << task.sweep_phase_
-                  << " phase_us=" << task.phase_us_ << " now_us=" << input.now_us
+                  << " open=" << task.sweepChainOpen()
+                  << " phase=" << task.search_phase_.sweep_phase_
+                  << " phase_us=" << task.actionProgress().started_us << " now_us=" << input.now_us
                   << " vx=" << output.motion.vx_mps << " wz=" << output.motion.wz_rps
                   << " frame=" << int(output.motion.gripper_offset)
                   << " pitch=" << output.motion.camera_pitch_cdeg
-                  << " scatter_count=" << task.scatter_count_ << " far=" << task.scatter_far_
-                  << '\n';
+                  << " scatter_count=" << task.search_phase_.scatter_count_
+                  << " far=" << task.search_phase_.scatter_far_ << '\n';
     }
 };
 

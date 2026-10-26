@@ -661,8 +661,9 @@ int Runtime::run() {
             vision_last_state = st;
             vision_last_reason = out.reason;
         }
-        std::cout << "[ANCHOR] state=" << int(out.state) << " reason=" << out.reason << " "
-                  << task.anchorDebug() << "\n";
+        std::cout << "[ANCHOR] phase=" << phaseName(out.phase)
+                  << " run=" << runStatusName(out.run_status) << " state=" << int(out.state)
+                  << " reason=" << out.reason << " " << task.anchorDebug() << "\n";
         {
             const std::string dz = task.takeDropZoneEvent();
             if (!dz.empty())

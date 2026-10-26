@@ -82,6 +82,8 @@ int main() {
     PushObservation in;
     PushOutput previous;
     previous.state = PushState::CARRY;
+    previous.navigation_requested = previous.navigation_approach = true;
+    previous.navigation_reset = false;
     in.now_us = 1000000;
     in.zone_estimate = z;
     in.zone_own = in.zone_identity_verified = in.zone_counts_valid = in.zone_inventory_complete =
@@ -100,12 +102,16 @@ int main() {
         in.zone_occupied.clear();
         in.zone_counts_valid = in.zone_inventory_complete = true;
         previous.state = PushState::GATE;
+        previous.navigation_approach = false;
+        previous.navigation_gate = true;
         previous.drop_locked = false;
         controlled.update(in, previous);
         assert(in.drop_plan_valid);
         previous.drop_locked = true;
         previous.drop_centre_zone = in.drop_centre_zone;
         previous.state = PushState::ENTER;
+        previous.navigation_gate = false;
+        previous.navigation_release = true;
         in.zone_counts_valid = in.zone_inventory_complete = false;
         controlled.update(in, previous);
         assert(in.drop_plan_valid && !in.zone_counts_valid);

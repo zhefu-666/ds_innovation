@@ -4,22 +4,19 @@ namespace rescue {
 void CarryNavigator::update(PushObservation& in, const PushOutput& previous) {
     in.carry_plan_valid = in.drop_plan_valid = false;
     in.navigation_timestamp_us = 0;
-    const bool active = previous.state == PushState::CARRY || previous.state == PushState::GATE ||
-                        previous.state == PushState::RAISE_RELEASE ||
-                        previous.state == PushState::ENTER;
-    if (previous.state == PushState::SCAN || previous.state == PushState::WAIT_START)
+    const bool active = previous.navigation_requested;
+    if (previous.navigation_reset)
         release_background_us_ = 0;
     if (!active || !in.zone_own || !in.zone_identity_verified ||
         !in.zone_estimate.trusted(in.now_us))
         return;
-    if (controlled_ && previous.state == PushState::GATE && in.zone_counts_valid &&
+    if (controlled_ && previous.navigation_gate && in.zone_counts_valid &&
         in.zone_inventory_complete) {
         release_background_ = in.zone_occupied;
         release_background_us_ = in.zone_estimate.timestamp_us;
         release_geometry_id_ = in.zone_estimate.geometry_id;
     }
-    const bool releasing = controlled_ && (previous.state == PushState::RAISE_RELEASE ||
-                                           previous.state == PushState::ENTER);
+    const bool releasing = controlled_ && previous.navigation_release;
     if (releasing && (!release_background_us_ || in.now_us < release_background_us_ ||
                       in.now_us - release_background_us_ > 20000000 ||
                       release_geometry_id_ != in.zone_estimate.geometry_id))
@@ -49,7 +46,7 @@ void CarryNavigator::update(PushObservation& in, const PushOutput& previous) {
     }
     if (!plan.valid)
         return;
-    if (previous.state != PushState::CARRY) {
+    if (!previous.navigation_approach) {
         in.drop_plan_valid = true;
         in.drop_centre_zone = plan.centre_zone_m;
         in.navigation_timestamp_us = in.zone_estimate.timestamp_us;

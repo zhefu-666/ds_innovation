@@ -9,32 +9,11 @@ inline bool stationaryPitchWork(const PushOutput& previous, const std::string& r
         return false;
     // Returning from a near view commands FAR while already in SCAN.
     // Permit only stationary servo travel; an uncalibrated settled view is a fault.
-    if ((previous.state == PushState::SCAN || previous.state == PushState::LOST_SEARCH))
+    if (previous.scan_pitch_return)
         return reason == "pitch_moving" && previous.motion.camera_pitch_cdeg != kCameraPitchInvalid;
-    switch (previous.state) {
-        case PushState::CUE_PREPARE:
-        case PushState::CLEAR_PAUSE:
-        case PushState::MID_REACQUIRE:
-        case PushState::MID_APPROACH:
-        case PushState::NEAR_REACQUIRE:
-        case PushState::CUE_APPROACH:
-        case PushState::SELECT_CARGO:
-        case PushState::APPROACH:
-        case PushState::LOWER_FRAME:
-        case PushState::VERIFY_CAPTURE:
-        case PushState::CARRY:
-        case PushState::GATE:
-        case PushState::PREPARE:
-        case PushState::ENTER:
-        case PushState::RAISE_RELEASE:
-        case PushState::CAPTURE_FAIL:
-        case PushState::LOST_HOLD:
-        case PushState::ABORT_DROP:
-            return true;
-        default:
-            return false;
-    }
+    return previous.stationary_pitch_work;
 }
+
 inline void inhibitUnmappedMotion(MotionCommand& motion, bool mapping_valid) {
     if (!mapping_valid) {
         motion.vx_mps = motion.wz_rps = 0;

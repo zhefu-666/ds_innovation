@@ -1,4 +1,5 @@
 #pragma once
+#include "rescue/task/task_phase.hpp"
 
 #include "rescue/task/disperse_swing_stage.hpp"
 #include "rescue/task/disperse_turn_stage.hpp"
@@ -11,18 +12,35 @@
 #include <opencv2/core/types.hpp>
 
 namespace rescue {
+struct SearchPhaseData;
+struct ActionProgress;
+struct TripContext;
+struct MotionCommand;
 struct TaskTuning;
 struct PushObservation;
-enum class PushState;
 
 struct BestGroup {
     int n = 0;
     float d = 0;
 };
 
-// Shared search/approach bookkeeping still owned by PushTask while the carrying states read it.
-// The stage borrows it through these pointers; a null pointer is a wiring mistake.
+// References are scoped to the owning search phase and the current tick.
 struct SearchContext {
+    SearchContext(SearchPhaseData& search,
+                  ActionProgress& progress,
+                  TripContext& trip,
+                  MotionCommand& motion,
+                  SweepLedger& ledger,
+                  std::string& reason)
+        : search(search), progress(progress), trip_data(trip), motion(motion), ledger(ledger),
+          reason(reason) {
+    }
+    SearchPhaseData& search;
+    ActionProgress& progress;
+    TripContext& trip_data;
+    MotionCommand& motion;
+    SweepLedger& ledger;
+    std::string& reason;
     uint64_t now_us = 0, elapsed_us = 0;
     bool scan_ok = false, forward_ok = false, scatter_ok = false, clutter_fresh = false;
     bool scatter_multi_ok = false, approach_ok = false;
@@ -32,74 +50,6 @@ struct SearchContext {
     int frame_raised = 0, sweep_esc = 0;
     int16_t pitch_cmd = 0;
     float far_y = 0, target_forward_m = 0;
-    Inventory* pending = nullptr;
-    const Inventory* trip = nullptr;
-
-    int* misses = nullptr;
-    bool* track_close = nullptr;
-    float* travel = nullptr;
-    int* target_id = nullptr;
-    std::string* label = nullptr;
-    int* confirmations = nullptr;
-    bool* cue_mode = nullptr;
-    int* search_cue_id = nullptr;
-    int* capture_target_id = nullptr;
-    int* step = nullptr;
-    uint64_t* phase_us = nullptr;
-    float* turned = nullptr;
-    bool* heading_seen = nullptr;
-    float* last_heading = nullptr;
-    int* lost_round = nullptr;
-    int* scatter_seen = nullptr;
-    int* near_failures = nullptr;
-    float* scan_turn_acc = nullptr;
-    int* scatter_count = nullptr;
-    int* scatter_approach_n = nullptr;
-    int* clear_attempts = nullptr;
-    uint64_t* scatter_idle_since_us = nullptr;
-    bool* burst_drive_used = nullptr;
-    bool* burst_swing_armed = nullptr;
-    float* approach_forward = nullptr;
-    std::string* reason = nullptr;
-
-    float* motion_vx = nullptr;
-    float* motion_wz = nullptr;
-    int* sweep_phase = nullptr;
-    int* sweep_attempts = nullptr;
-    int* sweep_seen = nullptr;
-    int* pile_runs = nullptr;
-    int* pile_seen = nullptr;
-    int* mid_clear_n = nullptr;
-    int* approach_last_id = nullptr;
-    int* rush_pulse_phase = nullptr;
-    int* rush_pulse_count = nullptr;
-    int* precheck_seen = nullptr;
-    int* precheck_rejects = nullptr;
-    float* sweep_travel0 = nullptr;
-    float* sweep_yaw0 = nullptr;
-    float* last_range = nullptr;
-    float* approach_last_heading = nullptr;
-    float* approach_last_distance = nullptr;
-    float* approach_last_world_yaw = nullptr;
-    float* disperse_sign = nullptr;
-    float* disperse_rush_m = nullptr;
-    float* scan_mid_limit = nullptr;
-    uint64_t* sweep_start_us = nullptr;
-    uint64_t* sweep_t0_us = nullptr;
-    uint64_t* pile_cool_until_us = nullptr;
-    uint64_t* disperse_cool_until_us = nullptr;
-    bool* sweep_non_supply_active = nullptr;
-    bool* post_disperse_mid = nullptr;
-    bool* approach_rebind = nullptr;
-    bool* approach_last_world_valid = nullptr;
-    bool* disperse_small = nullptr;
-    int16_t* approach_pitch = nullptr;
-    RuleVerdict* verdict = nullptr;
-    Inventory* seen = nullptr;
-
-    SweepLedger* sweep_ledger = nullptr;
-    DisperseTurnStage* disperse_turn = nullptr;
-    DisperseSwingStage* disperse_swing = nullptr;
 };
 
 struct SearchServices {
@@ -114,7 +64,7 @@ struct SearchServices {
     std::function<void(float, float)> drive;
     std::function<void()> scan_spin;
     std::function<bool()> unstick;
-    std::function<void(PushState, uint64_t, const char*)> enter;
+    std::function<void(SearchAction, uint64_t, const char*)> enter;
     std::function<void(const char*)> fail_stop;
     std::function<void(const char*)> scan_after_clear;
     std::function<void(uint8_t, uint64_t)> command_frame;
@@ -150,7 +100,7 @@ class SearchStage {
     // Match reset drops the pending sweep-confirm timer only.
     void resetConfirmSince();
     // Called for the search states and both approach states.
-    void update(PushState state,
+    void update(SearchAction state,
                 const TaskTuning&,
                 const PushObservation&,
                 const SearchContext&,

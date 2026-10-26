@@ -76,19 +76,19 @@ struct Rig {
         task.last_us_ = input.now_us;
         task.last_vx_ = task.last_wz_ = 0;
         if (state == PushState::APPROACH)
-            task.approach_pitch_ = task.t_.track_pitch_cdeg;
+            task.search_phase_.approach_pitch_ = task.t_.track_pitch_cdeg;
         if (state == PushState::PILE) {
-            task.pile_phase_ = 9;
-            task.pile_phase_us_ = input.now_us;
-            task.sweep_.pile_travel0_ = 0;
+            task.search_phase_.pile_phase_ = 9;
+            task.search_phase_.pile_phase_us_ = input.now_us;
+            task.search_phase_.sweep_.pile_travel0_ = 0;
         }
-        task.sweep_phase_ = 4;
-        task.sweep_start_us_ = task.sweep_t0_us_ = input.now_us;
-        task.sweep_travel0_ = 0;
-        task.disperse_rush_m_ = .1f;
-        task.travel_ = .11f * task.motionRatio();
-        task.disperse_sign_ = 1;
-        task.scatter_commit_ = true;
+        task.search_phase_.sweep_phase_ = 4;
+        task.search_phase_.sweep_start_us_ = task.search_phase_.sweep_t0_us_ = input.now_us;
+        task.search_phase_.sweep_travel0_ = 0;
+        task.search_phase_.disperse_rush_m_ = .1f;
+        task.actionProgress().travel = .11f * task.motionRatio();
+        task.search_phase_.disperse_sign_ = 1;
+        task.search_phase_.scatter_commit_ = true;
         task.sweep_ledger_.begin(task.t_, input.now_us);
         task.pitch_cmd_ = task.desiredPitch();
         task.pitch_wait_us_ = input.now_us;
@@ -108,9 +108,10 @@ struct Rig {
         sample << std::setprecision(std::numeric_limits<float>::max_digits10) << int(output.state)
                << ':' << output.reason << ':' << output.motion.vx_mps << ':' << output.motion.wz_rps
                << ':' << output.motion.camera_pitch_cdeg << ':' << int(output.motion.gripper_offset)
-               << ':' << output.motion.frame_transaction << ':' << task.sweep_phase_ << ':'
-               << task.sweep_start_us_ << ':' << task.sweep_yaw0_ << ':' << task.sweep_travel0_
-               << ':' << task.travel_ << ':' << task.phase_us_ << ':' << task.sweepDone() << ':'
+               << ':' << output.motion.frame_transaction << ':' << task.search_phase_.sweep_phase_
+               << ':' << task.search_phase_.sweep_start_us_ << ':' << task.search_phase_.sweep_yaw0_
+               << ':' << task.search_phase_.sweep_travel0_ << ':' << task.actionProgress().travel
+               << ':' << task.actionProgress().started_us << ':' << task.sweepDone() << ':'
                << task.sweepSpentUs(now) << ':' << task.sweepChainOpen();
         for (const unsigned char c : sample.str())
             trace = (trace ^ c) * 1099511628211ULL;
@@ -125,7 +126,7 @@ struct Rig {
 
     void start() {
         tick();
-        assert(task.sweep_phase_ == 5);
+        assert(task.search_phase_.sweep_phase_ == 5);
         assert(output.reason == "disperse_look" ||
                (output.state == PushState::PILE && output.reason == "disperse_turn"));
         if (output.reason == "disperse_look")
@@ -151,22 +152,24 @@ struct Rig {
     }
 
     void finishTurn(float sign = 1) {
-        input.heading_rad = task.sweep_yaw0_ + sign * task.t_.disperse_turn_rad;
+        input.heading_rad = task.search_phase_.sweep_yaw0_ + sign * task.t_.disperse_turn_rad;
         tick();
     }
 
     void report(const char* name) const {
         std::cout << std::setprecision(9) << "case=" << name << " trace=" << trace
                   << " state=" << PushTask::name(output.state) << " reason=" << output.reason
-                  << " phase=" << task.sweep_phase_ << " phase_us=" << task.phase_us_
-                  << " start=" << task.sweep_start_us_ << " yaw0=" << task.sweep_yaw0_
-                  << " travel0=" << task.sweep_travel0_ << " travel=" << task.travel_
-                  << " vx=" << output.motion.vx_mps << " wz=" << output.motion.wz_rps
-                  << " pitch=" << output.motion.camera_pitch_cdeg
+                  << " phase=" << task.search_phase_.sweep_phase_
+                  << " phase_us=" << task.actionProgress().started_us
+                  << " start=" << task.search_phase_.sweep_start_us_
+                  << " yaw0=" << task.search_phase_.sweep_yaw0_
+                  << " travel0=" << task.search_phase_.sweep_travel0_
+                  << " travel=" << task.actionProgress().travel << " vx=" << output.motion.vx_mps
+                  << " wz=" << output.motion.wz_rps << " pitch=" << output.motion.camera_pitch_cdeg
                   << " frame=" << int(output.motion.gripper_offset) << " done=" << task.sweepDone()
                   << " spent=" << task.sweepSpentUs(input.now_us)
-                  << " open=" << task.sweepChainOpen() << " pile=" << task.pile_phase_
-                  << " pile_mid=" << task.sweep_.pile_chain_yaw_mid_ << '\n';
+                  << " open=" << task.sweepChainOpen() << " pile=" << task.search_phase_.pile_phase_
+                  << " pile_mid=" << task.search_phase_.sweep_.pile_chain_yaw_mid_ << '\n';
     }
 };
 
@@ -185,7 +188,7 @@ void directionAndView() {
     }
     {
         Rig rig;
-        rig.task.disperse_sign_ = -1;
+        rig.task.search_phase_.disperse_sign_ = -1;
         rig.input.clutter_body = {{-.2f, .5f}, {.2f, .5f}};
         rig.turn();
         assert(rig.output.motion.wz_rps < 0);
@@ -193,7 +196,7 @@ void directionAndView() {
     }
     {
         Rig rig;
-        rig.task.disperse_sign_ = -1;
+        rig.task.search_phase_.disperse_sign_ = -1;
         rig.start();
         rig.fresh = false;
         rig.input.clutter_ts_us = 0;
@@ -235,7 +238,7 @@ void turnBoundsAndMotion() {
     for (bool small : {false, true}) {
         Rig rig;
         rig.task.t_.disperse_single_turn = small;
-        rig.task.disperse_small_ = small;
+        rig.task.search_phase_.disperse_small_ = small;
         rig.task.t_.disperse_swing_vx = 0;
         rig.tick();
         assert(rig.output.reason == "disperse_swing" && rig.output.motion.wz_rps != 0);
@@ -258,7 +261,7 @@ void turnBoundsAndMotion() {
         Rig rig;
         rig.input.clutter_body = {{-.2f, .5f}, {.2f, .5f}, {0, .6f}};
         rig.turn();
-        const auto start = rig.task.sweep_start_us_;
+        const auto start = rig.task.search_phase_.sweep_start_us_;
         rig.at(start + rig.task.t_.disperse_swing_budget_us);
         assert(rig.output.reason == "disperse_turn");
         rig.report("turn_budget_equality_still_spins");
@@ -270,8 +273,8 @@ void turnBoundsAndMotion() {
         Rig rig;
         rig.input.clutter_body = {{-.2f, .5f}, {.2f, .5f}, {0, .6f}};
 #ifdef RESCUE_HAS_RUSH_STAGE
-        rig.task.disperse_rush_.active_ = true;
-        rig.task.disperse_rush_.cap_positive_ = .45f;
+        rig.task.search_phase_.disperse_rush_.active_ = true;
+        rig.task.search_phase_.disperse_rush_.cap_positive_ = .45f;
 #else
         rig.task.swing_plan_active_ = true;
         rig.task.swing_cap_pos_ = .45f;
@@ -299,7 +302,7 @@ void turnBoundsAndMotion() {
     for (PushState state : {PushState::SCATTER, PushState::APPROACH}) {
         Rig rig(tuning(), state);
         if (state == PushState::SCATTER)
-            rig.task.burst_swing_ = true;
+            rig.task.search_phase_.burst_swing_ = true;
         else
             rig.task.t_.approach_dense_burst_swing = true;
         rig.turn();
@@ -382,7 +385,7 @@ void pushAndParentLifecycle() {
         Rig rig(chain, state);
         rig.turn();
         rig.finishTurn();
-        assert(rig.output.state == PushState::PILE && rig.task.pile_phase_ == 7);
+        assert(rig.output.state == PushState::PILE && rig.task.search_phase_.pile_phase_ == 7);
         assert(rig.task.sweepDone() == 1 && !rig.task.sweepChainOpen());
         rig.report(state == PushState::SCATTER ? "scatter_turn_hands_completed_chain_to_pile"
                                                : "approach_turn_hands_completed_chain_to_pile");
@@ -391,22 +394,23 @@ void pushAndParentLifecycle() {
         Rig rig(parameters, state);
         rig.turn();
         rig.finishTurn();
-        const auto start = rig.task.sweep_start_us_;
-        const auto travel0 = rig.task.sweep_travel0_;
+        const auto start = rig.task.search_phase_.sweep_start_us_;
+        const auto travel0 = rig.task.search_phase_.sweep_travel0_;
         rig.tick();
         assert(rig.output.reason == "disperse_turn_push" && rig.output.motion.vx_mps > 0 &&
                rig.output.motion.wz_rps == 0);
         rig.report(state == PushState::SCATTER    ? "scatter_turn_starts_straight_push"
                    : state == PushState::APPROACH ? "approach_turn_starts_straight_push"
                                                   : "pile_turn_starts_straight_push");
-        rig.task.travel_ =
+        rig.task.actionProgress().travel =
             travel0 + parameters.disperse_turn_push_m * rig.task.motionRatio() + .001f;
         rig.tick();
-        assert(rig.task.sweep_start_us_ == start);
+        assert(rig.task.search_phase_.sweep_start_us_ == start);
         if (state == PushState::PILE) {
-            assert(rig.output.state == PushState::PILE && rig.task.pile_phase_ == 10 &&
-                   rig.task.sweep_phase_ == 0);
-            assert(std::abs(rig.task.sweep_.pile_chain_yaw_mid_ - .9f) < .0001f);
+            assert(rig.output.state == PushState::PILE &&
+                   rig.task.search_phase_.pile_phase_ == 10 &&
+                   rig.task.search_phase_.sweep_phase_ == 0);
+            assert(std::abs(rig.task.search_phase_.sweep_.pile_chain_yaw_mid_ - .9f) < .0001f);
         } else
             assert(rig.task.sweepDone() == 1 && !rig.task.sweepChainOpen());
         rig.report(state == PushState::SCATTER ? "scatter_push_completion_closes_parent_chain"
@@ -418,7 +422,7 @@ void pushAndParentLifecycle() {
         Rig rig(parameters);
         rig.turn();
         rig.finishTurn();
-        const auto start = rig.task.sweep_start_us_;
+        const auto start = rig.task.search_phase_.sweep_start_us_;
         rig.input.path_safe = false;
         rig.tick();
         assert(rig.output.reason == "forward_path_blocked");
@@ -464,7 +468,8 @@ void pushAndParentLifecycle() {
         framed.sweep_frame_open = true;
         Rig rig(framed);
         rig.tick();
-        assert(rig.output.reason == "sweep_frame_open_wait" && rig.task.sweep_phase_ == 4);
+        assert(rig.output.reason == "sweep_frame_open_wait" &&
+               rig.task.search_phase_.sweep_phase_ == 4);
         assert(rig.output.motion.gripper_offset == 0);
         rig.stationary();
         rig.report("frame_open_ack_gates_turn_initialization");
