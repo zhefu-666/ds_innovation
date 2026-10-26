@@ -53,9 +53,9 @@ CRC算法与A6反馈相同：初值0xFFFF，反射多项式0xA001，无终值异
 
 `imu_yaw_cdeg` 由 `MotionCommand::imu_yaw_rad`（车体 `body_rpy_rad[2]`，弧度）经 `imuYawToWire()` 编码：先归一到(-180°,180°]，再转0.01°并限幅±18000。非有限值写`kImuYawInvalid`（-32768）。
 
-`MotionLink` 在真正写串口的那一刻读取 `yaw_source` 回调，因此25Hz重发、150ms顿挫后的零速度替代包以及 `stop()` 的停车补发包都携带当前航向；IMU快照 `connected && fresh && measurements_valid` 不成立时该包写无效值，不沿用上一帧角度。业务层不必填充该字段。
+MotionLink 写串口前读取同一份 IMU 快照中的车体 yaw 与样本序号；仅新鲜、有效且序号大于最后成功发送序号的样本携带有效 yaw。相同角度的新样本仍发送；相同或倒退序号、无样本、过期或无效样本写 -32768。运动命令的重发不重复发送有效旧 yaw，发送失败不消耗该样本，下一次可重试。新样本也可随零速度替代包或最终停车包发送。
 
-yaw是相对航向（上电零点），不是绝对方位，也未被下位机用于运动解算；需要绝对方向时仍由视觉/场地标定提供。
+yaw 是相对航向，不是绝对方位。本轮只完成上位机下发：下位机应在 CRC 正确且 yaw 位于 -18000..18000 时更新角度并记录自身单调时钟；-32768 表示本包没有新的有效姿态，不更新 IMU 时间戳，也不覆盖上次有效角度，按独立 IMU 超时判断是否继续闭环。
 
 `MotionCommand` 是算法业务请求，**禁止直接发送sizeof(MotionCommand)**。`buildMotionPacket(command, gripper_action_id)` 返回精确17字节；`sendMotion(command)` 自动分配夹爪动作编号并写入串口。头文件断言float格式、包大小和各字段偏移。
 

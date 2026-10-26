@@ -89,7 +89,7 @@ cd /home/cat/ds_innovation
 本机需要重建时：
 
 ```bash
-cmake -S . -B build-onboarding-offline -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DRESCUE_ENABLE_RKNN=OFF -DRESCUE_ENABLE_TELEMETRY=ON
+cmake -G Ninja -S . -B build-onboarding-offline -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DRESCUE_ENABLE_RKNN=OFF -DRESCUE_ENABLE_TELEMETRY=ON
 ```
 
 ```bash
@@ -138,20 +138,19 @@ python3 tools/remote_camera_telemetry/manage_project.py stop
 
 ## 4. 车端重建与静态检查
 
-```bash
-cmake -S . -B build-arm64-selfcontained -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DRESCUE_ENABLE_TELEMETRY=ON -Dnlohmann_json_DIR="$PWD/deps/nlohmann_json/lib/cmake/nlohmann_json" -DRESCUE_RKNN_INCLUDE_DIR="$PWD/benchmark_results"
-```
+车端采用 Ninja，保留正式入口使用的 `build-release/`。在项目根目录执行：
 
 ```bash
-cmake --build build-arm64-selfcontained -j4
+cmake --preset cat-release
+cmake --build --preset cat-release
+ctest --preset cat-release
 ```
 
-```bash
-ctest --test-dir build-arm64-selfcontained --output-on-failure
-```
-
-将两处目录名改为 `build-release` 可重建网页管理脚本使用的二进制。
-`build-release` 也是自包含资源构建，名称不意味着它引用旧部署目录。
+`cat-release` 继承共享 `release` 预设，默认 4 并行；板端本机路径由不入库的
+`CMakeUserPresets.json` 提供。其他机器安装 Ninja 并配置依赖后使用 `release`。
+预设要求 CMake 3.21+。用户目录 Ninja 不在 PATH 时，手动配置前执行
+`export PATH="$HOME/.local/bin:$PATH"`。
+从 Make 首次迁移需先备份构建目录，再在原路径重新配置；不能混用生成器缓存。
 
 静态入口检查不会打开设备；方框未确认时只显示占位配置，不得将占位值用于运动：
 

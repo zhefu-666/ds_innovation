@@ -479,7 +479,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     // Keep unconnected evidence invalid; never synthesize successful observations.
     const auto imu_data = imu ? imu->snapshot() : ImuSnapshot{};
     // IMU absence/fault/over-tilt can veto permission; it never establishes geometry or route
-    // safety. SensorState uses body axes (roll-180 mounting calibrated 2026-09-27), same steady
+    // safety. SensorState uses body axes (Y-180 mounting confirmed 2026-10-26), same steady
     // clock as observed_at.
     const SensorState sensor = sensorStateFromImu(imu_data);
     if (imu) {

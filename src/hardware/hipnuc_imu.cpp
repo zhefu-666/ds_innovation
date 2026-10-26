@@ -58,16 +58,16 @@ uint64_t imuNowUs() {
         .count();
 }
 void applyImuMounting(ImuSample& s) {
-    // 绕X轴旋转180°：R = diag(1, -1, -1)，v_body = R · v_device。
+    // 2026-10-26确认：X向后、Y向左、Z向下；绕Y轴180°，R = diag(-1, 1, -1)，v_body = R · v_device。
     const auto rotate = [](const std::array<float, 3>& v) {
-        return std::array<float, 3>{v[0], -v[1], -v[2]};
+        return std::array<float, 3>{-v[0], v[1], -v[2]};
     };
     s.body_acceleration_mps2 = rotate(s.acceleration_mps2);
     s.body_angular_velocity_rps = rotate(s.angular_velocity_rps);
-    // 设备四元数为device→导航系；q_body = q_device ⊗ q_mount，q_mount = (w0, x1, y0, z0)。
+    // 设备四元数为device→导航系；q_body = q_device ⊗ q_mount，q_mount = (w0, x0, y1, z0)。
     const float w = s.quaternion_wxyz[0], x = s.quaternion_wxyz[1], y = s.quaternion_wxyz[2],
                 z = s.quaternion_wxyz[3];
-    s.body_quaternion_wxyz = {-x, w, z, -y};
+    s.body_quaternion_wxyz = {-y, -z, w, x};
     // ZYX欧拉分解（roll绕X、pitch绕Y、yaw绕Z）；不使用设备的312欧拉角，避免倒装时roll停在±180°附近跳变。
     const float bw = s.body_quaternion_wxyz[0], bx = s.body_quaternion_wxyz[1];
     const float by = s.body_quaternion_wxyz[2], bz = s.body_quaternion_wxyz[3];

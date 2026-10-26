@@ -38,7 +38,45 @@ void waitUntil(const std::function<bool()>& condition) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     assert(condition());
 }
+void testConfirmedMounting() {
+    constexpr float pi = 3.14159265358979323846f;
+    constexpr float deg = pi / 180.0f;
+    // Independent physical poses: device +X is rearward, +Y left, +Z downward.
+    const auto check = [&](std::array<float, 4> raw, float roll, float pitch, float yaw) {
+        for (float sign : {1.0f, -1.0f}) {
+            ImuSample s;
+            for (size_t i = 0; i < raw.size(); ++i)
+                s.quaternion_wxyz[i] = sign * raw[i];
+            s.acceleration_mps2 = {1.0f, 2.0f, -9.8f};
+            s.angular_velocity_rps = {0.1f, 0.2f, -0.3f};
+            s.rpy_rad = {0.4f, 0.5f, 0.6f};
+            const auto original = s;
+            applyImuMounting(s);
+            assert((s.body_acceleration_mps2 == std::array<float, 3>{-1.0f, 2.0f, 9.8f}));
+            assert((s.body_angular_velocity_rps == std::array<float, 3>{-0.1f, 0.2f, 0.3f}));
+            const std::array<float, 3> expected{roll, pitch, yaw};
+            for (size_t i = 0; i < expected.size(); ++i)
+                assert(std::abs(std::remainder(s.body_rpy_rad[i] - expected[i], 2 * pi)) < 1e-5f);
+            assert(s.quaternion_wxyz == original.quaternion_wxyz);
+            assert(s.acceleration_mps2 == original.acceleration_mps2);
+            assert(s.angular_velocity_rps == original.angular_velocity_rps);
+            assert(s.rpy_rad == original.rpy_rad);
+        }
+    };
+    check({0.0f, 0.0f, 1.0f, 0.0f}, 0.0f, 0.0f, 0.0f); // level, forward reference
+    for (float yaw_deg : {-179.0f, -90.0f, 90.0f, 179.0f}) {
+        const float h = yaw_deg * deg / 2;
+        check({0.0f, -std::sin(h), std::cos(h), 0.0f}, 0.0f, 0.0f, yaw_deg * deg);
+    }
+    for (float tilt_deg : {-30.0f, 30.0f}) {
+        const float h = tilt_deg * deg / 2;
+        check({0.0f, 0.0f, std::cos(h), std::sin(h)}, tilt_deg * deg, 0.0f, 0.0f);
+        check({-std::sin(h), 0.0f, std::cos(h), 0.0f}, 0.0f, tilt_deg * deg, 0.0f);
+    }
+}
+
 int main() {
+    testConfirmedMounting();
     std::ifstream file(IMU_FIXTURE_PATH, std::ios::binary);
     Bytes frame{std::istreambuf_iterator<char>(file), {}};
     assert(frame.size() == 82 && frame[6] == 0x91);
@@ -50,7 +88,8 @@ int main() {
     assert(sample.measurements_valid && std::abs(sample.rpy_rad[0] - 3.138964f) < 0.0001f);
     assert(sample.acceleration_mps2[2] < -9.0f && sample.acceleration_mps2[2] > -10.5f);
     assert(std::abs(sample.quaternion_wxyz[2] - 0.99998790f) < 0.00001f);
-    // Mounting (roll 180°): the level, inverted fixture reads +1 g up and ~0 tilt in base_link.
+    // Mounting (Y 180°, X rear / Z down): the level, inverted fixture reads +1 g up and ~0 tilt in
+    // base_link.
     constexpr float deg = 0.017453292519943295f;
     assert(sample.body_acceleration_mps2[2] > 9.0f && sample.body_acceleration_mps2[2] < 10.5f);
     assert(std::abs(sample.body_rpy_rad[0]) < 3 * deg &&
@@ -78,17 +117,17 @@ int main() {
             assert(done == 1 && s.measurements_valid);
             return s;
         };
-        // Nose raised ~25°: body pitch is negative (REP-103, nose-down positive), roll stays small.
+        // Historical raw tilt: under the confirmed X-rear mounting this is nose-down, not nose-up.
         auto nose = decode(floats(floats(frame, 18, {0.437869f, -0.078395f, -0.896114f}),
                                   66,
                                   {-0.153103f, -0.563852f, 0.796467f, -0.158187f}));
-        assert(nose.body_rpy_rad[1] < -20 * deg && nose.body_rpy_rad[1] > -30 * deg);
+        assert(nose.body_rpy_rad[1] > 20 * deg && nose.body_rpy_rad[1] < 30 * deg);
         assert(std::abs(nose.body_rpy_rad[0]) < 8 * deg);
-        assert(nose.body_acceleration_mps2[0] > 3.5f && nose.body_acceleration_mps2[2] > 8.0f);
+        assert(nose.body_acceleration_mps2[0] < -3.5f && nose.body_acceleration_mps2[2] > 8.0f);
         // Left (counter-clockwise) turn: device gyro z is negative, body yaw rate is positive.
         auto turn = decode(floats(frame, 30, {21.6225f, 5.9366f, -103.7951f}));
         assert(std::abs(turn.body_angular_velocity_rps[2] - 103.7951f * deg) < 1e-4f);
-        assert(std::abs(turn.body_angular_velocity_rps[0] - 21.6225f * deg) < 1e-4f);
+        assert(std::abs(turn.body_angular_velocity_rps[0] + 21.6225f * deg) < 1e-4f);
     }
     // CRC failure and unrelated serial noise cannot refresh a measurement.
     auto bad = frame;

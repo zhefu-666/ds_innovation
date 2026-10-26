@@ -448,32 +448,88 @@ int main() {
         link.submit(drive); // ignored after stop
         assert(collect(80).empty());
         {
-            // 每包注入实时航向：重发取的是写入时的值，不是提交时快照；IMU失效写无效值。
-            std::atomic<float> yaw{0.5f};
+            // 新样本只成功发送一次；重发/倒退/无效样本不能刷新下位机IMU计时。
+            std::mutex yaw_mutex;
+            MotionYawSample yaw{1, 0.5f};
+            auto publishYaw = [&](uint64_t seq, float radians) {
+                std::lock_guard<std::mutex> guard(yaw_mutex);
+                yaw = {seq, radians};
+            };
             MotionLink yawed(link_uart, {20, 150}, {}, [&] {
-                return yaw.load();
+                std::lock_guard<std::mutex> guard(yaw_mutex);
+                return yaw;
             });
+            auto wireYaw = [](const Out& o) {
+                return int16_t(o[13] | (o[14] << 8));
+            };
+            auto expectYaw =
+                [&](const std::vector<Out>& received_frames, int count, int16_t value) {
+                    assert(!received_frames.empty());
+                    int actual = 0;
+                    for (const auto& f : received_frames) {
+                        const uint16_t crc = UARTController::calculateCRC16(f.data(), 0, 14);
+                        assert(f[15] == (crc & 0xff) && f[16] == (crc >> 8));
+                        if (wireYaw(f) != kImuYawInvalid) {
+                            assert(wireYaw(f) == value);
+                            ++actual;
+                        }
+                    }
+                    assert(actual == count);
+                };
             MotionCommand y;
             y.vx_mps = 0.1f;
             y.gripper_offset = 0;
             y.camera_pitch_cdeg = 0;
+            y.imu_yaw_rad = 2.0f; // 业务命令中的旧yaw不能绕过采样序号检查。
             yawed.submit(y);
-            frames = collect(50);
-            assert(!frames.empty());
-            auto wireYaw = [](const Out& o) {
-                return int16_t(o[13] | (o[14] << 8));
-            };
-            assert(!frames.empty() && wireYaw(frames.back()) == 2865); // 0.5rad = 28.648°
-            yaw = 1.0f;
+            frames = collect(60);
+            expectYaw(frames, 1, 2865); // 0.5rad = 28.648°；后续重发均为-32768。
+            assert(frames.size() >= 2 && wireYaw(frames.back()) == kImuYawInvalid);
             yawed.submit(y);
-            frames = collect(50);
-            assert(wireYaw(frames.back()) == 5730); // 1.0rad = 57.296° -> 5730 附近
-            yaw = std::numeric_limits<float>::quiet_NaN();
+            expectYaw(collect(60), 0, 0); // 新业务命令不能使旧IMU样本重新有效。
+            publishYaw(2, 0.5f);
             yawed.submit(y);
-            frames = collect(50);
-            assert(wireYaw(frames.back()) == kImuYawInvalid);
-            yawed.stop(); // 停机补发包留在管道里，先排空
-            collect(120);
+            expectYaw(collect(60), 1, 2865); // 静止车体：角度相同，但样本新，仍必须发送。
+            publishYaw(3, 1.0f);
+            yawed.submit(y);
+            expectYaw(collect(60), 1, 5730);
+            publishYaw(2, 0.5f);
+            yawed.submit(y);
+            expectYaw(collect(60), 0, 0); // 倒退样本不刷新。
+            publishYaw(4, std::numeric_limits<float>::quiet_NaN());
+            yawed.submit(y);
+            expectYaw(collect(60), 0, 0); // 无效IMU不回退到上次健康角度。
+            publishYaw(0, 1.0f);
+            yawed.submit(y);
+            expectYaw(collect(60), 0, 0); // 序号0没有测量。
+            // 发送失败不消耗样本。保持非法命令期间先等待发送线程观察到失败。
+            y.header = 0x55;
+            yawed.submit(y);
+            // submit不能撤销已经在途的上一包，先排空并等待失败计数推进。
+            const auto failure_deadline = Clock::now() + Ms(500);
+            while (yawed.stats().failed == 0 && Clock::now() < failure_deadline)
+                std::this_thread::sleep_for(Ms(2));
+            assert(yawed.stats().failed > 0);
+            collect(30);
+            publishYaw(5, -0.5f);
+            assert(collect(60).empty());
+            y.header = 0x56;
+            yawed.submit(y);
+            expectYaw(collect(60), 1, -2865); // 同一样本在成功重试时仍可发送。
+            // 业务超时停车后，新IMU仍能携带在零速度包里；旧样本继续无效。
+            frames = collect(200);
+            expectYaw(frames, 0, 0);
+            assert(vx(frames.back()) == 0.0f);
+            publishYaw(6, 0.0f);
+            frames = collect(60);
+            expectYaw(frames, 1, 0); // 0°是合法新测量，不是无效占位。
+            for (const auto& f : frames)
+                assert(vx(f) == 0.0f);
+            publishYaw(7, 1.0f);
+            yawed.stop();
+            frames = collect(60);
+            expectYaw(frames, 1, 5730); // 新样本可在stop前最后一次重发或最终停车包发送。
+            assert(vx(frames.back()) == 0.0f);
         }
         {
             // Output authorization is checked in the resend worker, not only in the task loop.

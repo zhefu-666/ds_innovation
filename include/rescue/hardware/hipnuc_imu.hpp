@@ -56,8 +56,8 @@ struct ImuSnapshot {
     uint64_t duplicate_times = 0, backward_times = 0, io_errors = 0;
 };
 uint64_t imuNowUs();
-// 安装变换：本车IMU倒装，设备坐标为FRD（X前、Y右、Z下），相对车体FLU绕X轴旋转180°。
-// 依据2026-09-27实车转动采样：静止acc_z≈-1g；车头抬高acc_x为正；左转gyro_z为负。
+// 2026-10-26用户确认：设备X向后、Y向左、Z向下；转车体FLU需绕Y轴180°。
+// body = (-device_x, +device_y, -device_z)；假定设备未额外应用安装补偿。
 // 根据设备字段填写sample的body_字段，不修改设备字段。
 void applyImuMounting(ImuSample& sample);
 class Hi91Parser {
