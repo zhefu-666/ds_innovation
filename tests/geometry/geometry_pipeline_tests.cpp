@@ -335,6 +335,13 @@ int main() {
         d.timestamp_us = s.frame.capture_us;
         d.box = s.cubeBox({0, .82f});
         d.ground_contact_valid = false;
+        auto zone = d;
+        zone.label = "blue_safe_zone";
+        GeometryPipeline zone_pipeline(s.camera, s.geometry);
+        const auto zone_result = zone_pipeline.process(s.frame, points, {zone});
+        assert(!zone_result.detections[0].ground_position_valid &&
+               !zone_result.detections[0].ground_contact_valid &&
+               zone_result.detections[0].ground_contact_reason == "zone_detection");
         auto result = pipeline.process(s.frame, points, {d});
         assert(result.detections[0].ground_position_valid &&
                result.detections[0].ground_contact_valid);

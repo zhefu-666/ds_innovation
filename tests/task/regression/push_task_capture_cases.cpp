@@ -73,6 +73,14 @@ void captureTests() {
     t += 50000;
     monitor.update(in, {box(1, "ordinary_supply", {602, 600, 40, 40}, t)}, t);
     assert(in.hold_observable && in.captured && in.held_complete && in.held == inv(1));
+    // Zone boxes overlapping the holding view are surfaces, never cargo or occluders.
+    t += 50000;
+    monitor.update(in,
+                   {box(1, "ordinary_supply", {602, 600, 40, 40}, t),
+                    box(2, "blue_safe_zone", {500, 500, 400, 200}, t),
+                    box(3, "red_safe_zone", {580, 580, 80, 80}, t)},
+                   t);
+    assert(in.captured && in.held_complete && in.held == inv(1));
     // FAR, or a camera still moving: the region is out of view, nothing is claimed either way.
     auto far = in;
     far.camera_pitch_cdeg = 1200;

@@ -12,7 +12,9 @@ std::string taskLabel(const std::string& s) {
     static const std::map<std::string, std::string> names{{"blue", "dangerous_object"},
                                                           {"orange", "injured_person"},
                                                           {"green", "ordinary_supply"},
-                                                          {"black", "core_supply"}};
+                                                          {"black", "core_supply"},
+                                                          {"zone_blue", "blue_safe_zone"},
+                                                          {"zone_red", "red_safe_zone"}};
     auto it = names.find(s);
     return it == names.end() ? "unmapped_" + s : it->second;
 }

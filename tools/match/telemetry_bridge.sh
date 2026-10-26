@@ -52,6 +52,6 @@ else
 fi
 
 
-echo "Browser: http://192.168.175.7:8080/"
-echo "Data: http://192.168.175.7:8080/status"
-echo "Foxglove: ws://192.168.175.7:8765"
+echo "Browser: http://10.63.153.7:8080/"
+echo "Data: http://10.63.153.7:8080/status"
+echo "Foxglove: ws://10.63.153.7:8765"

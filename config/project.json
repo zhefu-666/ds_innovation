@@ -16,22 +16,24 @@
   },
   "models": {
     "rknn_library": "../benchmark_results/librknnrt.so",
-    "model_path": "../models/detect_int8_split_20261022.rknn",
-    "pose_model_path": "../models/zone_pose_int8_split_20261022.rknn",
+    "model_path": "../models/detect_v5_int8.rknn",
+    "pose_model_path": "../models/zone_pose_int8.rknn",
     "input_size": 640,
     "confidence": 0.5,
     "injured_confidence": 0.25,
     "nms": 0.45,
     "pose_confidence": 0.25,
     "pose_keypoint_confidence": 0.5,
-    "detect_core_mask": 1,
-    "pose_core_mask": 2,
+    "detect_core_mask": 4,
+    "pose_core_mask": 3,
     "parallel_inference": true,
     "class_names": [
       "blue",
       "orange",
       "green",
-      "black"
+      "black",
+      "zone_blue",
+      "zone_red"
     ]
   },
   "calibration": {
@@ -64,7 +66,7 @@
     "dry_run": false,
     "hardware": false,
     "telemetry": true,
-    "telemetry_fps": 30,
+    "telemetry_fps": 60,
     "telemetry_file": "/dev/shm/rescue-telemetry.bin",
     "vision_log_dir": "telemetry_logs/vision",
     "match_socket": "/tmp/rescue-match.sock"
@@ -78,8 +80,8 @@
       "binary": "../build-release/rescue_upper_host",
       "frame_config": "project.json#/frame/pending",
       "acceptance": "project.json#/acceptance/pending",
-      "model": "../models/detect_int8_split_20261022.rknn",
-      "pose_model": "../models/zone_pose_int8_split_20261022.rknn",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
       "rknn_library": "../benchmark_results/librknnrt.so",
       "camera_calibration": "project.json#/paths/camera",
       "zone_geometry": "project.json#/zone_geometry",
@@ -102,8 +104,8 @@
       "binary": "../build-release/rescue_upper_host",
       "frame_config": "project.json#/frame/assume",
       "acceptance": "project.json#/acceptance/assume",
-      "model": "../models/detect_int8_split_20261022.rknn",
-      "pose_model": "../models/zone_pose_int8_split_20261022.rknn",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
       "rknn_library": "../benchmark_results/librknnrt.so",
       "camera_calibration": "project.json#/paths/camera",
       "zone_geometry": "project.json#/zone_geometry",
@@ -126,8 +128,8 @@
       "binary": "../build-release/rescue_upper_host",
       "frame_config": "project.json#/frame/assume",
       "acceptance": "project.json#/acceptance/assume",
-      "model": "../models/detect_int8_split_20261022.rknn",
-      "pose_model": "../models/zone_pose_int8_split_20261022.rknn",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
       "rknn_library": "../benchmark_results/librknnrt.so",
       "camera_calibration": "project.json#/paths/camera_mechanical_5_40",
       "zone_geometry": "project.json#/zone_geometry",
@@ -601,6 +603,30 @@
         "status": "archived_candidate",
         "sha256": "68194965028a1653eab7d48d764e2a565e790d3aa2095fd5652d6d29e528fdad",
         "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_v3_int8.rknn"
+      },
+      {
+        "file": "models/detect_v5_int8.rknn",
+        "role": "detector",
+        "status": "active",
+        "sha256": "92b651c2d8a431f3237e7540d269a7274f8a37e20a4de5bed69f7c5edf8d29d9",
+        "classes": [
+          "blue",
+          "orange",
+          "green",
+          "black",
+          "zone_blue",
+          "zone_red"
+        ]
+      },
+      {
+        "file": "models/zone_pose_int8.rknn",
+        "role": "pose",
+        "status": "active",
+        "sha256": "60381a442dc7adef56d76fe85600f9e2a3aa45711c4b53edad74f7b91fcedb3e",
+        "classes": [
+          "zone_left",
+          "zone_right"
+        ]
       }
     ]
   },
@@ -616,7 +642,7 @@
       },
       "models": {
         "rknn_library": "../benchmark_results/librknnrt.so",
-        "model_path": "../models/detect_fp.rknn",
+        "model_path": "../models/detect_v5_int8.rknn",
         "input_size": 640,
         "confidence": 0.5,
         "injured_confidence": 0.25,
@@ -625,8 +651,11 @@
           "blue",
           "orange",
           "green",
-          "black"
-        ]
+          "black",
+          "zone_blue",
+          "zone_red"
+        ],
+        "pose_model_path": "../models/zone_pose_int8.rknn"
       },
       "calibration": {
         "zone_geometry_file": "project.json#/zone_geometry",

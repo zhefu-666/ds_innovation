@@ -1398,7 +1398,3 @@ std::vector<int> PushTask::rejectedTargets(uint64_t now) const {
     return ids;
 }
 } // namespace rescue
-的程序；未启动底盘或机构动作。架构说明已更新到 README (line 30)。
-
-￼
-￼

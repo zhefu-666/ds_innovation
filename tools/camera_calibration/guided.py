@@ -510,10 +510,10 @@ def describe_existing_service(args):
             return False
     except (OSError, ValueError):
         return False
-    print(f'标定程序已经在运行，请直接打开 http://192.168.1.123:{args.port}/')
+    print(f'标定程序已经在运行，请直接打开 http://10.63.153.7:{args.port}/')
     print(f'当前已保存 {state["count"]}/{state["total"]} 张照片；现有会话和相机继续运行。')
     if state.get('foxglove_port'):
-        print(f'Foxglove：ws://192.168.1.123:{state["foxglove_port"]}')
+        print(f'Foxglove：ws://10.63.153.7:{state["foxglove_port"]}')
     print('本次未启动第二份程序，新的启动参数未应用。需要重启时请先结束原进程。')
     return True
 
@@ -566,9 +566,9 @@ def main():
         server.server_close()
         wizard.foxglove.close()
         parser.exit(1, f'{exc}。请检查 {args.foxglove_port} 端口，或使用 --foxglove-port 指定空闲端口。\n')
-    print(f'圆点标定已启动。电脑打开 http://192.168.1.123:{args.port}/', flush=True)
+    print(f'圆点标定已启动。电脑打开 http://10.63.153.7:{args.port}/', flush=True)
     print('点击「仅预览」或填写尺寸后点击「开始」才打开相机。Ctrl+C 退出；原图与结果会保留。', flush=True)
-    print(f'Foxglove 连接 ws://192.168.1.123:{wizard.foxglove.port}，图像话题 /calibration/image', flush=True)
+    print(f'Foxglove 连接 ws://10.63.153.7:{wizard.foxglove.port}，图像话题 /calibration/image', flush=True)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally: server.server_close(); wizard.close(); wizard.foxglove.close()

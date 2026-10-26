@@ -25,7 +25,7 @@ struct Config {
     bool pitch_feedback = false; // O_RDONLY MCU receive; no actuator commands
     std::string detect_image;
     std::string rknn_library = "./benchmark_results/librknnrt.so";
-    std::string model_path = "./models/detect_int8_split_20261022.rknn";
+    std::string model_path = "./models/detect_v5_int8.rknn";
     // Optional YOLOv8-pose safe-zone model (zone_left/zone_right, 4 kpts each), own RKNN context.
     std::string pose_model_path; // 通用模型；parseArgs 后为本次实际使用的模型路径。
     // 预留两版安全区模型接口：按己方颜色选择，仅路径不同，不分设置信度。
@@ -35,7 +35,7 @@ struct Config {
     std::string pose_model_red_path;
     float pose_confidence = 0.25f;         // 两版共用：per-half box score
     float pose_keypoint_confidence = 0.5f; // 两版共用：per-keypoint visibility
-    int detect_core_mask = -1; // -1 leaves the runtime default; 0 auto, 1 core0, 2 core1, 4 core2
+    int detect_core_mask = -1; // -1 leaves the runtime default; 0 auto, 1 core0, 2 core1, 3 core0+1, 4 core2
     int pose_core_mask = -1;
     bool async_capture = false;      // Latest-frame capture worker; opt in with --async-capture.
     bool parallel_inference = false; // run detect and pose concurrently on separate contexts
@@ -114,7 +114,8 @@ struct Config {
     std::array<int16_t, 3> pitch_presets_cdeg{500, 500, 4000};
 
     // blocks detector tensor order; taskLabel() maps colours to task semantics.
-    std::vector<std::string> class_names{"blue", "orange", "green", "black"};
+    std::vector<std::string> class_names{
+        "blue", "orange", "green", "black", "zone_blue", "zone_red"};
 };
 
 void printUsage(const char* program);

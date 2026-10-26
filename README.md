@@ -17,8 +17,12 @@
 | orange | injured_person，伤员 | 单独送入伤员半区 |
 | green | ordinary_supply，普通物资 | 送入物资半区 |
 | black | core_supply，核心物资 | 送入物资半区 |
+| zone_blue | blue_safe_zone，蓝色安全区 | 区域归属与寻区，不作为搬运物或物块遮挡 |
+| zone_red | red_safe_zone，红色安全区 | 区域归属与寻区，不作为搬运物或物块遮挡 |
 
-Pose 模型的 `zone_left` 是物资半区，`zone_right` 是伤员半区；左右以站在安全区入口面向区内定义，不等于画面左右。队伍归属由独立颜色判断确定。
+Pose 模型的 `zone_left` 是物资半区，`zone_right` 是伤员半区；左右以站在安全区入口面向区内定义，不等于画面左右。队伍归属优先由与 pose 可见角点匹配的 zone_blue / zone_red 检测框确定；没有匹配检测时沿用已标定的 HSV 颜色判断。相互矛盾的区域检测保持未知。检测框可提供粗略寻区方向，精确几何与交付位置仍只使用 pose 关键点。
+
+当前默认检测模型为 detect_v5_int8.rknn，类别 ID 0–5 顺序为 blue、orange、green、black、zone_blue、zone_red。检测输出支持单张量 [1,10,N] 或 boxes [1,4,N] + scores [1,6,N]；旧四分类模型仍可通过显式 --model 与 --classes blue,orange,green,black 使用。pose 文件为 zone_pose_int8.rknn，类别、4 个关键点顺序与 [1,18,N] 契约不变。models/detect_v4_manifest.json 仅描述旧模型，不是 v5 元数据。
 
 ~~~text
 相机 → 检测 + 安全区 pose → 跟踪与几何 → 任务观测 → PushTask
@@ -82,8 +86,8 @@ sudo apt install build-essential cmake ninja-build pkg-config libopencv-dev nloh
 RKNN 模型和 SDK 资源独立部署，Git 克隆不包含这些被忽略的文件：
 
 ~~~text
-models/detect_int8_split_20261022.rknn
-models/zone_pose_int8_split_20261022.rknn
+models/detect_v5_int8.rknn
+models/zone_pose_int8.rknn
 benchmark_results/librknnrt.so
 benchmark_results/rknn_api.h
 ~~~

@@ -80,6 +80,9 @@ bool GeometryPipeline::voteUpright(const SegDetection& d, float diff, int& n, fl
     return tv.upright || tv.unconfirmed;
 }
 std::string GeometryPipeline::groundContact(SegDetection& d, const GeometryFrame& f) {
+    // Zone rectangles are surface sightings, not foreground ground contacts.
+    if (d.label == "blue_safe_zone" || d.label == "red_safe_zone")
+        return "zone_detection";
     if (d.timestamp_us != f.capture_us || d.frame_id != f.frame_id)
         return "frame_mismatch";
     if (d.box.width <= 0 || d.box.height <= 0 || d.box.x < 0 || d.box.y < 0 ||

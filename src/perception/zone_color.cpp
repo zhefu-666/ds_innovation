@@ -73,12 +73,61 @@ ZoneColorResult ZoneColorClassifier::classify(const cv::Mat& frame,
                                               float threshold) const {
     AuditScope audit("logic.zone_color");
     ZoneColorResult result;
-    if (!config_.measured)
-        return result;
     if (frame.empty() || frame.type() != CV_8UC3) {
         result.reason = "invalid_color_frame";
         return result;
     }
+    // Associate zone identity with the unchanged pose model's visible corners.
+    for (const auto& half : halves) {
+        if (!half.valid)
+            continue;
+        std::vector<cv::Point2f> visible;
+        for (size_t i = 0; i < half.keypoints.size(); ++i) {
+            const auto& p = half.keypoints[i];
+            if (std::isfinite(half.confidence[i]) && half.confidence[i] >= threshold &&
+                std::isfinite(p.x) && std::isfinite(p.y) && p.x >= 0 && p.y >= 0 &&
+                p.x < frame.cols && p.y < frame.rows)
+                visible.push_back(p);
+        }
+        if (visible.size() < 3)
+            continue;
+        std::string color;
+        for (const auto& object : objects) {
+            const std::string candidate = object.label == "blue_safe_zone"  ? "blue"
+                                          : object.label == "red_safe_zone" ? "red"
+                                                                            : "";
+            if (candidate.empty() || !std::isfinite(object.confidence) || object.confidence <= 0 ||
+                object.confidence > 1 || object.box.empty())
+                continue;
+            const cv::Rect2f box(object.box);
+            if (!std::all_of(visible.begin(), visible.end(), [&](const auto& p) {
+                    return box.contains(p);
+                }))
+                continue;
+            if (!color.empty() && color != candidate) {
+                result.color.clear();
+                result.reason = "zone_detection_ambiguous";
+                return result;
+            }
+            color = candidate;
+        }
+        if (color.empty())
+            continue;
+        if (!result.color.empty() && result.color != color) {
+            result.color.clear();
+            result.reason = "zone_detection_halves_disagree";
+            return result;
+        }
+        result.color = color;
+        ++result.halves_used;
+    }
+    if (result.halves_used > 0) {
+        result.verified = true;
+        result.reason = "zone_detection";
+        return result;
+    }
+    if (!config_.measured)
+        return result;
     cv::Mat hsv;
     cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
     std::string colors[2];
@@ -133,6 +182,9 @@ ZoneColorResult ZoneColorClassifier::classify(const cv::Mat& frame,
         cv::fillConvexPoly(mask, polygon, 255);
         const int initial = cv::countNonZero(mask);
         for (const auto& object : objects) {
+            // Zone boxes describe the sampled surface; only foreground objects occlude it.
+            if (object.label == "blue_safe_zone" || object.label == "red_safe_zone")
+                continue;
             auto box = object.box;
             box.x -= 5;
             box.y -= 5;

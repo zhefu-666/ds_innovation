@@ -9,8 +9,8 @@ esac
 if (( $# > 1 )); then echo 'Only one mode is accepted.' >&2; exit 2; fi
 binary=build-release/rescue_upper_host
 common=(--config config/project.json --controlled-empty-field --search-cues --team blue --no-show
-  --calibration config/camera.yaml --model models/detect_fp.rknn
-  --pose-model-blue models/zone_pose_fp.rknn --startup-advance-ms 5000
+  --calibration config/camera.yaml --model models/detect_v5_int8.rknn
+  --pose-model models/zone_pose_int8.rknn --startup-advance-ms 5000
   --startup-speed 1 --scan-wz 3 --turn-wz 3)
 if [[ "$mode" == --check ]]; then exec "$binary" --check-config "${common[@]}"; fi
 # All static checks run before anything opens a device or moves the pitch servo.

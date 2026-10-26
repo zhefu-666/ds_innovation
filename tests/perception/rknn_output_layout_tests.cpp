@@ -34,6 +34,10 @@ void layoutTests() {
     auto two = validateRknnOutputLayout("two", {{1, 4, 8400}, {1, 4, 8400}});
     assert(two.channels == 8 && two.anchors == 8400);
 
+    auto six = validateRknnOutputLayout("six", {{1, 4, 8400}, {1, 6, 8400}});
+    assert(six.channels == 10 && six.anchors == 8400);
+    assert(validateRknnOutputLayout("six joined", {{1, 10, 8400}}).channels == 10);
+
     auto four = validateRknnOutputLayout(
         "four", {{1, 4, 8400}, {1, 2, 8400}, {1, 4, 2, 8400}, {1, 4, 1, 8400}});
     assert(four.channels == 18 && four.anchors == 8400);
@@ -77,6 +81,13 @@ void mergeTests() {
     for (int row = 0; row < 8; ++row)
         for (int i = 0; i < 3; ++i)
             assert(detector.ptr<float>()[row * 3 + i] ==
+                   (row < 4 ? row * 3 + i : 100 + (row - 4) * 3 + i));
+
+    auto six = mergeRknnOutputBranches({boxes, tensor({1, 6, 3}, 100)});
+    assert(six.size[1] == 10 && six.size[2] == 3);
+    for (int row = 0; row < 10; ++row)
+        for (int i = 0; i < 3; ++i)
+            assert(six.ptr<float>()[row * 3 + i] ==
                    (row < 4 ? row * 3 + i : 100 + (row - 4) * 3 + i));
 
     cv::Mat pose_boxes = tensor({1, 4, 2}, 0);

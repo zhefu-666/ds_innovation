@@ -191,6 +191,8 @@ class MultiViewCapture {
         }
         std::vector<cv::Rect> occupied;
         for (const auto& d : ds) {
+            if (d.label == "blue_safe_zone" || d.label == "red_safe_zone")
+                continue;
             if (!std::isfinite(d.confidence) || d.confidence < .1f)
                 continue;
             if (!d.timestamp_us || now < d.timestamp_us || now - d.timestamp_us > 200000) {

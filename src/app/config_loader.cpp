@@ -180,8 +180,8 @@ std::string fieldValue(const Field& field, const Json& value, const fs::path& di
     if (field.kind == Kind::Integer) {
         requireInteger(value, key, field.minimum, field.maximum);
         if ((key == "models.detect_core_mask" || key == "models.pose_core_mask") && value != -1 &&
-            value != 0 && value != 1 && value != 2 && value != 4)
-            invalid(key, "must be one of -1, 0, 1, 2, 4");
+            value != 0 && value != 1 && value != 2 && value != 3 && value != 4)
+            invalid(key, "must be one of -1, 0, 1, 2, 3, 4");
         if (key == "calibration.known_frame_angle" && value != 0 && value != 20)
             invalid(key, "must be 0 or 20");
         if (key == "hardware.imu_baud" && value != 9600 && value != 115200 && value != 230400 &&
