@@ -32,7 +32,7 @@
 <div class="actions"><button id="capture" disabled>拍摄并保存这一张</button><button id="undo" class="secondary" disabled>撤销上一张</button></div><p id="message"></p><p class="muted">照片目录</p><div class="path" id="session"></div><p class="muted">刷新页面不会丢失进度。最后 3 张用于独立验证，不参与内参拟合。</p></div></section>
 <div id="error" role="alert"></div>
 <section id="result" class="card hidden"><h2 id="resultTitle">相机参数已生成</h2><p id="summary"></p><div id="warnings" class="notice hidden"></div><pre id="numbers"></pre><p>无需手抄参数。下载的 <strong>intrinsics.yaml</strong> 包含 camera_matrix、dist_coeffs 和图像尺寸。</p><div class="actions"><a class="linkbtn" href="/intrinsics.yaml" download="intrinsics.yaml">下载参数 YAML</a><a href="/report.json" download="report.json" class="linkbtn secondary">下载误差报告</a><a href="/instructions.txt" download="使用说明.txt" class="linkbtn secondary">下载接入说明</a></div>
-<h2>参数填到哪里？</h2><ol><li>后续地面标定时，将本次 <code>intrinsics.yaml</code> 的路径填入标定命令的 <code>--intrinsics</code> 参数。</li><li>地面标定通过后，完整结果放到项目的 <code>config/camera.yaml</code>。</li><li>项目配置字段为 <code>calibration_file: ./config/camera.yaml</code>。当前主程序尚未接通 YAML 读取，填入路径不会自动启用距离计算。</li></ol><p class="notice">本次只求内参与镜头畸变。相机安装位置、朝向、地面映射需要另外测量；低重投影误差也不能代替实际距离验收。</p></section>
+<h2>参数填到哪里？</h2><ol><li>后续地面标定时，将本次 <code>intrinsics.yaml</code> 的路径填入标定命令的 <code>--intrinsics</code> 参数。</li><li>地面标定通过后，完整结果放到项目的 <code>config/camera.yaml</code>。</li><li>验收通过后，将 <code>config/project.json</code> 的 <code>calibration.calibration_file</code> 设置为 <code>camera.yaml</code>（相对 config 目录）；主程序通过 <code>--config config/project.json</code> 加载。</li></ol><p class="notice">本次只求内参与镜头畸变。相机安装位置、朝向、地面映射需要另外测量；低重投影误差也不能代替实际距离验收。</p></section>
 <footer>退出方式：SSH 终端按 Ctrl+C。已保存照片不会删除；中途更换标定板或改变相机焦点，请重新启动并完整重拍。</footer>
 </main>
 <script>

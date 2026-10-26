@@ -60,28 +60,11 @@ using Detection = SegDetection;
 #error "Packed UART packets require a little-endian target"
 #endif
 // 线上包：小端、1字节对齐。
-// 车体航向线上编码：0.01°，-18000..18000；-32768(00 80)表示IMU不可用，收端不得按角度解释。
-constexpr int16_t kImuYawInvalid = std::numeric_limits<int16_t>::min();
-constexpr int16_t kImuYawLimitCdeg = 18000;
-// 按航向归一化到(-180°,180°]再转0.01°；非有限值输出kImuYawInvalid。
-inline int16_t imuYawToWire(float yaw_rad) {
-    if (!std::isfinite(yaw_rad))
-        return kImuYawInvalid;
-    // yaw是相对航向，可能因积分或安装变换超出±180°，先归一化再编码。
-    constexpr float kPi = 3.14159265358979323846f;
-    float deg = std::fmod(yaw_rad * (180.0f / kPi), 360.0f);
-    if (deg <= -180.0f)
-        deg += 360.0f;
-    else if (deg > 180.0f)
-        deg -= 360.0f;
-    return static_cast<int16_t>(
-        std::clamp<long>(std::lround(deg * 100.0f), -kImuYawLimitCdeg, kImuYawLimitCdeg));
-}
 #pragma pack(push, 1)
 
-// 上位机 → 下位机：17字节，小端IEEE754 float32；CRC16/Modbus覆盖字节0..14。
+// 上位机 → 下位机：15字节，小端IEEE754 float32；CRC16/Modbus覆盖字节0..12。
 struct MotionPacket {
-    static constexpr size_t kSize = 17;
+    static constexpr size_t kSize = 15;
     static constexpr uint8_t kHeader = 0x56;
     uint8_t start_of_frame = kHeader;
     float vx_mps = 0.0f;       // m/s，正前进、负后退；协议层透传有限值
@@ -89,9 +72,7 @@ struct MotionPacket {
     int8_t gripper_offset = 0; // 线上偏移-5..+5：0=85°中位，+5=90°开，-5=80°关
     uint8_t gripper_action_id = 0; // 夹爪动作编号：仅目标变化时+1，1..255循环，0保留为“无动作”
     int16_t camera_pitch_offset = 0; // TX偏移-30..30；0=120°，+30=150°下，-30=90°上
-    // 新IMU样本的车体yaw，单位0.01°、-18000..18000；-32768=无新有效样本，不刷新IMU计时。
-    int16_t imu_yaw_cdeg = kImuYawInvalid;
-    uint16_t crc16 = 0; // Modbus CRC，覆盖字节0..14，初值FFFF、多项式A001，低字节在前
+    uint16_t crc16 = 0; // Modbus CRC，覆盖字节0..12，初值FFFF、多项式A001，低字节在前
 };
 
 // 下位机 → 上位机：8字节执行器反馈，以换行结尾便于串口助手按行显示；IMU直连，ToF暂未安装。
@@ -142,7 +123,7 @@ static_assert(sizeof(MotionPacket) == MotionPacket::kSize && offsetof(MotionPack
                   offsetof(MotionPacket, gripper_offset) == 9 &&
                   offsetof(MotionPacket, gripper_action_id) == 10 &&
                   offsetof(MotionPacket, camera_pitch_offset) == 11 &&
-                  offsetof(MotionPacket, imu_yaw_cdeg) == 13 && offsetof(MotionPacket, crc16) == 15,
+                  offsetof(MotionPacket, crc16) == 13,
               "MotionPacket wire layout mismatch");
 static_assert(sizeof(SensorPacket) == SensorPacket::kSize &&
                   offsetof(SensorPacket, gripper_action_id) == 2 &&
@@ -197,7 +178,7 @@ struct SafeZonePose {
 };
 
 // 算法业务请求；禁止直接发送sizeof(MotionCommand)，该结构可能包含对齐填充。
-// buildMotionPacket()序列化为17字节（含yaw、动作编号与CRC），sendMotion()负责串口发送。
+// buildMotionPacket()序列化为15字节（含动作编号与CRC），sendMotion()负责串口发送。
 struct MotionCommand {
     uint64_t frame_transaction =
         0; // changes only for a new logical request, including explicit retry
@@ -208,9 +189,6 @@ struct MotionCommand {
     int16_t gripper_offset = 0;
     int16_t camera_pitch_cdeg =
         0; // 相机偏移目标，0.01°，正值向下；TX除100并钳位±30度；RX绝对角减120转换为偏移
-    // 车体航向（body_rpy_rad[2]经安装变换），弧度；MotionLink仅为新有效样本填写，业务层无需填充。
-    // 默认NaN=未提供，编码为kImuYawInvalid；不能让“未填”变成看似合理的0°。
-    float imu_yaw_rad = std::numeric_limits<float>::quiet_NaN();
 };
 
 } // namespace rescue

@@ -34,7 +34,7 @@ def formatter():
     executable = str(bundled) if bundled.is_file() else shutil.which("clang-format")
     if not executable:
         raise RuntimeError(
-            "clang-format 18.1.8 not found; install the pinned tool as described in docs/FORMATTING.md"
+            "clang-format 18.1.8 not found; install the pinned tool as described in README.md (formatting section)"
         )
     result = subprocess.run(
         [executable, "--version"], check=True, capture_output=True, text=True

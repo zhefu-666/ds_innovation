@@ -5,7 +5,7 @@
   "legacy_revision": "bd73a38cea79533807259be1f81be266958dd842",
   "legacy_binary_sha256": "2be9928092d725eb089f98a384f522e57b65dc24cc2e789cf05f2b0a800ad582",
   "evidence": [
-    "docs/validation/CAT_HOST_20261020.md",
+    "tests/fixtures/doc_evidence/CAT_HOST_20261020.md",
     "reports/refactor-validation/cat-20261020-r4-turn/evidence/arm-legacy-comparison.json"
   ],
   "geometry_stdout": {

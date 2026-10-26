@@ -21,8 +21,6 @@ def packet(vx, wz, angle, action_id, pitch_rx):
         raise ValueError('Invalid actuator command')
     # Logical targets map to signed TX +5/-5; A6 semantics require separate confirmation.
     data = struct.pack('<BffbBh', 0x56, vx, wz, 5 if angle == 0 else -5, action_id, max(-30, min(30, pitch_rx - 120)))
-    # 本工具不接IMU：航向字段固定写无效值，下位机不得按角度解释。
-    data += struct.pack('<h', frame.IMU_YAW_INVALID)
     return data + struct.pack('<H', frame.crc16(data))
 
 

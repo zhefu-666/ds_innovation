@@ -49,17 +49,11 @@ FRAME_MAPPING = None
 FRAME_KNOWN = None  # done_flag模式：(操作者记录的方框角度, 编号)
 FRAME_HOLD_STATE = None
 
-# 线上航向字段 0.01°、-18000..18000；-32768 表示IMU不可用。
-IMU_YAW_INVALID = -32768
-
-
 def motion_packet(gripper_open, action_id, pitch):
     if gripper_open not in (0, 1):
         raise ValueError('A6夹爪状态必须是0或1')
     # Preserve binary A6 state by mapping to the signed TX target offset.
     b = struct.pack('<BffbBh', 0x56, 0.0, 0.0, 5 if gripper_open else -5, action_id, max(-30, min(30, int(round(pitch / 100)) - 120)))
-    # 本工具不接IMU：航向字段固定写无效值，下位机不得按角度解释。
-    b += struct.pack('<h', IMU_YAW_INVALID)
     return b + struct.pack('<H', crc16(b))
 
 

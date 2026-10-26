@@ -59,7 +59,7 @@ void printUsage(const char* program) {
         << "  --push-replay PATH  Replay validated task observations without camera or serial\n"
         << "  --geometry-replay P Pixel/IMU/pitch geometry replay; no devices or model\n"
         << "  --calibration PATH Validated camera ground calibration, bound to actual pitch\n"
-        << "  --zone-geometry P  Fixed landmark schema (default config/zone_geometry.json)\n"
+        << "  --zone-geometry P  Fixed landmark schema (default config/project.json#/zone_geometry)\n"
         << "  --pitch-feedback   Open MCU feedback read-only for synchronized ground mapping\n"
         << "  --keypoints-file P Optional atomic same-frame landmark JSON (no box-derived points)\n"
         << "  --model PATH        Detector model, default models/detect_hybrid_20261015.rknn\n"

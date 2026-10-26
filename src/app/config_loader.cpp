@@ -259,7 +259,16 @@ Json readJson(const std::string& path) {
 
 std::vector<std::string> fileArguments(AppConfigOptions& options) {
     try {
-        const auto root = readJson(options.config_file);
+        const auto marker = options.config_file.find('#');
+        const auto file = options.config_file.substr(0, marker);
+        const auto document = readJson(file);
+        Json root = document;
+        if (marker != std::string::npos) {
+            const auto pointer = options.config_file.substr(marker + 1);
+            if (pointer.empty() || pointer.front() != '/')
+                throw std::runtime_error("Configuration fragment must use #/path");
+            root = document.at(Json::json_pointer(pointer));
+        }
         if (!root.is_object())
             invalid("root", "must be an object");
         const std::set<std::string> root_keys{"schema_version",
@@ -312,7 +321,7 @@ std::vector<std::string> fileArguments(AppConfigOptions& options) {
             }
         }
         std::vector<std::string> arguments;
-        const auto directory = fs::path(options.config_file).parent_path();
+        const auto directory = fs::path(file).parent_path();
         for (const auto& field : fields()) {
             if (!root.contains(field.group) || !root.at(field.group).contains(field.name))
                 continue;

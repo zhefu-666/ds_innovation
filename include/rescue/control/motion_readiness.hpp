@@ -36,7 +36,8 @@ inline bool stationaryPitchWork(const PushOutput& previous, const std::string& r
     }
 }
 inline void inhibitUnmappedMotion(MotionCommand& motion, bool mapping_valid) {
-    if (!mapping_valid)
+    if (!mapping_valid) {
         motion.vx_mps = motion.wz_rps = 0;
+    }
 }
 } // namespace rescue

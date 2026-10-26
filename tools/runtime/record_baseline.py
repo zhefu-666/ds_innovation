@@ -12,6 +12,26 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# Retired configs and protocol fixtures retain the exact frozen bytes.
+# Current protocol fixtures remain separate and continue to test current behavior.
+LEGACY_RESOURCE_PATHS = {
+    "tests/fixtures/frame_mapping.synthetic.json": "tests/fixtures/legacy_config/frame_mapping.synthetic.json",
+    "config/frame_20261008.demo.json": "tests/fixtures/legacy_config/frame_20261008.demo.json",
+    "config/task_calibration.40_candidate.json": "tests/fixtures/legacy_config/task_calibration.40_candidate.json",
+    "config/demo_20261007.json": "tests/fixtures/legacy_config/demo_20261007.json",
+    "config/demo_20261008.assume.json": "tests/fixtures/legacy_config/demo_20261008.assume.json",
+    "config/demo_acceptance.pending.json": "tests/fixtures/legacy_config/demo_acceptance.pending.json",
+    "config/demo_acceptance.assume.json": "tests/fixtures/legacy_config/demo_acceptance.assume.json",
+    "config/frame_20261007.pending.json": "tests/fixtures/legacy_config/frame_20261007.pending.json",
+    "config/frame_20261008.assume.json": "tests/fixtures/legacy_config/frame_20261008.assume.json",
+    "config/task_calibration.40_runtime.json": "tests/fixtures/legacy_config/task_calibration.40_runtime.json",
+    "config/task_calibration.example.json": "tests/fixtures/legacy_config/task_calibration.example.json",
+    "config/zone_color.field.json": "tests/fixtures/legacy_config/zone_color.field.json",
+    "config/zone_color.example.json": "tests/fixtures/legacy_config/zone_color.example.json",
+    "config/zone_geometry.json": "tests/fixtures/legacy_config/zone_geometry.json",
+    "config/rescue.yaml": "tests/fixtures/legacy_config/rescue.yaml",
+    "config/runtime/preview.json": "tests/fixtures/legacy_config/runtime/preview.json"
+}
 CASES = {
     "push_delivery": ["--startup-advance-ms", "0", "--pitch-presets", "500,500,4000",
                       "--push-replay", "tests/fixtures/push_delivery.json"],
@@ -46,7 +66,9 @@ def digest(path):
 def capture(binary):
     cases = {}
     for name, arguments in CASES.items():
-        result = subprocess.run([str(binary), *arguments], cwd=ROOT,
+        # Execute relocated fixtures; preserve logical arguments in frozen comparisons.
+        executed = [LEGACY_RESOURCE_PATHS.get(value, value) for value in arguments]
+        result = subprocess.run([str(binary), *executed], cwd=ROOT,
                                 capture_output=True, text=True, timeout=30)
         cases[name] = {"args": arguments, "returncode": result.returncode,
                        "stdout": result.stdout, "stderr": result.stderr}
@@ -181,7 +203,7 @@ def load_baseline(path, platform_baseline=None, machine=None, protocol_baseline=
 def comparison_failures(cases, baseline, root=ROOT):
     failures = []
     for relative, expected_hash in baseline.get("resources_sha256", {}).items():
-        resource = root / relative
+        resource = root / LEGACY_RESOURCE_PATHS.get(relative, relative)
         if not resource.is_file() or digest(resource) != expected_hash:
             failures.append(f"{relative}: baseline resource differs")
     for name, actual in cases.items():

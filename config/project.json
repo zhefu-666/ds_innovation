@@ -129,7 +129,7 @@
       "model": "../models/detect_int8_split_20261022.rknn",
       "pose_model": "../models/zone_pose_int8_split_20261022.rknn",
       "rknn_library": "../benchmark_results/librknnrt.so",
-      "camera_calibration": "project.json#/paths/camera.mechanical_5_40",
+      "camera_calibration": "project.json#/paths/camera_mechanical_5_40",
       "zone_geometry": "project.json#/zone_geometry",
       "team": "blue",
       "camera": 0,
@@ -615,8 +615,8 @@
         "fps": 60
       },
       "models": {
-        "rknn_library": "../../benchmark_results/librknnrt.so",
-        "model_path": "../../models/detect_fp.rknn",
+        "rknn_library": "../benchmark_results/librknnrt.so",
+        "model_path": "../models/detect_fp.rknn",
         "input_size": 640,
         "confidence": 0.5,
         "injured_confidence": 0.25,
@@ -629,7 +629,7 @@
         ]
       },
       "calibration": {
-        "zone_geometry_file": "../zone_geometry.json",
+        "zone_geometry_file": "project.json#/zone_geometry",
         "pitch_presets_cdeg": [
           500,
           500,
@@ -658,7 +658,7 @@
         ]
       },
       "runtime": {
-        "push_replay": "../../tests/fixtures/push_delivery.json",
+        "push_replay": "../tests/fixtures/push_delivery.json",
         "show": false
       }
     }
