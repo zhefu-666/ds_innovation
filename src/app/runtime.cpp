@@ -244,9 +244,9 @@ int Runtime::run() {
     std::unique_ptr<HipnucImu> imu;
     if (config.imu) {
         imu = std::make_unique<HipnucImu>(config.imu_port, config.imu_baud, config.imu_timeout_ms);
-        std::cout
-            << "[IMU] " << config.imu_port << " @ " << config.imu_baud
-            << " HI91; body axes via roll-180 mounting (2026-09-27), firmware status unverified\n";
+        std::cout << "[IMU] " << config.imu_port << " @ " << config.imu_baud
+                  << " HI91; body axes via Y-180 mounting (2026-10-26; X rear, Z down), firmware "
+                     "status unverified\n";
     }
     // 车体安全：IMU过期/数值异常/倾斜超过imu_tilt_limit_deg时否决safety_ok。
     SensorFusion fusion(

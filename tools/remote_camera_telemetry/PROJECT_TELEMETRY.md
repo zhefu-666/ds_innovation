@@ -107,12 +107,16 @@ Python 服务复用板子已有 OpenCV 4.6 和 websockets 10.4，读取该快照
 ## 构建与验证
 
 ```bash
-cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DRESCUE_ENABLE_TELEMETRY=ON
-cmake --build build-release -j4
-ctest --test-dir build-release --output-on-failure
+cmake --preset cat-release
+cmake --build --preset cat-release
+ctest --preset cat-release
 python3 tools/remote_camera_telemetry/test_project_bridge.py
 ```
 
 编译选项默认 OFF；未编入遥测的二进制仍支持原有功能，传入 `--telemetry` 会明确报错。只运行 `--dry-run` 时不会创建遥测线程或快照。
 
 修改前备份：`/home/cat/ds_telemetry_backup_20260926.tar.gz`。旧构建 `build-arm64-protocol-20260925` 未覆盖。需要恢复原始相机预览时，先停止项目查看，再启动 `/home/cat/camera-telemetry/server.py`。
+
+板端 `cat-release` 使用 Ninja、Release、RKNN 和遥测，默认 4 并行；其他机器可使用
+共享 `release`，需 CMake 3.21+ 和 Ninja。正式二进制路径仍为 `build-release/rescue_upper_host`。
+从 Make 首次迁移先备份旧构建，再在原路径重新配置。

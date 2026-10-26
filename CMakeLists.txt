@@ -26,6 +26,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Use ccache when available; respect an explicitly supplied compiler launcher.
+option(RESCUE_ENABLE_CCACHE "Use ccache for C++ compilation when available" ON)
+if(RESCUE_ENABLE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(RESCUE_CCACHE_PROGRAM NAMES ccache HINTS "$ENV{HOME}/.local/bin")
+    if(RESCUE_CCACHE_PROGRAM)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${RESCUE_CCACHE_PROGRAM}")
+        message(STATUS "C++ compiler cache: ${RESCUE_CCACHE_PROGRAM}")
+    else()
+        message(STATUS "ccache not found; compiling without a compiler cache")
+    endif()
+endif()
+
+
 find_package(OpenCV REQUIRED)
 find_package(nlohmann_json 3.6.0 REQUIRED)
 
@@ -35,6 +48,19 @@ set(RESCUE_TASK_SOURCES src/task/push_task.cpp src/task/capture_verification_sta
     src/task/disperse_rush_stage.cpp src/task/recovery_stage.cpp src/task/search_stage.cpp
     src/task/enter_stage.cpp src/task/disperse_cluster_stage.cpp src/task/carry_approach_stage.cpp
     src/task/carry_search_stage.cpp src/task/sweep_trigger_stage.cpp src/task/sweep_stage.cpp)
+
+# Keep assertions enabled in shared test code, independently of the Release app.
+# Static linking pulls only the task/geometry objects needed by each test.
+if(BUILD_TESTING)
+    add_library(rescue_test_task_common STATIC
+        ${RESCUE_TASK_SOURCES}
+        src/task/transport_rules.cpp
+        src/geometry/zone_estimate.cpp
+    )
+    target_include_directories(rescue_test_task_common PUBLIC include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_test_task_common PUBLIC ${OpenCV_LIBS})
+    target_compile_options(rescue_test_task_common PRIVATE -UNDEBUG -Wall -Wextra)
+endif()
 
 add_library(rescue_app_config STATIC
     src/app/config_loader.cpp
@@ -140,7 +166,6 @@ if(BUILD_TESTING)
 
     add_executable(rescue_core_tests tests/rescue_core_tests.cpp
         src/core/types.cpp
-        src/geometry/zone_estimate.cpp
         src/geometry/zone_geometry.cpp
         src/perception/tracker.cpp
         src/geometry/camera_calibration.cpp
@@ -152,194 +177,168 @@ if(BUILD_TESTING)
         src/hardware/hipnuc_imu.cpp
         src/core/logger.cpp
         src/hardware/uart_controller.cpp
-        src/core/utils.cpp
-    )
+        src/core/utils.cpp)
     target_include_directories(rescue_core_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${OpenCV_INCLUDE_DIRS}
     )
-    target_link_libraries(rescue_core_tests PRIVATE ${OpenCV_LIBS} pthread)
+    target_link_libraries(rescue_core_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS} pthread)
     target_compile_options(rescue_core_tests PRIVATE -UNDEBUG)
     add_test(NAME rescue_core_tests COMMAND rescue_core_tests)
 endif()
 
 if(BUILD_TESTING)
-    add_executable(rescue_disperse_swing_stage_tests tests/disperse_swing_stage_tests.cpp
-        src/task/disperse_swing_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_disperse_swing_stage_tests tests/disperse_swing_stage_tests.cpp)
     target_include_directories(rescue_disperse_swing_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_disperse_swing_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_disperse_swing_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_disperse_swing_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_disperse_swing_stage_tests COMMAND rescue_disperse_swing_stage_tests)
 
-    add_executable(rescue_disperse_swing_task_integration_tests tests/disperse_swing_task_integration_tests.cpp
-        ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_disperse_swing_task_integration_tests tests/disperse_swing_task_integration_tests.cpp)
     target_include_directories(rescue_disperse_swing_task_integration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_disperse_swing_task_integration_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_disperse_swing_task_integration_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_disperse_swing_task_integration_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_disperse_swing_task_integration_tests COMMAND rescue_disperse_swing_task_integration_tests)
     set_tests_properties(rescue_disperse_swing_stage_tests rescue_disperse_swing_task_integration_tests PROPERTIES TIMEOUT 10)
 
-    add_executable(rescue_disperse_rush_stage_tests tests/disperse_rush_stage_tests.cpp
-        src/task/disperse_rush_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_disperse_rush_stage_tests tests/disperse_rush_stage_tests.cpp)
     target_include_directories(rescue_disperse_rush_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_disperse_rush_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_disperse_rush_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_disperse_rush_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_disperse_rush_stage_tests COMMAND rescue_disperse_rush_stage_tests)
 
-    add_executable(rescue_disperse_rush_task_integration_tests tests/disperse_rush_task_integration_tests.cpp
-        ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_disperse_rush_task_integration_tests tests/disperse_rush_task_integration_tests.cpp)
     target_include_directories(rescue_disperse_rush_task_integration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_disperse_rush_task_integration_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_disperse_rush_task_integration_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_disperse_rush_task_integration_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_disperse_rush_task_integration_tests COMMAND rescue_disperse_rush_task_integration_tests)
     set_tests_properties(rescue_disperse_rush_stage_tests rescue_disperse_rush_task_integration_tests PROPERTIES TIMEOUT 10)
 
-    add_executable(rescue_disperse_turn_stage_tests tests/disperse_turn_stage_tests.cpp
-        src/task/disperse_turn_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_disperse_turn_stage_tests tests/disperse_turn_stage_tests.cpp)
     target_include_directories(rescue_disperse_turn_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_disperse_turn_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_disperse_turn_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_disperse_turn_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_disperse_turn_stage_tests COMMAND rescue_disperse_turn_stage_tests)
 
-    add_executable(rescue_disperse_turn_task_integration_tests tests/disperse_turn_task_integration_tests.cpp
-        ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_disperse_turn_task_integration_tests tests/disperse_turn_task_integration_tests.cpp)
     target_include_directories(rescue_disperse_turn_task_integration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_disperse_turn_task_integration_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_disperse_turn_task_integration_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_disperse_turn_task_integration_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_disperse_turn_task_integration_tests COMMAND rescue_disperse_turn_task_integration_tests)
     set_tests_properties(rescue_disperse_turn_stage_tests rescue_disperse_turn_task_integration_tests PROPERTIES TIMEOUT 10)
 
-    add_executable(rescue_sweep_ledger_tests tests/sweep_ledger_tests.cpp
-        src/task/sweep_ledger.cpp)
+    add_executable(rescue_sweep_ledger_tests tests/sweep_ledger_tests.cpp)
     target_include_directories(rescue_sweep_ledger_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_sweep_ledger_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_sweep_ledger_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_sweep_ledger_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_sweep_ledger_tests COMMAND rescue_sweep_ledger_tests)
 
-    add_executable(rescue_sweep_task_integration_tests tests/sweep_task_integration_tests.cpp
-        ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_sweep_task_integration_tests tests/sweep_task_integration_tests.cpp)
     target_include_directories(rescue_sweep_task_integration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_sweep_task_integration_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_sweep_task_integration_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_sweep_task_integration_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_sweep_task_integration_tests COMMAND rescue_sweep_task_integration_tests)
     set_tests_properties(rescue_sweep_ledger_tests rescue_sweep_task_integration_tests PROPERTIES TIMEOUT 10)
 
-    add_executable(rescue_push_in_stage_tests tests/push_in_stage_tests.cpp
-        src/task/push_in_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_push_in_stage_tests tests/push_in_stage_tests.cpp)
     target_include_directories(rescue_push_in_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_push_in_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_push_in_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_push_in_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_push_in_stage_tests COMMAND rescue_push_in_stage_tests)
 
-    add_executable(rescue_push_in_task_integration_tests tests/push_in_task_integration_tests.cpp
-        ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_push_in_task_integration_tests tests/push_in_task_integration_tests.cpp)
     target_include_directories(rescue_push_in_task_integration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_push_in_task_integration_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_push_in_task_integration_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_push_in_task_integration_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_push_in_task_integration_tests COMMAND rescue_push_in_task_integration_tests)
     set_tests_properties(rescue_push_in_stage_tests rescue_push_in_task_integration_tests PROPERTIES TIMEOUT 10)
 
-    add_executable(rescue_release_stage_tests tests/release_stage_tests.cpp
-        src/task/release_retreat_stage.cpp)
+    add_executable(rescue_release_stage_tests tests/release_stage_tests.cpp)
     target_include_directories(rescue_release_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_release_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_release_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_release_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_release_stage_tests COMMAND rescue_release_stage_tests)
 
-    add_executable(rescue_release_task_integration_tests tests/release_task_integration_tests.cpp
-        ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_release_task_integration_tests tests/release_task_integration_tests.cpp)
     target_include_directories(rescue_release_task_integration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_release_task_integration_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_release_task_integration_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_release_task_integration_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_release_task_integration_tests COMMAND rescue_release_task_integration_tests)
     set_tests_properties(rescue_release_stage_tests rescue_release_task_integration_tests PROPERTIES TIMEOUT 10)
 
-    add_executable(rescue_recovery_stage_tests tests/recovery_stage_tests.cpp
-        src/task/recovery_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_recovery_stage_tests tests/recovery_stage_tests.cpp)
     target_include_directories(rescue_recovery_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_recovery_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_recovery_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_recovery_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_recovery_stage_tests COMMAND rescue_recovery_stage_tests)
-    add_executable(rescue_enter_stage_tests tests/enter_stage_tests.cpp
-        src/task/enter_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_enter_stage_tests tests/enter_stage_tests.cpp)
     target_include_directories(rescue_enter_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_enter_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_enter_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_enter_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_enter_stage_tests COMMAND rescue_enter_stage_tests)
-    add_executable(rescue_disperse_cluster_stage_tests tests/disperse_cluster_stage_tests.cpp
-        src/task/disperse_cluster_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_disperse_cluster_stage_tests tests/disperse_cluster_stage_tests.cpp)
     target_include_directories(rescue_disperse_cluster_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_disperse_cluster_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_disperse_cluster_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_disperse_cluster_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_disperse_cluster_stage_tests COMMAND rescue_disperse_cluster_stage_tests)
-    add_executable(rescue_carry_approach_stage_tests tests/carry_approach_stage_tests.cpp
-        src/task/carry_approach_stage.cpp src/task/carry_search_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_carry_approach_stage_tests tests/carry_approach_stage_tests.cpp)
     target_include_directories(rescue_carry_approach_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_carry_approach_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_carry_approach_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_carry_approach_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_carry_approach_stage_tests COMMAND rescue_carry_approach_stage_tests)
-    add_executable(rescue_carry_search_stage_tests tests/carry_search_stage_tests.cpp
-        src/task/carry_search_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_carry_search_stage_tests tests/carry_search_stage_tests.cpp)
     target_include_directories(rescue_carry_search_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_carry_search_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_carry_search_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_carry_search_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_carry_search_stage_tests COMMAND rescue_carry_search_stage_tests)
-    add_executable(rescue_sweep_trigger_stage_tests tests/sweep_trigger_stage_tests.cpp
-        src/task/sweep_trigger_stage.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_sweep_trigger_stage_tests tests/sweep_trigger_stage_tests.cpp)
     target_include_directories(rescue_sweep_trigger_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_sweep_trigger_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_sweep_trigger_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_sweep_trigger_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_sweep_trigger_stage_tests COMMAND rescue_sweep_trigger_stage_tests)
-    add_executable(rescue_search_stage_tests tests/search_stage_tests.cpp
-        src/task/search_stage.cpp src/task/sweep_ledger.cpp src/task/disperse_turn_stage.cpp
-        src/task/disperse_swing_stage.cpp src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_search_stage_tests tests/search_stage_tests.cpp)
     target_include_directories(rescue_search_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_search_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_search_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_search_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_search_stage_tests COMMAND rescue_search_stage_tests)
-    add_executable(rescue_sweep_stage_tests tests/sweep_stage_tests.cpp
-        src/task/sweep_stage.cpp src/task/sweep_ledger.cpp src/task/disperse_rush_stage.cpp
-        src/task/disperse_turn_stage.cpp src/task/disperse_swing_stage.cpp src/task/transport_rules.cpp
-        src/geometry/zone_estimate.cpp)
+    add_executable(rescue_sweep_stage_tests tests/sweep_stage_tests.cpp)
     target_include_directories(rescue_sweep_stage_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_sweep_stage_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_sweep_stage_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_sweep_stage_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_sweep_stage_tests COMMAND rescue_sweep_stage_tests)
 
-    add_executable(rescue_delivery_verification_tests tests/delivery_verification_tests.cpp
-        src/task/delivery_verification_stage.cpp src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_delivery_verification_tests tests/delivery_verification_tests.cpp)
     target_include_directories(rescue_delivery_verification_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_delivery_verification_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_delivery_verification_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_delivery_verification_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_delivery_verification_tests COMMAND rescue_delivery_verification_tests)
 
-    add_executable(rescue_delivery_task_integration_tests tests/delivery_task_integration_tests.cpp
-        ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_delivery_task_integration_tests tests/delivery_task_integration_tests.cpp)
     target_include_directories(rescue_delivery_task_integration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_delivery_task_integration_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_delivery_task_integration_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_delivery_task_integration_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_delivery_task_integration_tests COMMAND rescue_delivery_task_integration_tests)
     set_tests_properties(rescue_delivery_verification_tests rescue_delivery_task_integration_tests PROPERTIES TIMEOUT 10)
 
-    add_executable(rescue_capture_verification_tests tests/capture_verification_tests.cpp
-        src/task/capture_verification_stage.cpp src/task/transport_rules.cpp)
+    add_executable(rescue_capture_verification_tests tests/capture_verification_tests.cpp)
     target_include_directories(rescue_capture_verification_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_capture_verification_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_capture_verification_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_capture_verification_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_capture_verification_tests COMMAND rescue_capture_verification_tests)
 
-    add_executable(rescue_capture_task_integration_tests tests/capture_task_integration_tests.cpp
-        ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_capture_task_integration_tests tests/capture_task_integration_tests.cpp)
     target_include_directories(rescue_capture_task_integration_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_capture_task_integration_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_capture_task_integration_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_capture_task_integration_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_capture_task_integration_tests COMMAND rescue_capture_task_integration_tests)
     set_tests_properties(rescue_capture_verification_tests rescue_capture_task_integration_tests PROPERTIES TIMEOUT 10)
 
-    add_executable(rescue_push_tests tests/push_task_tests.cpp ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp
-        src/perception/capture_monitor.cpp src/core/types.cpp src/config/config.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_push_tests tests/push_task_tests.cpp
+        src/perception/capture_monitor.cpp
+        src/core/types.cpp
+        src/config/config.cpp)
     target_include_directories(rescue_push_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_push_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_push_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     # These regression tests use assert, including in Release builds.
     target_compile_options(rescue_push_tests PRIVATE -UNDEBUG)
     add_test(NAME rescue_push_tests COMMAND rescue_push_tests)
@@ -350,10 +349,12 @@ if(BUILD_TESTING)
 endif()
 
 if(BUILD_TESTING)
-    add_executable(rescue_vision_tests tests/model_io_tests.cpp src/perception/model_io.cpp src/perception/perception_adapter.cpp src/task/transport_rules.cpp
+    add_executable(rescue_vision_tests tests/model_io_tests.cpp
+        src/perception/model_io.cpp
+        src/perception/perception_adapter.cpp
         src/perception/zone_keypoints.cpp)
     target_include_directories(rescue_vision_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_vision_tests PRIVATE rescue_rknn ${OpenCV_LIBS} ${CMAKE_DL_LIBS})
+    target_link_libraries(rescue_vision_tests PRIVATE rescue_test_task_common rescue_rknn ${OpenCV_LIBS} ${CMAKE_DL_LIBS})
     target_compile_options(rescue_vision_tests PRIVATE -UNDEBUG)
     add_test(NAME rescue_vision_tests COMMAND rescue_vision_tests)
 
@@ -379,9 +380,10 @@ if(BUILD_TESTING)
 endif()
 
 if(BUILD_TESTING AND RESCUE_ENABLE_TELEMETRY)
-    add_executable(rescue_telemetry_tests tests/telemetry_tests.cpp src/telemetry/telemetry_publisher.cpp ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_telemetry_tests tests/telemetry_tests.cpp
+        src/telemetry/telemetry_publisher.cpp)
     target_include_directories(rescue_telemetry_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_telemetry_tests PRIVATE rescue_app_config ${OpenCV_LIBS} pthread nlohmann_json::nlohmann_json)
+    target_link_libraries(rescue_telemetry_tests PRIVATE rescue_test_task_common rescue_app_config ${OpenCV_LIBS} pthread nlohmann_json::nlohmann_json)
     target_compile_options(rescue_telemetry_tests PRIVATE -UNDEBUG)
     add_test(NAME rescue_telemetry_tests COMMAND rescue_telemetry_tests)
     set_tests_properties(rescue_telemetry_tests PROPERTIES TIMEOUT 10)
@@ -403,12 +405,18 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(rescue_stage01_tests tests/stage01_tests.cpp
-        src/geometry/zone_estimate.cpp src/geometry/zone_geometry.cpp src/perception/keypoint_filter.cpp
-        src/geometry/ground_pose_fitter.cpp src/geometry/geometry_pipeline.cpp src/perception/silhouette.cpp src/geometry/camera_calibration.cpp
-        src/geometry/safe_zone_pose.cpp src/geometry/zone_layout.cpp ${RESCUE_TASK_SOURCES} src/task/transport_rules.cpp
-        src/hardware/uart_controller.cpp src/core/utils.cpp)
+        src/geometry/zone_geometry.cpp
+        src/perception/keypoint_filter.cpp
+        src/geometry/ground_pose_fitter.cpp
+        src/geometry/geometry_pipeline.cpp
+        src/perception/silhouette.cpp
+        src/geometry/camera_calibration.cpp
+        src/geometry/safe_zone_pose.cpp
+        src/geometry/zone_layout.cpp
+        src/hardware/uart_controller.cpp
+        src/core/utils.cpp)
     target_include_directories(rescue_stage01_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_stage01_tests PRIVATE ${OpenCV_LIBS} pthread)
+    target_link_libraries(rescue_stage01_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS} pthread)
     target_compile_options(rescue_stage01_tests PRIVATE -UNDEBUG -Wall -Wextra)
     target_compile_definitions(rescue_stage01_tests PRIVATE ZONE_GEOMETRY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/zone_geometry.json"
         LEGACY_ZONE_GEOMETRY_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/zone_geometry_inner_v1.json")
@@ -446,10 +454,12 @@ if(BUILD_TESTING)
 endif()
 
 if(BUILD_TESTING)
-    add_executable(rescue_navigation_tests tests/navigation_tests.cpp src/geometry/planner.cpp src/geometry/navigation_adapter.cpp
-        src/geometry/zone_geometry.cpp src/geometry/zone_estimate.cpp)
+    add_executable(rescue_navigation_tests tests/navigation_tests.cpp
+        src/geometry/planner.cpp
+        src/geometry/navigation_adapter.cpp
+        src/geometry/zone_geometry.cpp)
     target_include_directories(rescue_navigation_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_navigation_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_navigation_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_navigation_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_navigation_tests COMMAND rescue_navigation_tests)
     set_tests_properties(rescue_navigation_tests PROPERTIES TIMEOUT 20)
@@ -465,9 +475,10 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(rescue_controlled_field_tests tests/controlled_field_tests.cpp
-        src/control/controlled_field.cpp src/geometry/zone_geometry.cpp src/geometry/zone_estimate.cpp src/task/transport_rules.cpp)
+        src/control/controlled_field.cpp
+        src/geometry/zone_geometry.cpp)
     target_include_directories(rescue_controlled_field_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_controlled_field_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_controlled_field_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_controlled_field_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_controlled_field_tests COMMAND rescue_controlled_field_tests)
 endif()
@@ -495,9 +506,9 @@ if(BUILD_TESTING)
 endif()
 
 if(BUILD_TESTING)
-    add_executable(rescue_mechanical_tests tests/mechanical_integration_tests.cpp src/task/transport_rules.cpp)
+    add_executable(rescue_mechanical_tests tests/mechanical_integration_tests.cpp)
     target_include_directories(rescue_mechanical_tests PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(rescue_mechanical_tests PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(rescue_mechanical_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
     target_compile_options(rescue_mechanical_tests PRIVATE -UNDEBUG -Wall -Wextra)
     add_test(NAME rescue_mechanical_tests COMMAND rescue_mechanical_tests)
 endif()

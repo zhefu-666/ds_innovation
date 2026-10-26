@@ -18,7 +18,8 @@ int main(int argc, char** argv) {
         std::signal(SIGTERM, signalHandler);
         HipnucImu imu(port, baud);
         std::cout << "HiPNUC HI91 monitor: " << port << " @ " << baud
-                  << "; body_* = base_link FLU after mounting (roll 180 deg), raw_* = device axes; "
+                  << "; body_* = base_link FLU after mounting (Y 180 deg; X rear, Z down), raw_* = "
+                     "device axes; "
                      "SI units; no serial writes\n";
         auto end = Clock::now() + std::chrono::seconds(seconds);
         while (!g_should_exit.load() && Clock::now() < end) {
