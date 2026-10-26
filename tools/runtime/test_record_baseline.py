@@ -266,6 +266,27 @@ class PlatformBaselineTests(unittest.TestCase):
         self.assertEqual(baseline_tool.comparison_failures(expected["cases"], expected, self.temporary),
                          ["resource: baseline resource differs"])
 
+    def test_retired_config_resources_are_checked_at_their_fixture_paths(self):
+        for original, archived in baseline_tool.LEGACY_RESOURCE_PATHS.items():
+            with self.subTest(resource=original):
+                resource = baseline_tool.ROOT / archived
+                if original.startswith("config/"):
+                    self.assertFalse((baseline_tool.ROOT / original).exists())
+                # Archived bytes must match the frozen resource, including legacy protocol fixtures.
+                self.assertEqual(baseline_tool.digest(resource), self.baseline["resources_sha256"][original])
+                self.assertIn(original, self.baseline["resources_sha256"])
+                expected = {"cases": {}, "resources_sha256": {
+                    original: baseline_tool.digest(resource)}}
+                fixture = self.temporary / archived
+                fixture.parent.mkdir(parents=True, exist_ok=True)
+                fixture.write_bytes(resource.read_bytes())
+                self.assertEqual(baseline_tool.comparison_failures({}, expected, self.temporary), [])
+                fixture.write_text("changed")
+                failure = [f"{original}: baseline resource differs"]
+                self.assertEqual(baseline_tool.comparison_failures({}, expected, self.temporary), failure)
+                fixture.unlink()
+                self.assertEqual(baseline_tool.comparison_failures({}, expected, self.temporary), failure)
+
     def test_record_cannot_use_platform_expectations(self):
         output = self.temporary / "record.json"
         result = subprocess.run([sys.executable, str(Path(baseline_tool.__file__)), "missing-binary",

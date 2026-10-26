@@ -314,27 +314,13 @@ int Runtime::run() {
                                        : "a6_state_mapping")
                       << "\n";
         }
-        // 序号与车体yaw取自同一份新鲜快照；MotionLink只在新样本首次成功发送时携带有效yaw。
-        link = std::make_unique<MotionLink>(
-            *feedback,
-            resolved.motion_link,
-            [&match] {
-                return match.status(imuNowUs()).permit;
-            },
-            [&imu]() -> MotionYawSample {
-                if (!imu)
-                    return {};
-                const auto snap = imu->snapshot();
-                const float yaw = snap.sample.body_rpy_rad[2];
-                if (!(snap.connected && snap.fresh && snap.sample.measurements_valid &&
-                      std::isfinite(yaw)))
-                    return {};
-                return {snap.sample.sequence, yaw};
-            });
-        std::cout << "[MCU] " << config.uart_port
-                  << " output enabled; 25 Hz resend, zero velocity after 150 ms stall; new IMU "
-                     "sample yaw only; "
-                     "repeat/invalid=-32768\n";
+        link = std::make_unique<MotionLink>(*feedback, resolved.motion_link, [&match] {
+            return match.status(imuNowUs()).permit;
+        });
+        std::cout
+            << "[MCU] " << config.uart_port
+            << " output enabled; 15-byte packets, 25 Hz resend, zero velocity after 150 ms stall"
+            << std::endl;
     } else if (config.pitch_feedback) {
         feedback = std::make_unique<UARTController>();
         feedback->initFeedbackOnly(config.uart_port, config.baudrate);

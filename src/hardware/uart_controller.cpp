@@ -442,10 +442,9 @@ std::vector<uint8_t> UARTController::buildMotionPacket(const MotionCommand& comm
     packet.gripper_offset = command.gripper_offset == 0 ? 5 : -5;
     packet.gripper_action_id = gripper_action_id;
     packet.camera_pitch_offset = cameraPitchToWire(command.camera_pitch_cdeg);
-    packet.imu_yaw_cdeg = imuYawToWire(command.imu_yaw_rad);
     std::vector<uint8_t> bytes(sizeof(packet));
     std::memcpy(bytes.data(), &packet, sizeof(packet));
-    // CRC覆盖帧头到imu yaw，与A6反馈同一算法；按字节写入，低字节在前。
+    // CRC覆盖帧头到相机偏移（0..12），与A6反馈同一算法；按字节写入，低字节在前。
     const uint16_t crc =
         calculateCRC16(bytes.data(), 0, static_cast<uint8_t>(offsetof(MotionPacket, crc16) - 1));
     bytes[offsetof(MotionPacket, crc16)] = static_cast<uint8_t>(crc & 0xFF);

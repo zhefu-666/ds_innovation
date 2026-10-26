@@ -154,8 +154,8 @@ def calculate(session, observations, size, measurement):
         f'  --intrinsics {session}/intrinsics.yaml\n'
         f'extrinsics 模式支持方格棋盘和对称圆点板；本次圆点板需增加 --pattern circles --cols {pattern[0]} --rows {pattern[1]}。\n'
         '完成并验收地面标定后，才将生成的完整 camera.yaml 放在 config/camera.yaml。\n'
-        'config/rescue.yaml 对应字段为 calibration_file: ./config/camera.yaml。\n'
-        '当前主程序尚未读取该 YAML，填写路径不会自动启用距离计算。\n'
+        'config/project.json 中 calibration.calibration_file 可指向 camera.yaml（相对 config 目录）。\n'
+        '主程序通过 --config config/project.json 加载配置；只在标定验收通过后切换。\n'
         '只有相同分辨率、焦点、镜头模式下才可复用本次内参。\n'
         '本次是候选内参；平板反光、屏幕条纹、姿态不充分等会影响实际精度。\n')
     return report

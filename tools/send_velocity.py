@@ -3,7 +3,7 @@
 
 The default protocol is the current 15-byte packet used by the LubanCat
 workspace. Pass --protocol legacy6 only for the older six-byte packet in the
-root workspace's historical VELOCITY_PROTOCOL.md.
+legacy MCU tooling; see README.md for the current packet layout.
 
 Preview mode is the default. The serial port is opened only with --send.
 """
@@ -22,8 +22,6 @@ from typing import Optional
 HEADER = 0x56
 MAX_LINEAR_SPEED_MPS = 0.2
 MAX_PITCH_DEG = 150
-# 线上航向字段 0.01°、-18000..18000；-32768 表示IMU不可用，收端不得当角度用。
-IMU_YAW_INVALID = -32768
 BAUDRATES = {
     9600: termios.B9600,
     19200: termios.B19200,
@@ -125,21 +123,12 @@ def rounded_integer(value: float) -> int:
     return math.floor(value + 0.5) if value >= 0 else math.ceil(value - 0.5)
 
 
-def connected_yaw_wire(yaw_deg: float) -> int:
-    """航向归一到(-180,180]后转0.01°，与C++ imuYawToWire()同口径。"""
-    if not math.isfinite(yaw_deg):
-        return IMU_YAW_INVALID
-    yaw = (float(yaw_deg) + 180.0) % 360.0 - 180.0
-    return max(-18000, min(18000, rounded_integer(yaw * 100.0)))
-
-
 def build_latest_packet(
     vx_mps: float,
     wz_rps: float,
     gripper_offset: int,
     action_id: int,
     pitch_deg: float,
-    yaw_deg: Optional[float] = None,
 ) -> bytes:
     if not math.isfinite(vx_mps) or not math.isfinite(wz_rps):
         vx_mps = wz_rps = 0.0
@@ -156,9 +145,8 @@ def build_latest_packet(
         action_id,
         pitch_wire,
     )
-    # 航向：0.01°，-18000..18000；None表示本工具无可信yaw，写无效值。
-    yaw_wire = IMU_YAW_INVALID if yaw_deg is None else connected_yaw_wire(yaw_deg)
-    return payload + struct.pack("<hH", yaw_wire, crc16_modbus(payload + struct.pack('<h', yaw_wire)))
+    return payload + struct.pack("<H", crc16_modbus(payload))
+
 
 
 def build_legacy6_packet(vx_mps: float, wz_rps: float, gripper: str) -> bytes:
@@ -171,7 +159,7 @@ def build_legacy6_packet(vx_mps: float, wz_rps: float, gripper: str) -> bytes:
                        1 if gripper == "closed" else 0)
 
 
-def build_packet(args: argparse.Namespace, vx_mps: float, wz_rps: float) -> bytes:
+def build_packet(args: argparse.Namespace, vx_mps: float, wz_rps: float, *, stop: bool = False) -> bytes:
     if args.protocol == "latest15":
         if args.gripper is not None:
             gripper_offset = 5 if args.gripper == "open" else -5
@@ -180,7 +168,7 @@ def build_packet(args: argparse.Namespace, vx_mps: float, wz_rps: float) -> byte
         else:
             gripper_offset = -5
         return build_latest_packet(vx_mps, wz_rps, gripper_offset,
-                                   args.action_id, args.pitch, args.yaw)
+                                   args.action_id, args.pitch)
     return build_legacy6_packet(vx_mps, wz_rps, args.gripper or "closed")
 
 
@@ -301,8 +289,6 @@ def make_parser() -> argparse.ArgumentParser:
                         help="latest15 夹爪动作编号 0..255；上位机可填0，下位机按偏移变化计数")
     parser.add_argument("--pitch", type=parse_finite_float, default=120.0,
                         help="latest15 相机目标角度，真实度数，范围90..150，发送减120；默认120（TX0）")
-    parser.add_argument("--yaw", type=parse_finite_float, default=None,
-                        help="latest15 航向字段，真实度数，发送转0.01°；省略或--yaw-invalid写无效值-32768")
     parser.add_argument("--rate", type=parse_finite_float, default=25.0,
                         help="重复发送频率 Hz，默认 25")
     parser.add_argument("--duration", type=parse_finite_float, default=1.0,
@@ -338,7 +324,7 @@ def main() -> int:
     try:
         baud_constant(args.baud)
         packet = build_packet(args, args.vx, args.wz)
-        stop_packet = build_packet(args, 0.0, 0.0)
+        stop_packet = build_packet(args, 0.0, 0.0, stop=True)
         print(f"协议: {args.protocol}; 帧 ({len(packet)} bytes): {packet_text(packet)}")
         gripper_text = args.gripper or ({5: "open", -5: "closed", 0: "neutral"}.get(
             args.frame_offset, "closed" if args.frame_offset is None else f"offset={args.frame_offset}"))

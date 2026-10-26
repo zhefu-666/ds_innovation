@@ -21,7 +21,7 @@ struct Config {
     uint32_t demo_seconds = 60;     // hard wall limit for standalone demonstrations
     std::string push_replay;
     std::string geometry_replay, calibration_file, keypoints_file;
-    std::string zone_geometry_file = "./config/zone_geometry.json";
+    std::string zone_geometry_file = "./config/project.json#/zone_geometry";
     bool pitch_feedback = false; // O_RDONLY MCU receive; no actuator commands
     std::string detect_image;
     std::string rknn_library = "./benchmark_results/librknnrt.so";

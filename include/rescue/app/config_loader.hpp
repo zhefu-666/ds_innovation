@@ -24,7 +24,7 @@ struct LoadedAppConfig {
     AppConfigOptions options;
 };
 
-// Loads one schema-v1 JSON file before explicit CLI arguments. The legacy
+// Loads a schema-v1 JSON file or #/pointer fragment before explicit CLI arguments. The legacy
 // resolver still determines final tuning and records its later overrides.
 LoadedAppConfig loadAppConfig(int argc, char** argv);
 

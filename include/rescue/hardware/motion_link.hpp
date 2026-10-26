@@ -6,17 +6,11 @@
 #include <mutex>
 #include <thread>
 #include <functional>
-#include <limits>
 
 namespace rescue {
 struct MotionLinkConfig {
     uint32_t period_ms = 40;           // resend rate 25 Hz, well inside the MCU's 200 ms timeout
     uint32_t command_timeout_ms = 150; // older commands are replaced by zero velocity
-};
-// 同一份IMU快照的序号与车体yaw；序号0或非有限yaw表示没有有效测量。
-struct MotionYawSample {
-    uint64_t sequence = 0;
-    float yaw_rad = std::numeric_limits<float>::quiet_NaN();
 };
 struct MotionLinkStats {
     uint64_t sent = 0, failed = 0,
@@ -29,15 +23,11 @@ struct MotionLinkStats {
 // 200 ms timeout. A command older than command_timeout (stalled loop) is replaced by zero
 // velocity. Zero-velocity substitutes and stop() keep the last gripper and pitch targets:
 // they stop the wheels and never toggle the gripper. Nothing is sent before the first submit.
-// 写入前读取最新IMU快照；每个有效样本至多成功下发一次yaw（不按角度值去重）。
-// 重发同一样本、无样本或IMU失效时写kImuYawInvalid，不刷新下位机的IMU接收时间。
-// 新样本也可随零速度/停机包下发；写失败不消耗样本序号，允许下次重试。
 class MotionLink {
   public:
     explicit MotionLink(UARTController& uart,
                         MotionLinkConfig config = {},
-                        std::function<bool()> permit = {},
-                        std::function<MotionYawSample()> yaw_source = {});
+                        std::function<bool()> permit = {});
     ~MotionLink();
     MotionLink(const MotionLink&) = delete;
     MotionLink& operator=(const MotionLink&) = delete;
@@ -58,8 +48,6 @@ class MotionLink {
     void run();
     void write(MotionCommand command, bool stale);
     std::function<bool()> permit_;
-    std::function<MotionYawSample()> yaw_source_;
-    uint64_t last_sent_yaw_sequence_ = 0; // 只由发送线程使用；stop()先join再补发。
     MotionCommand authorized_;
     bool ever_authorized_ = false;
     UARTController& uart_;

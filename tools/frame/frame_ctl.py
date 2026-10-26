@@ -34,24 +34,11 @@ def crc16(data):
     return crc
 
 
-# 线上航向字段 0.01°、-18000..18000；-32768 表示IMU不可用。
-IMU_YAW_INVALID = -32768
-
-
-def imu_yaw_wire(yaw_deg):
-    """弧度以外的航向输入统一走这里：度数归一到(-180,180]后转0.01°。None表示无效。"""
-    if yaw_deg is None:
-        return IMU_YAW_INVALID
-    yaw = (float(yaw_deg) + 180.0) % 360.0 - 180.0
-    return max(-18000, min(18000, int(round(yaw * 100.0))))
-
-
-def motion_packet(offset, action_id, pitch_deg, imu_yaw_deg=None):
+def motion_packet(offset, action_id, pitch_deg):
     if offset not in (0, 20) or not 0 <= action_id <= 255 or not 90 <= pitch_deg <= 150:
         raise ValueError('夹爪目标、动作编号或相机实际角无效')
     # TX command offset is +5=open/-5=closed; this does not establish A6 semantics.
     payload = struct.pack('<BffbBh', 0x56, 0., 0., 5 if offset == 0 else -5, action_id, max(-30, min(30, pitch_deg - 120)))
-    payload += struct.pack('<h', imu_yaw_wire(imu_yaw_deg))
     return payload + struct.pack('<H', crc16(payload))
 
 
