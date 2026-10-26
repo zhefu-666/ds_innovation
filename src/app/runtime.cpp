@@ -314,26 +314,27 @@ int Runtime::run() {
                                        : "a6_state_mapping")
                       << "\n";
         }
-        // 每包注入IMU当前航向：快照过期或数值无效时返回NaN，编码为线上的kImuYawInvalid。
+        // 序号与车体yaw取自同一份新鲜快照；MotionLink只在新样本首次成功发送时携带有效yaw。
         link = std::make_unique<MotionLink>(
             *feedback,
             resolved.motion_link,
             [&match] {
                 return match.status(imuNowUs()).permit;
             },
-            [&imu] {
+            [&imu]() -> MotionYawSample {
                 if (!imu)
-                    return std::numeric_limits<float>::quiet_NaN();
+                    return {};
                 const auto snap = imu->snapshot();
                 const float yaw = snap.sample.body_rpy_rad[2];
-                return (snap.connected && snap.fresh && snap.sample.measurements_valid &&
-                        std::isfinite(yaw))
-                           ? yaw
-                           : std::numeric_limits<float>::quiet_NaN();
+                if (!(snap.connected && snap.fresh && snap.sample.measurements_valid &&
+                      std::isfinite(yaw)))
+                    return {};
+                return {snap.sample.sequence, yaw};
             });
         std::cout << "[MCU] " << config.uart_port
-                  << " output enabled; 25 Hz resend, zero velocity after 150 ms stall; imu yaw in "
-                     "every packet\n";
+                  << " output enabled; 25 Hz resend, zero velocity after 150 ms stall; new IMU "
+                     "sample yaw only; "
+                     "repeat/invalid=-32768\n";
     } else if (config.pitch_feedback) {
         feedback = std::make_unique<UARTController>();
         feedback->initFeedbackOnly(config.uart_port, config.baudrate);

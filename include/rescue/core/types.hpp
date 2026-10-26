@@ -89,7 +89,7 @@ struct MotionPacket {
     int8_t gripper_offset = 0; // 线上偏移-5..+5：0=85°中位，+5=90°开，-5=80°关
     uint8_t gripper_action_id = 0; // 夹爪动作编号：仅目标变化时+1，1..255循环，0保留为“无动作”
     int16_t camera_pitch_offset = 0; // TX偏移-30..30；0=120°，+30=150°下，-30=90°上
-    // 车体航向IMU yaw，单位0.01°；-18000..18000（-32768保留为无效）。仅上送，下位机不参与运动解算。
+    // 新IMU样本的车体yaw，单位0.01°、-18000..18000；-32768=无新有效样本，不刷新IMU计时。
     int16_t imu_yaw_cdeg = kImuYawInvalid;
     uint16_t crc16 = 0; // Modbus CRC，覆盖字节0..14，初值FFFF、多项式A001，低字节在前
 };
@@ -197,7 +197,7 @@ struct SafeZonePose {
 };
 
 // 算法业务请求；禁止直接发送sizeof(MotionCommand)，该结构可能包含对齐填充。
-// buildMotionPacket()序列化为15字节（含动作编号与CRC），sendMotion()负责串口发送。
+// buildMotionPacket()序列化为17字节（含yaw、动作编号与CRC），sendMotion()负责串口发送。
 struct MotionCommand {
     uint64_t frame_transaction =
         0; // changes only for a new logical request, including explicit retry
@@ -208,7 +208,7 @@ struct MotionCommand {
     int16_t gripper_offset = 0;
     int16_t camera_pitch_cdeg =
         0; // 相机偏移目标，0.01°，正值向下；TX除100并钳位±30度；RX绝对角减120转换为偏移
-    // 车体航向（body_rpy_rad[2]经安装变换），弧度；MotionLink每包写入实时值，业务层无需填充。
+    // 车体航向（body_rpy_rad[2]经安装变换），弧度；MotionLink仅为新有效样本填写，业务层无需填充。
     // 默认NaN=未提供，编码为kImuYawInvalid；不能让“未填”变成看似合理的0°。
     float imu_yaw_rad = std::numeric_limits<float>::quiet_NaN();
 };

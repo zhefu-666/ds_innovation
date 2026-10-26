@@ -1,6 +1,7 @@
 #include "rescue/hardware/motion_link.hpp"
 #include "rescue/core/utils.hpp"
 #include <iostream>
+#include <cmath>
 #include <limits>
 
 namespace rescue {
@@ -15,7 +16,7 @@ uint64_t nowUs() {
 MotionLink::MotionLink(UARTController& uart,
                        MotionLinkConfig config,
                        std::function<bool()> permit,
-                       std::function<float()> yaw_source)
+                       std::function<MotionYawSample()> yaw_source)
     : permit_(std::move(permit)), yaw_source_(std::move(yaw_source)), uart_(uart), config_(config) {
     if (config_.period_ms == 0 || config_.command_timeout_ms == 0 ||
         config_.command_timeout_ms >= 200)
@@ -48,14 +49,18 @@ void MotionLink::write(MotionCommand command, bool stale) {
         authorized_ = guarded;
         ever_authorized_ = true;
     }
-    // 航向在真正写串口的这一刻取值：停发替代包和停机补发包也带当前yaw。
-    guarded.imu_yaw_rad = yaw_source_ ? yaw_source_() : std::numeric_limits<float>::quiet_NaN();
+    // 序号与yaw来自同一快照；角度相同的新测量仍然发送，旧测量不伪装成新数据。
+    const auto yaw = yaw_source_ ? yaw_source_() : MotionYawSample{};
+    const bool new_yaw = yaw.sequence > last_sent_yaw_sequence_ && std::isfinite(yaw.yaw_rad);
+    guarded.imu_yaw_rad = new_yaw ? yaw.yaw_rad : std::numeric_limits<float>::quiet_NaN();
     bool ok = false;
     try {
         ok = uart_.sendMotion(guarded);
     } catch (const std::exception& e) {
         std::cerr << "[MCU] send rejected: " << e.what() << "\n";
     }
+    if (ok && new_yaw)
+        last_sent_yaw_sequence_ = yaw.sequence;
     std::lock_guard<std::mutex> guard(mutex_);
     stats_.last_ok = ok;
     if (ok) {
