@@ -129,6 +129,7 @@ void cameraStartupCases() {
     { // Live-loop guard permits camera work only at zero speed in explicit phases.
         PushOutput out;
         out.state = PushState::LOWER_FRAME;
+        out.stationary_pitch_work = true;
         assert(stationaryPitchWork(out, "pitch_moving"));
         assert(stationaryPitchWork(out, "pitch_not_calibrated"));
         assert(!stationaryPitchWork(out, "imu_not_synchronized"));
@@ -138,6 +139,8 @@ void cameraStartupCases() {
         inhibitUnmappedMotion(out.motion, false);
         assert(stopped(out.motion));
         out.state = PushState::SCAN;
+        out.stationary_pitch_work = false;
+        out.scan_pitch_return = true;
         out.motion.camera_pitch_cdeg = 500;
         assert(stationaryPitchWork(out, "pitch_moving"));
         assert(!stationaryPitchWork(out, "pitch_not_calibrated"));
@@ -253,7 +256,7 @@ void cameraStartupCases() {
         assert(s.out.reason == "own_zone_search_timeout" && stopped(s.out.motion) &&
                s.out.motion.gripper_offset == 20);
     }
-    { // Count a full 10s of forward commands; blocked time is not travelled time.
+    { // Startup is deliberately deferred: old duration settings cannot command motion.
         TaskTuning t;
         t.startup_advance_us = 10000000;
         PushTask task(t);
@@ -261,57 +264,21 @@ void cameraStartupCases() {
         in.run = in.safety_ok = in.path_safe = in.opponent_zone_clear = true;
         in.camera_pitch_cdeg = 500;
         in.camera_pitch_stable = true;
-        int forward_frames = 0;
-        PushOutput out;
-        for (int i = 0; i < 140; ++i) {
-            in.now_us += 100000;
-            in.path_safe = !(i >= 30 && i < 40);
-            out = task.update(in);
-            if (out.motion.vx_mps > 0) {
-                ++forward_frames;
-                assert(out.motion.vx_mps == .1f && out.motion.wz_rps == 0);
-            }
-            if (out.state == PushState::SCAN)
-                break;
-        }
-        assert(out.state == PushState::SCAN && forward_frames == 100);
-    }
-    { // START_ADVANCE holds the IMU yaw seen at the start: a bump that turns the body right is
-      // steered back left.
-        TaskTuning t;
-        t.startup_advance_us = 10000000;
-        PushTask task(t);
-        PushObservation in;
-        in.run = in.safety_ok = in.path_safe = in.opponent_zone_clear = true;
-        in.camera_pitch_cdeg = 500;
-        in.camera_pitch_stable = true;
-        in.heading_valid = true;
-        in.heading_rad = 3.1f; // near the +pi wrap
-        PushOutput out;
-        for (int i = 0; i < 3; ++i) {
-            in.now_us += 100000;
-            out = task.update(in);
-        }
-        assert(out.state == PushState::START_ADVANCE && out.motion.vx_mps > 0 &&
-               out.motion.wz_rps == 0 && out.reason == "startup_forward");
-        in.heading_rad = 3.1f - .10f; // yaw dropped: body turned right
+        in.now_us = 100000;
+        auto out = task.update(in);
+        assert(out.phase == TaskPhase::Startup && stopped(out.motion));
         in.now_us += 100000;
         out = task.update(in);
-        assert(out.motion.vx_mps > 0 && out.motion.wz_rps > 0 &&
-               out.reason == "startup_forward_hold");
-        in.heading_rad = -3.1f + .0f; // wraps past +pi: still a small left-turn error of 0.083 rad
+        assert(out.phase == TaskPhase::Search && out.state == PushState::SCAN);
+        assert(stopped(out.motion) && out.startup_commanded_us == 0);
+        assert(out.reason == "startup_deferred");
+        in.run = false;
+        in.now_us += 100000;
+        task.update(in);
+        in.run = true;
         in.now_us += 100000;
         out = task.update(in);
-        assert(out.motion.wz_rps < 0 && out.reason == "startup_forward_hold");
-        in.heading_rad = 3.1f + .02f; // inside the deadband
-        in.now_us += 100000;
-        out = task.update(in);
-        assert(out.motion.wz_rps == 0);
-        in.heading_valid = false;
-        in.heading_rad = 0;
-        in.now_us += 100000;
-        out = task.update(in);
-        assert(out.motion.wz_rps == 0 && out.motion.vx_mps > 0);
+        assert(out.phase == TaskPhase::Search && stopped(out.motion));
     }
     for (const auto* label :
          {"ordinary_supply", "injured_person", "core_supply", "dangerous_object"}) {

@@ -59,6 +59,30 @@
       "status": "archived_candidate",
       "sha256": "68194965028a1653eab7d48d764e2a565e790d3aa2095fd5652d6d29e528fdad",
       "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_v3_int8.rknn"
+    },
+    {
+      "file": "models/detect_v5_int8.rknn",
+      "role": "detector",
+      "status": "active",
+      "sha256": "92b651c2d8a431f3237e7540d269a7274f8a37e20a4de5bed69f7c5edf8d29d9",
+      "classes": [
+        "blue",
+        "orange",
+        "green",
+        "black",
+        "zone_blue",
+        "zone_red"
+      ]
+    },
+    {
+      "file": "models/zone_pose_int8.rknn",
+      "role": "pose",
+      "status": "active",
+      "sha256": "60381a442dc7adef56d76fe85600f9e2a3aa45711c4b53edad74f7b91fcedb3e",
+      "classes": [
+        "zone_left",
+        "zone_right"
+      ]
     }
   ]
 }

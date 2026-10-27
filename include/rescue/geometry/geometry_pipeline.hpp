@@ -20,6 +20,11 @@ struct GeometryResult {
     bool identity_verified = false;
     std::string reason = "not_configured";
     ZoneEstimate zone;
+    bool pnp_attempted = false, pnp_solution_valid = false, pnp_delta_valid = false;
+    std::string pnp_solver_reason = "not_run", pnp_reason = "ground_fit_unavailable";
+    double pnp_position_delta_m = std::numeric_limits<double>::quiet_NaN();
+    double pnp_angle_delta_deg = std::numeric_limits<double>::quiet_NaN();
+    double pnp_reprojection_error_px = std::numeric_limits<double>::quiet_NaN();
     std::vector<SegDetection> detections;
 };
 // Ground contact producer (stage HW2). A detection's floor contact is accepted only when

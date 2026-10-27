@@ -15,8 +15,8 @@ fi
 binary=build-release/rescue_upper_host
 common=(--config config/project.json --no-match-time-limit --controlled-empty-field --search-cues --team blue --no-show
   --allow-mechanical-pitch-model --pitch-presets 500,4000,4000
-  --model models/detect_fp.rknn
-  --pose-model-blue models/zone_pose_fp.rknn --startup-advance-ms 0
+  --model models/detect_v5_int8.rknn
+  --pose-model models/zone_pose_int8.rknn --startup-advance-ms 0
   --startup-speed 1 --scan-wz 1 --turn-wz 1)
 common+=("${extra[@]}")
 if (( ${#extra[@]} )); then echo "CONTACT TEST: forward/reverse/turn/jaw collision checks DISABLED; health checks and STOP retained."; fi

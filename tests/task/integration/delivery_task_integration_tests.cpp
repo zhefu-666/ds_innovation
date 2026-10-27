@@ -86,13 +86,13 @@ struct Rig {
         input.camera_pitch_stable = true;
         input.gripper_done = true;
         input.gripper_feedback_open = 1;
-        task.trip_ = trip;
-        task.baseline_ = 0;
-        task.baseline_other_ = 4;
-        task.delivery_geometry_id_ = "delivery-test";
+        task.trip_context_.trip_ = trip;
+        task.transport_phase_.baseline_ = 0;
+        task.transport_phase_.baseline_other_ = 4;
+        task.transport_phase_.delivery_geometry_id_ = "delivery-test";
         task.total_ = 10;
-        task.near_failures_ = 3;
-        task.mid_clear_n_ = 4;
+        task.search_phase_.near_failures_ = 3;
+        task.search_phase_.mid_clear_n_ = 4;
         task.attempt_started_ = 777;
         task.bounded_approach_ = .2f;
         task.bounded_retreat_ = .3f;
@@ -140,7 +140,7 @@ struct Rig {
         input.cargo_body = {{task.t_.supply_half_x_m, .5f + rear_y}};
         input.cargo_img = {PushObservation::CargoImg{}};
         vref = measured;
-        task.cargo_fix_ = measured;
+        task.transport_phase_.cargo_fix_ = measured;
         if (!measured)
             task.zone_.update(zone(input.now_us, 1), input.now_us);
     }
@@ -158,9 +158,12 @@ struct Rig {
                   << " first=" << output.first_ordinary_delivered << " fault=" << task.fault_
                   << " frame=" << int(output.motion.gripper_offset)
                   << " transaction=" << output.motion.frame_transaction
-                  << " pitch=" << output.motion.camera_pitch_cdeg << " phase_us=" << task.phase_us_
-                  << " repush=" << task.repush_n_ << " visual=" << task.delivery_visual_
-                  << " near_failures=" << task.near_failures_ << " mid_clear=" << task.mid_clear_n_
+                  << " pitch=" << output.motion.camera_pitch_cdeg
+                  << " phase_us=" << task.actionProgress().started_us
+                  << " repush=" << task.transport_phase_.repush_n_
+                  << " visual=" << task.transport_phase_.delivery_visual_
+                  << " near_failures=" << task.search_phase_.near_failures_
+                  << " mid_clear=" << task.search_phase_.mid_clear_n_
                   << " attempt_us=" << task.attempt_started_
                   << " approach=" << task.bounded_approach_ << " retreat=" << task.bounded_retreat_
                   << " events=" << events << '\n';
@@ -179,11 +182,17 @@ void scoringTests() {
         rig.tick();
         assert(rig.output.state == PushState::TURN_SCAN && rig.output.reason == "delivered");
         assert(rig.output.delivered_total == 12 && rig.output.first_ordinary_delivered);
-        assert(rig.task.near_failures_ == 0 && rig.task.mid_clear_n_ == 0);
+        assert(rig.task.search_phase_.near_failures_ == 0 &&
+               rig.task.search_phase_.mid_clear_n_ == 0);
         assert(rig.task.attempt_started_ == rig.input.now_us);
         assert(rig.task.bounded_approach_ == 0 && rig.task.bounded_retreat_ == 0);
-        assert(rig.task.delivery_visual_ && !rig.task.fault_);
+        assert(rig.task.transport_phase_.delivery_visual_ && !rig.task.fault_);
         rig.stationaryOpen();
+        assert(rig.output.phase == TaskPhase::Search &&
+               rig.output.search_action == SearchAction::TurnAway);
+        assert(rig.output.delivery_expected == 2 && rig.output.delivery_credited == 2 &&
+               rig.output.delivery_visual);
+        assert(!rig.output.navigation_requested);
         rig.report("strict_full");
     }
     {
@@ -193,9 +202,12 @@ void scoringTests() {
             rig.tick();
         assert(rig.output.state == PushState::TURN_SCAN && rig.output.reason == "partial_delivery");
         assert(rig.output.delivered_total == 11 && !rig.output.first_ordinary_delivered);
-        assert(rig.task.near_failures_ == 3 && rig.task.mid_clear_n_ == 4);
+        assert(rig.task.search_phase_.near_failures_ == 3 &&
+               rig.task.search_phase_.mid_clear_n_ == 4);
         assert(rig.task.attempt_started_ == rig.input.now_us);
         assert(rig.task.bounded_approach_ == 0 && rig.task.bounded_retreat_ == 0);
+        assert(rig.output.phase == TaskPhase::Search && rig.output.delivery_expected == 2);
+        assert(rig.output.delivery_credited == 1 && rig.output.delivery_visual);
         rig.report("strict_partial");
     }
     {
@@ -218,7 +230,9 @@ void scoringTests() {
         assert(rig.output.delivered_total == 10 && !rig.output.first_ordinary_delivered);
         assert(rig.task.attempt_started_ == 777 && rig.task.bounded_approach_ == .2f &&
                rig.task.bounded_retreat_ == .3f);
-        assert(!rig.task.delivery_visual_);
+        assert(!rig.task.transport_phase_.delivery_visual_);
+        assert(rig.output.phase == TaskPhase::Search && rig.output.delivery_expected == 1);
+        assert(rig.output.delivery_credited == 0 && !rig.output.delivery_visual);
         rig.report("strict_unverified");
     }
     {
@@ -229,7 +243,7 @@ void scoringTests() {
             rig.tick();
         assert(rig.output.state == PushState::SAFE_STOP &&
                rig.output.reason == "demo_delivery_complete");
-        assert(rig.task.fault_ && rig.task.phase_us_ == kStart);
+        assert(rig.task.fault_ && rig.task.actionProgress().started_us == kStart);
         assert(rig.output.delivered_total == 11 && rig.output.first_ordinary_delivered);
         rig.stationaryOpen();
         rig.report("strict_demo_complete");
@@ -242,7 +256,9 @@ void scoringTests() {
         assert(rig.output.state == PushState::TURN_SCAN &&
                rig.output.reason == "delivery_unverified");
         assert(rig.output.delivered_total == 10 && !rig.output.first_ordinary_delivered);
-        assert(rig.task.delivery_visual_ && rig.task.attempt_started_ == 777);
+        assert(rig.task.transport_phase_.delivery_visual_ && rig.task.attempt_started_ == 777);
+        assert(rig.output.phase == TaskPhase::Search && rig.output.delivery_expected == 1);
+        assert(rig.output.delivery_visual && rig.output.delivery_credited == 0);
         rig.report("visual_without_assumption", rig.task.takeDropZoneEvent());
     }
 }
@@ -304,7 +320,7 @@ void cargoHistoryTests() {
         tuning.assume_img_verify_obs = 5;
         Rig rig(tuning);
         rig.visualCargo(.02f, false);
-        rig.task.cargo_fix_ = true;
+        rig.task.transport_phase_.cargo_fix_ = true;
         auto& image = rig.input.cargo_img.front();
         image.height_px = 100;
         image.bottom_px = 400;
@@ -327,18 +343,21 @@ void cargoHistoryTests() {
         Rig rig(tuning);
         rig.visualCargo(-.02f);
         rig.task.dropzone_evt_ = "prefix\n";
-        rig.task.cargo_ref_us_ = 555;
-        rig.task.assume_pushed_ = true;
-        rig.task.push_in_.push_hold_valid_ = true;
-        rig.task.push_in_.align_start_us_ = 666;
+        rig.task.transport_phase_.cargo_ref_us_ = 555;
+        rig.task.transport_phase_.assume_pushed_ = true;
+        rig.task.transport_phase_.push_in_.push_hold_valid_ = true;
+        rig.task.transport_phase_.push_in_.align_start_us_ = 666;
         rig.tick();
         assert(rig.output.state == PushState::VERIFY_DELIVERY);
         rig.tick();
         assert(rig.output.state == PushState::ENTER &&
                rig.output.reason == "assumed_verify_repush");
-        assert(rig.task.repush_n_ == 1 && rig.task.cargo_ref_us_ == 0);
-        assert(!rig.task.assume_pushed_ && rig.task.push_in_.align_pending_ &&
-               rig.task.push_in_.align_start_us_ == 0 && !rig.task.push_in_.push_hold_valid_);
+        assert(rig.task.transport_phase_.repush_n_ == 1 &&
+               rig.task.transport_phase_.cargo_ref_us_ == 0);
+        assert(!rig.task.transport_phase_.assume_pushed_ &&
+               rig.task.transport_phase_.push_in_.align_pending_ &&
+               rig.task.transport_phase_.push_in_.align_start_us_ == 0 &&
+               !rig.task.transport_phase_.push_in_.push_hold_valid_);
         rig.stationaryOpen();
         const auto events = rig.task.takeDropZoneEvent();
         const auto before = events.find("fix=1 repush=0 in=0 out=2");
@@ -361,7 +380,7 @@ void cargoHistoryTests() {
         rig.tick();
         assert(rig.output.state == PushState::WAIT_START && rig.output.reason == "reset");
         rig.input.reset = false;
-        rig.task.trip_ = ordinary();
+        rig.task.trip_context_.trip_ = ordinary();
         rig.seedVerification("new_delivery");
         rig.tick();
         rig.tick();

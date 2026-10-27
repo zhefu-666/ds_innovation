@@ -32,9 +32,9 @@ ZoneColorResult previewBlueZoneDefault(ZoneColorResult result,
 ZoneColorResult
 resolveZoneColor(ZoneColorResult measured, const std::string& team, bool assume_team);
 
-// Samples the interior of every usable detected half (at least one), excludes detected objects.
-// A half whose corners are out of frame or occluded is skipped; two halves must agree.
-// A shape label or --team never supplies identity; missing/ambiguous color stays unknown.
+// Matches red/blue zone detections to at least three visible corners of a pose half.
+// Without a match, samples calibrated HSV, excluding foreground objects but not zone boxes.
+// Conflicting zone detections stay unknown; pose half labels and --team never supply identity.
 class ZoneColorClassifier {
   public:
     explicit ZoneColorClassifier(ZoneColorConfig c = {}) : config_(c) {

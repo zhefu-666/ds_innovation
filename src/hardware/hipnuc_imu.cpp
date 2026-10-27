@@ -197,6 +197,14 @@ HipnucImu::~HipnucImu() {
         ::close(fd_);
     }
 }
+std::vector<ImuSample> HipnucImu::samplesAfter(uint64_t sequence) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ImuSample> result;
+    for (const auto& sample : history_)
+        if (sample.sequence > sequence)
+            result.push_back(sample);
+    return result;
+}
 ImuSnapshot HipnucImu::snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto result = state_;

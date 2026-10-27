@@ -270,7 +270,11 @@ class PlatformBaselineTests(unittest.TestCase):
         for original, archived in baseline_tool.LEGACY_RESOURCE_PATHS.items():
             with self.subTest(resource=original):
                 resource = baseline_tool.ROOT / archived
-                if original.startswith("config/"):
+                if original == "config/camera.yaml":
+                    # The active path now contains the latest calibration, not frozen bytes.
+                    self.assertNotEqual(baseline_tool.digest(baseline_tool.ROOT / original),
+                                        baseline_tool.digest(resource))
+                elif original.startswith("config/"):
                     self.assertFalse((baseline_tool.ROOT / original).exists())
                 # Archived bytes must match the frozen resource, including legacy protocol fixtures.
                 self.assertEqual(baseline_tool.digest(resource), self.baseline["resources_sha256"][original])

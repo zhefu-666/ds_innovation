@@ -16,35 +16,37 @@
   },
   "models": {
     "rknn_library": "../benchmark_results/librknnrt.so",
-    "model_path": "../models/detect_int8_split_20261022.rknn",
-    "pose_model_path": "../models/zone_pose_int8_split_20261022.rknn",
+    "model_path": "../models/detect_v5_int8.rknn",
+    "pose_model_path": "../models/zone_pose_int8.rknn",
     "input_size": 640,
     "confidence": 0.5,
     "injured_confidence": 0.25,
     "nms": 0.45,
     "pose_confidence": 0.25,
     "pose_keypoint_confidence": 0.5,
-    "detect_core_mask": 1,
-    "pose_core_mask": 2,
+    "detect_core_mask": 4,
+    "pose_core_mask": 3,
     "parallel_inference": true,
     "class_names": [
       "blue",
       "orange",
       "green",
-      "black"
+      "black",
+      "zone_blue",
+      "zone_red"
     ]
   },
   "calibration": {
-    "calibration_file": "camera.mechanical_5_40.yaml",
+    "calibration_file": "camera.yaml",
     "zone_geometry_file": "project.json#/zone_geometry",
     "task_calibration_file": "project.json#/frame/assume",
     "zone_color_file": "project.json#/zone_color/field",
     "pitch_presets_cdeg": [
-      500,
-      4000,
-      4000
+      -3000,
+      -3000,
+      -3000
     ],
-    "allow_mechanical_pitch_model": true
+    "allow_mechanical_pitch_model": false
   },
   "behavior": {
     "sensor_timeout_ms": 200,
@@ -70,16 +72,15 @@
     "match_socket": "/tmp/rescue-match.sock"
   },
   "paths": {
-    "camera": "camera.yaml",
-    "camera_mechanical_5_40": "camera.mechanical_5_40.yaml"
+    "camera": "camera.yaml"
   },
   "profiles": {
     "demo_default": {
       "binary": "../build-release/rescue_upper_host",
       "frame_config": "project.json#/frame/pending",
       "acceptance": "project.json#/acceptance/pending",
-      "model": "../models/detect_int8_split_20261022.rknn",
-      "pose_model": "../models/zone_pose_int8_split_20261022.rknn",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
       "rknn_library": "../benchmark_results/librknnrt.so",
       "camera_calibration": "project.json#/paths/camera",
       "zone_geometry": "project.json#/zone_geometry",
@@ -102,8 +103,8 @@
       "binary": "../build-release/rescue_upper_host",
       "frame_config": "project.json#/frame/assume",
       "acceptance": "project.json#/acceptance/assume",
-      "model": "../models/detect_int8_split_20261022.rknn",
-      "pose_model": "../models/zone_pose_int8_split_20261022.rknn",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
       "rknn_library": "../benchmark_results/librknnrt.so",
       "camera_calibration": "project.json#/paths/camera",
       "zone_geometry": "project.json#/zone_geometry",
@@ -126,10 +127,10 @@
       "binary": "../build-release/rescue_upper_host",
       "frame_config": "project.json#/frame/assume",
       "acceptance": "project.json#/acceptance/assume",
-      "model": "../models/detect_int8_split_20261022.rknn",
-      "pose_model": "../models/zone_pose_int8_split_20261022.rknn",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
       "rknn_library": "../benchmark_results/librknnrt.so",
-      "camera_calibration": "project.json#/paths/camera_mechanical_5_40",
+      "camera_calibration": "project.json#/paths/camera",
       "zone_geometry": "project.json#/zone_geometry",
       "team": "blue",
       "camera": 0,
@@ -511,7 +512,7 @@
       "rear_divider",
       "rear_right"
     ],
-    "landmark_note": "v2 matches zone_pose labels (checked 2026-10-01): front points on the ramp ridge (y=0, z=0.02), rear points on the rear fence outer top edge (y=0.33, z=0.02), outer points at the side fence outer edge (x=+-0.33). inner_* stay the delivery bounds.",
+    "landmark_note": "User override 2026-10-27: landmark width 0.60 m, depth 0.30 m, height 0.02 m. Front y=0, rear y=0.30, outer landmark x=+-0.30. Keypoint IDs and inner delivery bounds unchanged.",
     "divider_note": "Divider width is not dimensioned in the PDF. Exclusion half-width below is a conservative configurable policy, not a measurement.",
     "zones": [
       {
@@ -519,8 +520,8 @@
         "geometry_id": "rescue2027-fence-top-v2-red",
         "inner_width_m": 0.6,
         "inner_depth_m": 0.3,
-        "landmark_width_m": 0.66,
-        "landmark_depth_m": 0.33,
+        "landmark_width_m": 0.6,
+        "landmark_depth_m": 0.3,
         "landmark_height_m": 0.02,
         "divider_exclusion_half_width_m": 0.02,
         "supply_side": "left",
@@ -531,8 +532,8 @@
         "geometry_id": "rescue2027-fence-top-v2-blue",
         "inner_width_m": 0.6,
         "inner_depth_m": 0.3,
-        "landmark_width_m": 0.66,
-        "landmark_depth_m": 0.33,
+        "landmark_width_m": 0.6,
+        "landmark_depth_m": 0.3,
         "landmark_height_m": 0.02,
         "divider_exclusion_half_width_m": 0.02,
         "supply_side": "left",
@@ -601,6 +602,30 @@
         "status": "archived_candidate",
         "sha256": "68194965028a1653eab7d48d764e2a565e790d3aa2095fd5652d6d29e528fdad",
         "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_v3_int8.rknn"
+      },
+      {
+        "file": "models/detect_v5_int8.rknn",
+        "role": "detector",
+        "status": "active",
+        "sha256": "92b651c2d8a431f3237e7540d269a7274f8a37e20a4de5bed69f7c5edf8d29d9",
+        "classes": [
+          "blue",
+          "orange",
+          "green",
+          "black",
+          "zone_blue",
+          "zone_red"
+        ]
+      },
+      {
+        "file": "models/zone_pose_int8.rknn",
+        "role": "pose",
+        "status": "active",
+        "sha256": "60381a442dc7adef56d76fe85600f9e2a3aa45711c4b53edad74f7b91fcedb3e",
+        "classes": [
+          "zone_left",
+          "zone_right"
+        ]
       }
     ]
   },
@@ -612,11 +637,13 @@
         "camera_index": 0,
         "frame_width": 1280,
         "frame_height": 720,
-        "fps": 60
+        "fps": 60,
+        "imu": true,
+        "pitch_feedback": true
       },
       "models": {
         "rknn_library": "../benchmark_results/librknnrt.so",
-        "model_path": "../models/detect_fp.rknn",
+        "model_path": "../models/detect_v5_int8.rknn",
         "input_size": 640,
         "confidence": 0.5,
         "injured_confidence": 0.25,
@@ -625,16 +652,21 @@
           "blue",
           "orange",
           "green",
-          "black"
-        ]
+          "black",
+          "zone_blue",
+          "zone_red"
+        ],
+        "pose_model_path": "../models/zone_pose_int8.rknn"
       },
       "calibration": {
         "zone_geometry_file": "project.json#/zone_geometry",
         "pitch_presets_cdeg": [
-          500,
-          500,
-          4000
-        ]
+          -3000,
+          -3000,
+          -3000
+        ],
+        "calibration_file": "camera.yaml",
+        "allow_mechanical_pitch_model": false
       },
       "runtime": {
         "team": "blue",

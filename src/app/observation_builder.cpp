@@ -88,13 +88,13 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         config.dry_run,
         config.team,
         blue_model_detected_both_halves);
-    // Identity comes only from the measured zone colour; an enemy-colour zone is never labelled
-    // own.
+    // Matched zone detections or measured HSV identify color; pose supplies geometry.
     zone_color = resolveZoneColor(zone_color, config.team, false);
     GeometryResult geometry_result;
     ExpectedStop expected_stop;
     ZoneEstimate vref_estimate;
     bool vref_ok = false;
+    SensorState geometry_sensor;
     // Servo readback at capture time; without the feedback port it stays invalid.
     const FrameSensors frame_sensors = feedback ? feedback->feedbackAt(timestamp) : FrameSensors{};
     for (auto& d : detections)
@@ -119,6 +119,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         geometry_frame.sensors = frame_sensors;
         if (imu)
             geometry_frame.sensors.imu = sensorStateFromImu(imu->snapshotAt(timestamp));
+        geometry_sensor = geometry_frame.sensors.imu;
         KeypointFrame points;
         points.frame_id = frame_sequence;
         points.capture_us = timestamp;
@@ -271,13 +272,30 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         geometry->apply(input, geometry_result, expected_stop, config.team, imuNowUs());
     input.enemy_zone_seen = vision_result.pose_ran && zone_color.verified && !zone_color.assumed &&
                             zone_color.color != config.team;
-    if (vref_ready && vision_result.pose_ran && !zone_points.empty() &&
+    const SegDetection* zone_box = nullptr;
+    for (const auto& d : detections) {
+        if ((d.label != "blue_safe_zone" && d.label != "red_safe_zone") ||
+            !std::isfinite(d.confidence) || d.confidence < config.confidence)
+            continue;
+        const bool own = d.label == config.team + "_safe_zone";
+        input.enemy_zone_seen = input.enemy_zone_seen || !own;
+        if (!zone_box || (own && zone_box->label != config.team + "_safe_zone") ||
+            (d.label == zone_box->label && d.confidence > zone_box->confidence))
+            zone_box = &d;
+    }
+    const bool pose_sight = vision_result.pose_ran && !zone_points.empty() &&
+                            (!zone_box || (zone_color.verified && zone_color.color == config.team));
+    if (vref_ready && (pose_sight || zone_box) &&
         vref_calibration.cameraMatrix().type() == CV_64F &&
         vref_calibration.cameraMatrix().rows == 3) {
         cv::Point2f c(0, 0);
-        for (const auto& k : zone_points)
-            c += k.pixel;
-        c *= 1.f / float(zone_points.size());
+        if (pose_sight) {
+            for (const auto& k : zone_points)
+                c += k.pixel;
+            c *= 1.f / float(zone_points.size());
+        } else {
+            c = zone_box->center();
+        }
         const cv::Mat& K = vref_calibration.cameraMatrix();
         const double xc = (c.x - K.at<double>(0, 2)) / K.at<double>(0, 0),
                      yc = (c.y - K.at<double>(1, 2)) / K.at<double>(1, 1);
@@ -285,7 +303,9 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         const double fwd = std::cos(pitch) - yc * std::sin(pitch);
         if (fwd > .05) {
             input.zone_sight_valid = true;
-            input.zone_sight_enemy = input.enemy_zone_seen;
+            input.zone_sight_enemy = pose_sight
+                                         ? (zone_color.verified && zone_color.color != config.team)
+                                         : zone_box->label != config.team + "_safe_zone";
             input.zone_sight_bearing = float(std::atan2(-xc, fwd));
         }
     }
@@ -399,9 +419,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             std::cout << "\n";
         }
     }
-    if (input.target_valid && input.geometry_valid &&
-        (previous.state == PushState::MID_APPROACH || previous.state == PushState::APPROACH ||
-         previous.state == PushState::PREPARE || previous.state == PushState::RUSH)) {
+    if (input.target_valid && input.geometry_valid && previous.corridor_observation_requested) {
         // Event log: only when the set of counted neighbours changes, or once a second as a
         // heartbeat.
         static std::string last_signature;
@@ -428,7 +446,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             std::cout << "\n";
         }
     }
-    if (previous.state == PushState::VERIFY_CAPTURE) {
+    if (previous.capture_observation_requested) {
         const auto fb = feedback ? feedback->latestActuatorFeedback() : ActuatorFeedback{};
         if (!observing) {
             multi_view.begin(observed_at, fb.gripper_action_id, ++observation_round);
@@ -502,6 +520,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             gripper_ack,
             imu_data,
             sensor,
-            observed_at};
+            observed_at,
+            geometry_sensor};
 }
 } // namespace rescue::app

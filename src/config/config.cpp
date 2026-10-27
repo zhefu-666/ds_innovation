@@ -70,8 +70,8 @@ void printUsage(const char* program) {
         << "  --pose-model-red P  Red-team pose model override; same thresholds and output schema\n"
         << "  --pose-conf X       Safe-zone half score threshold, default 0.25\n"
         << "  --pose-kpt-conf X   Safe-zone keypoint visibility threshold, default 0.5\n"
-        << "  --detect-core N     RKNN core mask for detector (0 auto, 1, 2, 4)\n"
-        << "  --pose-core N       RKNN core mask for pose (0 auto, 1, 2, 4)\n"
+        << "  --detect-core N     RKNN core mask for detector (0 auto, 1 core0, 2 core1, 3 core0+1, 4 core2)\n"
+        << "  --pose-core N       RKNN core mask for pose (0 auto, 1 core0, 2 core1, 3 core0+1, 4 core2)\n"
         << "  --async-capture     Capture continuously on a latest-frame worker\n"
         << "  --parallel-infer    Run detector and pose concurrently\n"
         << "  --port PATH         MCU serial port, default /dev/ttyACM0\n"
@@ -437,10 +437,10 @@ Config parseArgs(int argc, char** argv) {
     if (!validThreshold(config.pose_confidence) || !validThreshold(config.pose_keypoint_confidence))
         throw std::runtime_error("Pose thresholds must be in [0,1]");
     auto validCore = [](int m) {
-        return m == -1 || m == 0 || m == 1 || m == 2 || m == 4;
+        return m == -1 || m == 0 || m == 1 || m == 2 || m == 3 || m == 4;
     };
     if (!validCore(config.detect_core_mask) || !validCore(config.pose_core_mask))
-        throw std::runtime_error("Core mask must be 0, 1, 2 or 4");
+        throw std::runtime_error("Core mask must be -1, 0, 1, 2, 3 or 4");
     if (!config.pose_model_path.empty() && !config.keypoints_file.empty())
         throw std::runtime_error("Use either --pose-model or --keypoints-file");
     if (config.parallel_inference && config.pose_model_path.empty())

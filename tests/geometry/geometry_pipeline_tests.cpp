@@ -112,24 +112,46 @@ struct Scene {
     }
 };
 int main() {
-    { // Mechanical files require explicit opt-in; the measured 5-degree model is untouched.
+    { // Rejected PnP candidates remain inspectable; diagnostics never change acceptance.
+        Scene s;
+        SafeZoneObservation observation;
+        observation.label = s.geometry.label;
+        const auto objects = s.geometry.objectPoints();
+        observation.object_points.assign(objects.begin(), objects.end());
+        for (const auto& p : s.points().points)
+            observation.image_points.push_back(p.pixel);
+        observation.image_points[0] += cv::Point2f(80, 60);
+        SafeZonePoseEstimator plain(s.K, s.D), diagnostic(s.K, s.D);
+        PnpDiagnostics details;
+        const auto a = plain.estimate(observation, 1000000);
+        const auto b = diagnostic.estimate(observation, 1000000, &details);
+        assert(!a.valid && !b.valid && a.reason == b.reason);
+        assert(b.reason == "ippe_reprojection_rejected");
+        assert(!details.rvec.empty() && !details.tvec.empty());
+        assert(std::isfinite(details.reprojection_error_px) && details.reprojection_error_px > 4);
+        observation.image_points.clear();
+        const auto missing = diagnostic.estimate(observation, 1050000, &details);
+        assert(!missing.valid && missing.reason == "insufficient_points");
+        assert(details.rvec.empty() && details.tvec.empty() &&
+               std::isnan(details.reprojection_error_px));
+    }
+    { // The current validated handeye model is usable only at its fixed pose.
         std::string root = ZONE_GEOMETRY_PATH;
         root = root.substr(0, root.find("#"));
         root = root.substr(0, root.find_last_of('/'));
-        CameraCalibration assumed, measured;
-        assert(!assumed.load(root + "/camera.mechanical_5_40.yaml"));
-        assert(assumed.load(root + "/camera.mechanical_5_40.yaml", true));
+        CameraCalibration measured;
         assert(measured.load(root + "/camera.yaml"));
-        assert(assumed.pitchUsable(500) && assumed.pitchUsable(4000) && !assumed.pitchUsable(4001));
+        assert(measured.pitchUsable(-3000));
+        assert(!measured.pitchUsable(-2999) && !measured.pitchUsable(500));
     }
 
     {
         auto red = ZoneGeometry::load(ZONE_GEOMETRY_PATH, "red_safe_zone");
         auto blue = ZoneGeometry::load(ZONE_GEOMETRY_PATH, "blue_safe_zone");
         assert(red.valid() && blue.valid() && red.supply_left && blue.supply_left);
-        // v2 landmarks: fence tops 660x330 at z=0.02; delivery bounds stay the inner 600x300 floor.
+        // Configured landmarks: 600x300 at z=0.02; delivery bounds are the 600x300 floor.
         const auto p = red.objectPoints();
-        assert(p[0] == cv::Point3f(-.33f, 0, 0) && p[5] == cv::Point3f(.33f, .33f, 0));
+        assert(p[0] == cv::Point3f(-.3f, 0, 0) && p[5] == cv::Point3f(.3f, .3f, 0));
         assert(red.width_m == .6f && red.depth_m == .3f && red.landmark_height_m == .02f &&
                red.id == "rescue2027-fence-top-v2-red");
         auto legacy = ZoneGeometry::load(LEGACY_ZONE_GEOMETRY_PATH, "red_safe_zone");
@@ -164,6 +186,10 @@ int main() {
         assert(out.zone.trusted(s.frame.now_us) &&
                cv::norm(out.zone.origin_body_m - cv::Point2f(.05f, .85f)) < 1e-4);
         assert(out.zone.pnp_checked && out.zone.pnp_consistent);
+        assert(out.pnp_attempted && out.pnp_solution_valid && out.pnp_delta_valid);
+        assert(out.pnp_reason == "ok" && out.pnp_solver_reason == "ok");
+        assert(out.pnp_position_delta_m < 1e-4 && out.pnp_angle_delta_deg < .01);
+        assert(out.pnp_reprojection_error_px < .01);
     }
     {
         Scene s;
@@ -173,6 +199,10 @@ int main() {
         assert(cv::norm(out.zone.origin_body_m - cv::Point2f(.05f, .85f)) < 1e-4);
         assert(std::abs(out.zone.yaw_body_rad - .3f) < 1e-4);
         assert(out.zone.pnp_checked && out.zone.pnp_consistent);
+        assert(out.pnp_attempted && out.pnp_solution_valid && out.pnp_delta_valid);
+        assert(out.pnp_reason == "ok" && out.pnp_solver_reason == "ok");
+        assert(out.pnp_position_delta_m < 1e-4 && out.pnp_angle_delta_deg < .01);
+        assert(out.pnp_reprojection_error_px < .01);
         // A different heading is not rejected just for being oblique or sideways.
         for (float yaw : {-1.1f, 1.1f, 2.2f}) {
             GeometryPipeline independent(s.camera, s.geometry);
@@ -335,6 +365,13 @@ int main() {
         d.timestamp_us = s.frame.capture_us;
         d.box = s.cubeBox({0, .82f});
         d.ground_contact_valid = false;
+        auto zone = d;
+        zone.label = "blue_safe_zone";
+        GeometryPipeline zone_pipeline(s.camera, s.geometry);
+        const auto zone_result = zone_pipeline.process(s.frame, points, {zone});
+        assert(!zone_result.detections[0].ground_position_valid &&
+               !zone_result.detections[0].ground_contact_valid &&
+               zone_result.detections[0].ground_contact_reason == "zone_detection");
         auto result = pipeline.process(s.frame, points, {d});
         assert(result.detections[0].ground_position_valid &&
                result.detections[0].ground_contact_valid);

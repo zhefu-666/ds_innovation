@@ -52,11 +52,11 @@ RknnOutputLayout validateRknnOutputLayout(const std::string& model,
     }
 
     if (dims.size() == 2) {
-        if (dims[0].size() != 3 || dims[1].size() != 3 || dims[0][1] != 4 || dims[1][1] != 4 ||
-            dims[0][2] != dims[1][2])
-            throw std::runtime_error("Expected boxes then four-class scores with equal anchors: " +
-                                     model);
-        layout.channels = 8;
+        if (dims[0].size() != 3 || dims[1].size() != 3 || dims[0][1] != 4 ||
+            (dims[1][1] != 4 && dims[1][1] != 6) || dims[0][2] != dims[1][2])
+            throw std::runtime_error(
+                "Expected boxes then four/six-class scores with equal anchors: " + model);
+        layout.channels = 4 + static_cast<int>(dims[1][1]);
         layout.anchors = static_cast<int>(dims[0][2]);
         return layout;
     }

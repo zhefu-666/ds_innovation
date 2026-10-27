@@ -98,6 +98,45 @@ int main() {
         assert(resolveZoneColor(red, "blue", true).color ==
                "red"); // measurement wins over the fallback
     }
+    { // Model color belongs to the pose half enclosed by its zone box.
+        auto gray = frame.clone();
+        gray.setTo(cv::Scalar(100, 100, 100));
+        SegDetection blue, red;
+        blue.label = "blue_safe_zone";
+        red.label = "red_safe_zone";
+        blue.confidence = red.confidence = .9f;
+        blue.box = red.box = {0, 0, 230, 120};
+        auto detected = ZoneColorClassifier{}.classify(gray, halves, {blue}, .5f);
+        assert(detected.verified && detected.color == "blue" && detected.halves_used == 2 &&
+               detected.reason == "zone_detection");
+        assert(resolveZoneColor(detected, "red", false).reason == "enemy_zone_color");
+        detected = detector.classify(gray, halves, {red}, .5f);
+        assert(detected.verified && detected.color == "red");
+        detected = detector.classify(frame, halves, {blue, red}, .5f);
+        assert(!detected.verified && detected.color.empty() &&
+               detected.reason == "zone_detection_ambiguous");
+        assert(!ZoneColorClassifier{}.classify(gray, {}, {blue}, .5f).verified);
+        blue.box = {215, 0, 15, 120};
+        assert(!ZoneColorClassifier{}.classify(gray, halves, {blue}, .5f).verified);
+        auto separate = halves;
+        for (auto& point : separate[1].keypoints)
+            point.x += 5;
+        blue.box = {0, 0, 113, 120};
+        red.box = {113, 0, 117, 120};
+        detected = detector.classify(gray, separate, {blue, red}, .5f);
+        assert(!detected.verified && detected.reason == "zone_detection_halves_disagree");
+        // Too few visible corners for model association: zone boxes must not mask HSV.
+        auto sparse = halves;
+        for (auto& half : sparse) {
+            half.confidence[2] = .1f;
+            half.confidence[3] = .1f;
+        }
+        assert(!ZoneColorClassifier{}.classify(gray, sparse, {blue}, .5f).verified);
+        blue.box = {0, 0, 230, 120};
+        blue.confidence = 0;
+        detected = detector.classify(frame, halves, {blue}, .5f);
+        assert(detected.verified && detected.color == "red" && detected.reason == "ok");
+    }
     std::cout << "Red/blue identity, loose polygons, incomplete halves, occlusion and ambiguous "
                  "color passed\n";
 }

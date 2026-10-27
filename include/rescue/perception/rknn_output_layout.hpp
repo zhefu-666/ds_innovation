@@ -14,7 +14,7 @@ struct RknnOutputLayout {
 
 // Validate the supported YOLO/RKNN output contracts:
 //   1 branch:  [1,C,N]
-//   2 branches: [1,4,N] boxes, [1,4,N] class scores (detector split)
+//   2 branches: [1,4,N] boxes, [1,4,N] or [1,6,N] class scores (detector split)
 //   4 branches: [1,4,N], [1,2,N], [1,4,2,N], [1,4,1,N] (pose split)
 // The 4-branch contract is normalized to [1,18,N].
 RknnOutputLayout validateRknnOutputLayout(const std::string& model,

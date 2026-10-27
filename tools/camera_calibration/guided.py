@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -16,6 +17,9 @@ from urllib.request import ProxyHandler, build_opener
 import cv2
 import numpy as np
 import calibrate
+
+# Keep the shared module identity when launched as a script.
+sys.modules.setdefault("guided", sys.modules[__name__])
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -83,14 +87,14 @@ def session_pattern(measurement):
     return (int(measurement.get('cols', PATTERN[0])), int(measurement.get('rows', PATTERN[1])))
 
 
-def quality(frame, centers):
+def quality(frame, centers, min_area=.025):
     if centers is None:
         return f'还未识别全部 {CIRCLES} 个圆点：请调整距离、反光和倾角。'
     h, w = frame.shape[:2]
     p = centers.reshape(-1, 2)
     if p[:, 0].min() < 12 or p[:, 1].min() < 12 or p[:, 0].max() > w-12 or p[:, 1].max() > h-12:
         return '圆点太靠近画面边缘，请留出白边。'
-    if cv2.contourArea(cv2.convexHull(centers))/(w*h) < .025:
+    if cv2.contourArea(cv2.convexHull(centers))/(w*h) < min_area:
         return '圆点阵列太小，请靠近一些。'
     x, y, bw, bh = cv2.boundingRect(centers)
     gray = cv2.cvtColor(frame[y:y+bh, x:x+bw], cv2.COLOR_BGR2GRAY)
@@ -150,6 +154,9 @@ def calculate(session, observations, size, measurement):
     (session/'使用说明.txt').write_text(
         '本次标定结果\n' + json.dumps(report, ensure_ascii=False, indent=2) + '\n\n'
         '无需手抄 fx、fy、cx、cy 或畸变系数，intrinsics.yaml 已按 OpenCV 格式保存。\n'
+        '相机—IMU 多轴旋转标定（固定板、整体转动）：\n'
+        f'  python3 tools/camera_calibration/guided.py --mode handeye --intrinsics {session}/intrinsics.yaml --stop-preview\n'
+        '旋转结果单独保存，不包含平移或地面映射。\n'
         'tools/camera_calibration/calibrate.py 的 ground/extrinsics 模式：\n'
         f'  --intrinsics {session}/intrinsics.yaml\n'
         f'extrinsics 模式支持方格棋盘和对称圆点板；本次圆点板需增加 --pattern circles --cols {pattern[0]} --rows {pattern[1]}。\n'
@@ -199,7 +206,8 @@ class Wizard:
             if values.get('confirmed') is not True:
                 raise ValueError('请确认标定板平整、尺寸已实测且相机焦点固定。')
             self.begin_preview()
-            session = Path(self.args.output).resolve()/('circles_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6])
+            prefix = 'handeye_' if getattr(self.args, 'mode', 'intrinsics') == 'handeye' else 'circles_'
+            session = Path(self.args.output).resolve()/(prefix+datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:6])
             (session/'samples').mkdir(parents=True, exist_ok=False)
             (session/'detected').mkdir()
             measurement = dict(horizontal_mm=float(values['horizontal_mm']), vertical_mm=float(values['vertical_mm']),
@@ -313,7 +321,7 @@ class Wizard:
                 frame, timestamp, stamp, sequence = raw
                 previous = sequence
                 centers = detect_circles(frame)
-                reason = quality(frame, centers)
+                reason = quality(frame, centers, .004) if getattr(self.args, 'mode', 'intrinsics') == 'handeye' else quality(frame, centers)
                 annotated = frame.copy()
                 if centers is not None:
                     cv2.drawChessboardCorners(annotated, PATTERN, centers, True)
@@ -349,7 +357,7 @@ class Wizard:
                 raise ValueError('没有新鲜相机画面，请等待或检查相机。')
             if self.error: raise ValueError(self.error)
             if self.centers is None: raise ValueError('尚未识别完整圆点阵列。')
-            if duplicate(self.centers, self.observations):
+            if getattr(self.args, 'mode', 'intrinsics') != 'handeye' and duplicate(self.centers, self.observations):
                 raise ValueError('与已保存的姿态太相近，请按当前提示移动或倾斜标定板。')
             index = len(self.observations)+1
             path = self.session/'samples'/f'{index:03d}.png'
@@ -441,7 +449,9 @@ def handler_for(wizard):
 
         def do_GET(self):
             path = self.path.split('?')[0]
-            if path == '/': self.send((HERE/'guided.html').read_bytes(), 'text/html; charset=utf-8')
+            if path == '/':
+                page = 'handeye.html' if getattr(wizard.args, 'mode', 'intrinsics') == 'handeye' else 'guided.html'
+                self.send((HERE/page).read_bytes(), 'text/html; charset=utf-8')
             elif path == '/board.pdf': self.send((HERE/'assets/circles_9x6.pdf').read_bytes(), 'application/pdf')
             elif path == '/api/state': self.send(json.dumps(wizard.state(), ensure_ascii=False).encode(), 'application/json')
             elif path == '/stream.mjpg':
@@ -466,12 +476,13 @@ def handler_for(wizard):
             elif path == '/preview.jpg':
                 with wizard.lock: jpeg = wizard.jpeg
                 self.send(jpeg or b'', 'image/jpeg', 200 if jpeg else 204)
-            elif path in ('/intrinsics.yaml', '/report.json', '/instructions.txt'):
+            elif path in ('/intrinsics.yaml', '/camera_imu_rotation.yaml', '/report.json', '/instructions.txt'):
                 with wizard.lock:
                     ready = wizard.result is not None
                     session = wizard.session
                 if not ready: self.send(b'Not ready', 'text/plain', 404); return
                 name = {'/instructions.txt': '使用说明.txt'}.get(path, path[1:])
+                if not (session/name).is_file(): self.send(b'Not available', 'text/plain', 404); return
                 self.send((session/name).read_bytes(), 'text/plain; charset=utf-8')
             else: self.send(b'Not found', 'text/plain', 404)
 
@@ -510,16 +521,24 @@ def describe_existing_service(args):
             return False
     except (OSError, ValueError):
         return False
-    print(f'标定程序已经在运行，请直接打开 http://192.168.1.123:{args.port}/')
+    print(f'标定程序已经在运行，请打开 http://<当前板端地址>:{args.port}/；模式：{state.get("mode", "intrinsics")}')
     print(f'当前已保存 {state["count"]}/{state["total"]} 张照片；现有会话和相机继续运行。')
     if state.get('foxglove_port'):
-        print(f'Foxglove：ws://192.168.1.123:{state["foxglove_port"]}')
+        print(f'Foxglove：ws://<当前板端地址>:{state["foxglove_port"]}')
     print('本次未启动第二份程序，新的启动参数未应用。需要重启时请先结束原进程。')
     return True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--mode', choices=('intrinsics', 'handeye'), default='intrinsics',
+                        help='handeye: fixed board + rigid camera/IMU multi-axis rotation, AX=XB rotation only')
+    parser.add_argument('--intrinsics', type=Path, default=ROOT/'config/camera.yaml')
+    parser.add_argument('--imu-port', default='/dev/ttyUSB0')
+    parser.add_argument('--imu-baud', type=int, default=115200)
+    parser.add_argument('--imu-recorder', type=Path, default=ROOT/'build-release/rescue_imu_record')
+    parser.add_argument('--camera-time-offset-ms', type=float, default=0.,
+                        help='Add to image monotonic timestamp to align with IMU clock; fixed offset, not estimated')
     parser.add_argument('--camera', default='/dev/video0')
     parser.add_argument('--width', type=int, default=1280)
     parser.add_argument('--height', type=int, default=720)
@@ -533,6 +552,8 @@ def main():
     parser.add_argument('--stop-preview', action='store_true', help='Stop managed preview when user starts camera')
     parser.add_argument('--recalculate', type=Path, help='Recalculate an existing complete session from its original PNGs')
     args = parser.parse_args()
+    if not math.isfinite(args.camera_time_offset_ms) or abs(args.camera_time_offset_ms) > 1000:
+        parser.error('camera time offset must be finite and within +/-1000 ms')
     if not (1 <= args.camera_fps <= 120 and 1 <= args.preview_fps <= 60 and 1 <= args.detect_fps <= 30):
         parser.error('Invalid frame rate')
     cv2.setNumThreads(2)
@@ -549,9 +570,19 @@ def main():
             centers = detect_circles(frame, session_pattern(measurement))
             if centers is None: parser.error(f'Circle detection failed on image {i}')
             observations.append(centers)
-        print(json.dumps(calculate(session, observations, size, measurement), ensure_ascii=False, indent=2))
+        solver = calculate
+        if measurement.get('mode') == 'handeye':
+            from handeye import calculate as solver
+        print(json.dumps(solver(session, observations, size, measurement), ensure_ascii=False, indent=2))
         return
-    wizard = Wizard(args)
+    if args.mode == 'handeye':
+        import handeye
+        global STEPS
+        STEPS = handeye.STEPS
+        try: wizard = handeye.make_wizard_class()(args)
+        except (ValueError, cv2.error) as exc: parser.error(str(exc))
+    else:
+        wizard = Wizard(args)
     try:
         server = ThreadingHTTPServer((args.host, args.port), handler_for(wizard))
     except OSError as exc:
@@ -566,9 +597,9 @@ def main():
         server.server_close()
         wizard.foxglove.close()
         parser.exit(1, f'{exc}。请检查 {args.foxglove_port} 端口，或使用 --foxglove-port 指定空闲端口。\n')
-    print(f'圆点标定已启动。电脑打开 http://192.168.1.123:{args.port}/', flush=True)
+    print(f'圆点标定已启动。电脑打开 http://<当前板端地址>:{args.port}/', flush=True)
     print('点击「仅预览」或填写尺寸后点击「开始」才打开相机。Ctrl+C 退出；原图与结果会保留。', flush=True)
-    print(f'Foxglove 连接 ws://192.168.1.123:{wizard.foxglove.port}，图像话题 /calibration/image', flush=True)
+    print(f'Foxglove 连接 ws://<当前板端地址>:{wizard.foxglove.port}，图像话题 /calibration/image', flush=True)
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally: server.server_close(); wizard.close(); wizard.foxglove.close()

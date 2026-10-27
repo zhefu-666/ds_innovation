@@ -1,6 +1,6 @@
 // Node 22+; verifies both remote endpoints without extra packages.
 import { writeFileSync } from 'node:fs';
-const host = process.argv[2] || '192.168.1.123';
+const host = process.argv[2] || '10.63.153.7';
 const output = process.argv[3] || '/tmp/remote-camera.jpg';
 const status = await (await fetch(`http://${host}:8080/status`, {signal: AbortSignal.timeout(5000)})).json();
 if (!status.camera_ok) throw Error(JSON.stringify(status));

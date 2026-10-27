@@ -24,7 +24,11 @@ void SafeZonePoseEstimator::reset() {
     previous_us_ = last_us_ = pending_us_ = 0;
     pending_count_ = 0;
 }
-SafeZonePose SafeZonePoseEstimator::estimate(const SafeZoneObservation& o, uint64_t now) {
+SafeZonePose SafeZonePoseEstimator::estimate(const SafeZoneObservation& o,
+                                             uint64_t now,
+                                             PnpDiagnostics* diagnostics) {
+    if (diagnostics)
+        *diagnostics = {};
     SafeZonePose result;
     result.label = o.label;
     const auto fail = [&](const char* why, bool keep_pending = false) {
@@ -111,6 +115,13 @@ SafeZonePose SafeZonePoseEstimator::estimate(const SafeZoneObservation& o, uint6
             sum += e * e;
         }
         const double rms = std::sqrt(sum / projected.size());
+        if (diagnostics && std::isfinite(rms) &&
+            (!std::isfinite(diagnostics->reprojection_error_px) ||
+             rms < diagnostics->reprojection_error_px)) {
+            diagnostics->rvec = rv[i].clone();
+            diagnostics->tvec = tv[i].clone();
+            diagnostics->reprojection_error_px = rms;
+        }
         if (!std::isfinite(rms) || rms > max_error_px_)
             continue;
         double score = rms;
@@ -131,6 +142,11 @@ SafeZonePose SafeZonePoseEstimator::estimate(const SafeZoneObservation& o, uint6
         rotationDistance(rv[candidates[0].index], rv[candidates[1].index]) > .15)
         return fail("ippe_ambiguous");
     const auto best = candidates.front();
+    if (diagnostics) {
+        diagnostics->rvec = rv[best.index].clone();
+        diagnostics->tvec = tv[best.index].clone();
+        diagnostics->reprojection_error_px = best.rms;
+    }
     result.rvec = rv[best.index];
     result.tvec = tv[best.index];
     result.reprojection_error_px = best.rms;

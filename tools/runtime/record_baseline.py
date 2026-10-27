@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # Retired configs and protocol fixtures retain the exact frozen bytes.
 # Current protocol fixtures remain separate and continue to test current behavior.
 LEGACY_RESOURCE_PATHS = {
+    "config/camera.yaml": "tests/fixtures/legacy_config/camera.yaml",
+    "config/camera.mechanical_5_40.yaml": "tests/fixtures/legacy_config/camera.mechanical_5_40.yaml",
     "tests/fixtures/frame_mapping.synthetic.json": "tests/fixtures/legacy_config/frame_mapping.synthetic.json",
     "config/frame_20261008.demo.json": "tests/fixtures/legacy_config/frame_20261008.demo.json",
     "config/task_calibration.40_candidate.json": "tests/fixtures/legacy_config/task_calibration.40_candidate.json",

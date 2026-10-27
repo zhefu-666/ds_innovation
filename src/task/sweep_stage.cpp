@@ -12,28 +12,28 @@
 
 namespace rescue {
 
-void SweepStage::update(PushState state,
+void SweepStage::update(SearchAction state,
                         const TaskTuning& t,
                         const PushObservation& in,
                         const SweepContext& c,
                         const SweepServices& s) {
     switch (state) {
-        case PushState::SCATTER:
+        case SearchAction::Scatter:
             scatter(t, in, c, s);
             break;
-        case PushState::PILE:
+        case SearchAction::Pile:
             pile(t, in, c, s);
             break;
-        case PushState::CUE_APPROACH:
+        case SearchAction::CueApproach:
             cueApproach(t, in, c, s);
             break;
-        case PushState::CUE_PREPARE:
+        case SearchAction::CuePrepare:
             cuePrepare(t, in, c, s);
             break;
-        case PushState::CLEAR_PILE:
+        case SearchAction::ClearPile:
             clearPile(t, in, c, s);
             break;
-        case PushState::CLEAR_PAUSE:
+        case SearchAction::ClearPause:
             clearPause(t, in, c, s);
             break;
         default:
@@ -48,44 +48,44 @@ void SweepStage::scatter(const TaskTuning& t,
     const uint64_t now = c.now_us;
     const uint64_t elapsed = c.elapsed_us;
     const TaskTuning& t_ = t;
-    float& motion_vx = *c.motion_vx;
-    float& motion_wz = *c.motion_wz;
+    float& motion_vx = c.motion.vx_mps;
+    float& motion_wz = c.motion.wz_rps;
     const bool clutter_fresh = c.clutter_fresh;
     const bool scatter_ok = c.scatter_ok;
     const bool sweepOver = c.sweep_over;
     const bool sweep_op_timeout = c.sweep_operation_timeout;
-    auto& approach_forward_ = *c.approach_forward;
-    auto& burst_fast_ = *c.burst_fast;
-    auto& burst_swing_ = *c.burst_swing;
-    auto& burst_swing_armed_ = *c.burst_swing_armed;
-    auto& disperse_rush_m_ = *c.disperse_rush_m;
-    auto& reason_ = *c.reason;
-    auto& scan_mid_limit_ = *c.scan_mid_limit;
-    auto& scan_turn_acc_ = *c.scan_turn_acc;
-    auto& scatter_approach_m_ = *c.scatter_approach_m;
-    auto& scatter_approach_n_ = *c.scatter_approach_n;
-    auto& scatter_commit_ = *c.scatter_commit;
-    auto& scatter_cool_until_us_ = *c.scatter_cool_until_us;
-    auto& scatter_far_ = *c.scatter_far;
-    auto& scatter_idle_since_us_ = *c.scatter_idle_since_us;
-    auto& scatter_range_ = *c.scatter_range;
-    auto& scatter_seen_ = *c.scatter_seen;
-    auto& scatter_yaw_ = *c.scatter_yaw;
-    auto& sweep_phase_ = *c.sweep_phase;
-    auto& sweep_pitch_ = *c.sweep_pitch;
-    auto& sweep_start_us_ = *c.sweep_start_us;
-    auto& sweep_t0_us_ = *c.sweep_t0_us;
-    auto& sweep_travel0_ = *c.sweep_travel0;
-    auto& travel_ = *c.travel;
-    auto& sweep_ledger_ = *c.sweep_ledger;
-    auto& disperse_turn_ = *c.disperse_turn;
+    auto& approach_forward_ = c.trip_data.approach_forward_;
+    auto& burst_fast_ = c.search.burst_fast_;
+    auto& burst_swing_ = c.search.burst_swing_;
+    auto& burst_swing_armed_ = c.search.burst_swing_armed_;
+    auto& disperse_rush_m_ = c.search.disperse_rush_m_;
+    auto& reason_ = c.reason;
+    auto& scan_mid_limit_ = c.search.scan_mid_limit_;
+    auto& scan_turn_acc_ = c.search.scan_turn_acc_;
+    auto& scatter_approach_m_ = c.search.scatter_approach_m_;
+    auto& scatter_approach_n_ = c.search.scatter_approach_n_;
+    auto& scatter_commit_ = c.search.scatter_commit_;
+    auto& scatter_cool_until_us_ = c.search.scatter_cool_until_us_;
+    auto& scatter_far_ = c.search.scatter_far_;
+    auto& scatter_idle_since_us_ = c.search.scatter_idle_since_us_;
+    auto& scatter_range_ = c.search.scatter_range_;
+    auto& scatter_seen_ = c.search.scatter_seen_;
+    auto& scatter_yaw_ = c.search.scatter_yaw_;
+    auto& sweep_phase_ = c.search.sweep_phase_;
+    auto& sweep_pitch_ = c.search.sweep_pitch_;
+    auto& sweep_start_us_ = c.search.sweep_start_us_;
+    auto& sweep_t0_us_ = c.search.sweep_t0_us_;
+    auto& sweep_travel0_ = c.search.sweep_travel0_;
+    auto& travel_ = c.progress.travel;
+    auto& sweep_ledger_ = c.ledger;
+    auto& disperse_turn_ = c.search.disperse_turn_;
     const auto commandFrame = [&](uint8_t open, uint64_t at) {
         s.command_frame(open, at);
     };
     const auto drive = [&](float vx, float wz) {
         s.drive(vx, wz);
     };
-    const auto enter = [&](PushState st, uint64_t at, const char* why) {
+    const auto enter = [&](SearchAction st, uint64_t at, const char* why) {
         s.enter(st, at, why);
     };
     const auto candidate = [&](const PushObservation& o, uint64_t at) {
@@ -134,7 +134,7 @@ void SweepStage::scatter(const TaskTuning& t,
             if (swung && std::strcmp(why, "blind_scatter_done") == 0 &&
                 beginPileFromSweep("pile_chain_scatter"))
                 return;
-            enter(PushState::SCAN, now, why);
+            enter(SearchAction::Scan, now, why);
         };
         const auto approachEnd =
             [&](const char* why) { // no sweep happened: keep the scatter budget, retrigger from
@@ -143,7 +143,7 @@ void SweepStage::scatter(const TaskTuning& t,
                 ++scatter_approach_n_;
                 burst_fast_ = false;
                 sweep_ledger_.pause(now);
-                enter(PushState::SCAN, now, why);
+                enter(SearchAction::Scan, now, why);
                 scatter_idle_since_us_ =
                     now > t_.blind_scatter_wait_us ? now - t_.blind_scatter_wait_us : 1;
             };
@@ -322,45 +322,45 @@ void SweepStage::pile(const TaskTuning& t,
     const uint64_t now = c.now_us;
     const uint64_t elapsed = c.elapsed_us;
     const TaskTuning& t_ = t;
-    float& motion_vx = *c.motion_vx;
-    float& motion_wz = *c.motion_wz;
+    float& motion_vx = c.motion.vx_mps;
+    float& motion_wz = c.motion.wz_rps;
     const bool clutter_fresh = c.clutter_fresh;
-    auto& approach_forward_ = *c.approach_forward;
-    auto& burst_swing_ = *c.burst_swing;
-    auto& confirmations_ = *c.confirmations;
-    auto& cue_mode_ = *c.cue_mode;
-    auto& disperse_cool_until_us_ = *c.disperse_cool_until_us;
-    auto& disperse_rush_m_ = *c.disperse_rush_m;
-    auto& disperse_small_ = *c.disperse_small;
-    auto& pile_chain_n_ = *c.pile_chain_n;
-    auto& pile_cool_until_us_ = *c.pile_cool_until_us;
-    auto& pile_phase_ = *c.pile_phase;
-    auto& pile_phase_us_ = *c.pile_phase_us;
-    auto& pile_push0_ = *c.pile_push0;
-    auto& pile_runs_ = *c.pile_runs;
-    auto& pile_seen_ = *c.pile_seen;
-    auto& pile_yaw0_ = *c.pile_yaw0;
-    auto& reason_ = *c.reason;
-    auto& scan_mid_limit_ = *c.scan_mid_limit;
-    auto& scan_turn_acc_ = *c.scan_turn_acc;
-    auto& scatter_cool_until_us_ = *c.scatter_cool_until_us;
-    auto& sweep_phase_ = *c.sweep_phase;
-    auto& sweep_start_us_ = *c.sweep_start_us;
-    auto& sweep_travel0_ = *c.sweep_travel0;
-    auto& sweep_yaw0_ = *c.sweep_yaw0;
-    auto& target_id_ = *c.target_id;
-    auto& travel_ = *c.travel;
-    auto& sweep_ledger_ = *c.sweep_ledger;
-    auto& disperse_rush_ = *c.disperse_rush;
-    auto& disperse_turn_ = *c.disperse_turn;
-    auto& disperse_swing_ = *c.disperse_swing;
+    auto& approach_forward_ = c.trip_data.approach_forward_;
+    auto& burst_swing_ = c.search.burst_swing_;
+    auto& confirmations_ = c.progress.confirmations;
+    auto& cue_mode_ = c.search.cue_mode_;
+    auto& disperse_cool_until_us_ = c.search.disperse_cool_until_us_;
+    auto& disperse_rush_m_ = c.search.disperse_rush_m_;
+    auto& disperse_small_ = c.search.disperse_small_;
+    auto& pile_chain_n_ = c.search.pile_chain_n_;
+    auto& pile_cool_until_us_ = c.search.pile_cool_until_us_;
+    auto& pile_phase_ = c.search.pile_phase_;
+    auto& pile_phase_us_ = c.search.pile_phase_us_;
+    auto& pile_push0_ = c.search.pile_push0_;
+    auto& pile_runs_ = c.search.pile_runs_;
+    auto& pile_seen_ = c.search.pile_seen_;
+    auto& pile_yaw0_ = c.search.pile_yaw0_;
+    auto& reason_ = c.reason;
+    auto& scan_mid_limit_ = c.search.scan_mid_limit_;
+    auto& scan_turn_acc_ = c.search.scan_turn_acc_;
+    auto& scatter_cool_until_us_ = c.search.scatter_cool_until_us_;
+    auto& sweep_phase_ = c.search.sweep_phase_;
+    auto& sweep_start_us_ = c.search.sweep_start_us_;
+    auto& sweep_travel0_ = c.search.sweep_travel0_;
+    auto& sweep_yaw0_ = c.search.sweep_yaw0_;
+    auto& target_id_ = c.trip_data.target_id_;
+    auto& travel_ = c.progress.travel;
+    auto& sweep_ledger_ = c.ledger;
+    auto& disperse_rush_ = c.search.disperse_rush_;
+    auto& disperse_turn_ = c.search.disperse_turn_;
+    auto& disperse_swing_ = c.search.disperse_swing_;
     const auto commandFrame = [&](uint8_t open, uint64_t at) {
         s.command_frame(open, at);
     };
     const auto drive = [&](float vx, float wz) {
         s.drive(vx, wz);
     };
-    const auto enter = [&](PushState st, uint64_t at, const char* why) {
+    const auto enter = [&](SearchAction st, uint64_t at, const char* why) {
         s.enter(st, at, why);
     };
     const auto targetBody = [&] {
@@ -393,7 +393,7 @@ void SweepStage::pile(const TaskTuning& t,
             s.clear_rejected_bearings();
             scan_mid_limit_ = scan_turn_acc_ + 2.f * float(CV_PI);
             std::cout << "[PILE] end why=" << why << " runs=" << pile_runs_ << "\n";
-            enter(PushState::SCAN, now, why);
+            enter(SearchAction::Scan, now, why);
         };
         const auto setPhase = [&](int ph) {
             pile_phase_ = ph;
@@ -791,20 +791,20 @@ void SweepStage::cueApproach(const TaskTuning& t,
     const uint64_t now = c.now_us;
     const uint64_t elapsed = c.elapsed_us;
     const TaskTuning& t_ = t;
-    auto& capture_target_id_ = *c.capture_target_id;
-    auto& cue_mode_ = *c.cue_mode;
-    auto& label_ = *c.label;
-    auto& misses_ = *c.misses;
-    auto& reason_ = *c.reason;
-    auto& search_cue_id_ = *c.search_cue_id;
-    auto& target_id_ = *c.target_id;
-    auto& track_close_ = *c.track_close;
+    auto& capture_target_id_ = c.trip_data.capture_target_id_;
+    auto& cue_mode_ = c.search.cue_mode_;
+    auto& label_ = c.trip_data.label_;
+    auto& misses_ = c.progress.misses;
+    auto& reason_ = c.reason;
+    auto& search_cue_id_ = c.search.search_cue_id_;
+    auto& target_id_ = c.trip_data.target_id_;
+    auto& track_close_ = c.progress.track_close;
     const bool first_ = c.first_ordinary;
     const int16_t pitch_cmd_ = c.pitch_cmd;
     const auto commandFrame = [&](uint8_t open, uint64_t at) {
         s.command_frame(open, at);
     };
-    const auto enter = [&](PushState st, uint64_t at, const char* why) {
+    const auto enter = [&](SearchAction st, uint64_t at, const char* why) {
         s.enter(st, at, why);
     };
     const auto scanAfterClear = [&](const char* why) {
@@ -858,7 +858,7 @@ void SweepStage::cueApproach(const TaskTuning& t,
             cue_mode_ = false;
             const bool mid = t_.intermediate_pitch_cdeg > t_.far_pitch_cdeg &&
                              t_.intermediate_pitch_cdeg < t_.track_pitch_cdeg;
-            enter(mid ? PushState::MID_REACQUIRE : PushState::NEAR_REACQUIRE,
+            enter(mid ? SearchAction::MidReacquire : SearchAction::NearReacquire,
                   now,
                   mid ? "mid_reacquire_pitch_wait" : "near_reacquire_pitch_wait");
             break;
@@ -872,7 +872,7 @@ void SweepStage::cueApproach(const TaskTuning& t,
         if (in.distance_m <= t_.rush_start_m) {
             target_id_ = -1;
             cue_mode_ = false;
-            enter(PushState::SELECT_CARGO, now, "select_cargo_at_near_range");
+            enter(SearchAction::SelectCargo, now, "select_cargo_at_near_range");
             break;
         }
         steer(t_.cue_approach_speed, in.heading_error);
@@ -887,13 +887,13 @@ void SweepStage::cuePrepare(const TaskTuning& t,
     const uint64_t now = c.now_us;
     const uint64_t elapsed = c.elapsed_us;
     const TaskTuning& t_ = t;
-    auto& clear_attempts_ = *c.clear_attempts;
-    auto& clear_commanded_us_ = *c.clear_commanded_us;
-    auto& confirmations_ = *c.confirmations;
+    auto& clear_attempts_ = c.search.clear_attempts_;
+    auto& clear_commanded_us_ = c.search.clear_commanded_us_;
+    auto& confirmations_ = c.progress.confirmations;
     const auto commandFrame = [&](uint8_t open, uint64_t at) {
         s.command_frame(open, at);
     };
-    const auto enter = [&](PushState st, uint64_t at, const char* why) {
+    const auto enter = [&](SearchAction st, uint64_t at, const char* why) {
         s.enter(st, at, why);
     };
     const auto failStop = [&](const char* why) {
@@ -920,7 +920,7 @@ void SweepStage::cuePrepare(const TaskTuning& t,
         clear_heading_rad_ = in.heading_rad;
         clear_commanded_us_ = 0;
         ++clear_attempts_;
-        enter(PushState::CLEAR_PILE, now, "closed_push_010");
+        enter(SearchAction::ClearPile, now, "closed_push_010");
         break;
     } while (false);
 }
@@ -932,14 +932,14 @@ void SweepStage::clearPile(const TaskTuning& t,
     const uint64_t now = c.now_us;
     const uint64_t elapsed = c.elapsed_us;
     const TaskTuning& t_ = t;
-    float& motion_vx = *c.motion_vx;
-    float& motion_wz = *c.motion_wz;
+    float& motion_vx = c.motion.vx_mps;
+    float& motion_wz = c.motion.wz_rps;
     const float target_forward_m = c.target_forward_m;
-    auto& travel_ = *c.travel;
+    auto& travel_ = c.progress.travel;
     const auto commandFrame = [&](uint8_t open, uint64_t at) {
         s.command_frame(open, at);
     };
-    const auto enter = [&](PushState st, uint64_t at, const char* why) {
+    const auto enter = [&](SearchAction st, uint64_t at, const char* why) {
         s.enter(st, at, why);
     };
     const auto failStop = [&](const char* why) {
@@ -960,7 +960,7 @@ void SweepStage::clearPile(const TaskTuning& t,
             break;
         }
         if (target_forward_m <= t_.grasp_trigger_y_m) {
-            enter(PushState::CLEAR_PAUSE, now, "clear_target_distance_reached");
+            enter(SearchAction::ClearPause, now, "clear_target_distance_reached");
             break;
         }
         // Time/integrated command only bounds an attempt; it never proves arrival.
@@ -983,7 +983,7 @@ void SweepStage::clearPause(const TaskTuning& t,
     const auto commandFrame = [&](uint8_t open, uint64_t at) {
         s.command_frame(open, at);
     };
-    const auto enter = [&](PushState st, uint64_t at, const char* why) {
+    const auto enter = [&](SearchAction st, uint64_t at, const char* why) {
         s.enter(st, at, why);
     };
     const auto clearTrip = [&] {
@@ -995,7 +995,7 @@ void SweepStage::clearPause(const TaskTuning& t,
         commandFrame(0, now);
         if (elapsed >= 500000) {
             clearTrip();
-            enter(PushState::MID_REACQUIRE, now, "clear_reobserve_cargo");
+            enter(SearchAction::MidReacquire, now, "clear_reobserve_cargo");
         }
     } while (false);
 }

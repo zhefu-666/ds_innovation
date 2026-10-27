@@ -336,6 +336,9 @@ int main() {
     auto sample = [&](bool has = true) {
         now += 20000;
         d.timestamp_us = now;
+        auto blue_zone = object(100, {0, 0, 100, 100}, "blue_safe_zone");
+        auto red_zone = object(101, {20, 20, 30, 30}, "red_safe_zone");
+        blue_zone.timestamp_us = red_zone.timestamp_us = now;
         multi.update(now,
                      now,
                      7,
@@ -343,7 +346,8 @@ int main() {
                      true,
                      multi.desiredPitch(),
                      true,
-                     has ? std::vector<SegDetection>{d} : std::vector<SegDetection>{});
+                     has ? std::vector<SegDetection>{d, blue_zone, red_zone}
+                         : std::vector<SegDetection>{blue_zone, red_zone});
     };
     multi.begin(now, 7, 1);
     for (int i = 0; i < 4; ++i)

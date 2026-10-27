@@ -1,5 +1,7 @@
 #pragma once
 #include "rescue/task/transport_rules.hpp"
+#include "rescue/task/task_phase.hpp"
+#include "rescue/task/disperse_cluster_stage.hpp"
 #include "rescue/core/types.hpp"
 #include "rescue/geometry/zone_estimate.hpp"
 #include "rescue/geometry/zone_dead_reckoning.hpp"
@@ -31,6 +33,8 @@ namespace rescue {
 // Legacy gripper_done / gripper_feedback_open observations retain the unchanged A6 binary
 // interface: assumed raw bits configured after acceptance; fresh action-ID matching is required.
 // Camera phases and visual enclosure checks remain mandatory; A6 is not proof of capture.
+// Compatibility action identifier for hardware helpers, old logs and replay fixtures.
+// Business dispatch uses TaskPhase; each phase owns its local action.
 enum class PushState {
     WAIT_START,
     START_ADVANCE,
@@ -186,6 +190,26 @@ struct PushObservation {
                                  // driving (0 = moving or unknown)
 };
 struct PushOutput {
+    TaskPhase phase = TaskPhase::Startup;
+    RunStatus run_status = RunStatus::Waiting;
+    SearchAction search_action = SearchAction::Scan;
+    CaptureAction capture_action = CaptureAction::Advance;
+    TransportAction transport_action = TransportAction::Carry;
+    bool recovering = false;
+    CaptureEvidence capture_evidence = CaptureEvidence::None;
+    int delivery_expected = 0, delivery_credited = 0;
+    bool delivery_visual = false;
+    bool capture_observation_requested = false;
+    bool corridor_observation_requested = false;
+    bool navigation_requested = false;
+    bool navigation_gate = false;
+    bool navigation_release = false;
+    bool navigation_approach = false;
+    bool navigation_reset = true;
+    bool stationary_pitch_work = false;
+    bool scan_pitch_return = false;
+    bool target_reselecting = false;
+    // Compatibility diagnostic action, not the business-phase dispatcher.
     PushState state = PushState::WAIT_START;
     MotionCommand motion; // includes gripper_offset and camera_pitch_cdeg
     int target_id = -1, batch_size = 0, delivered_total = 0;
@@ -535,6 +559,7 @@ struct TaskTuning {
     uint64_t scan_hold_max_us = 1500000, scan_hold_lost_us = 400000, scan_hold_cool_us = 1500000;
     float inplace_turn_boost =
         1.f; // multiplies in-place turn rate in approach-type states, after the max_wz clamp
+    // Reserved compatibility settings; Startup is currently a no-motion placeholder.
     float startup_advance_speed = .1f;
     float startup_hold_gain = 1.5f,
           startup_hold_deadband_rad = .035f; // IMU yaw hold while START_ADVANCE crosses bumps
@@ -614,6 +639,148 @@ struct TaskTuning {
     int hold_check_frames = 2;
     uint64_t hold_check_interval_us = 3000000, pitch_timeout_us = 2000000;
 };
+struct TripContext {
+    int capture_target_id_ = -1;
+    int target_id_ = -1;
+    std::string label_;
+    Inventory trip_;
+    Inventory pending_;
+    Inventory seen_;
+    RuleVerdict verdict_ = RuleVerdict::OK;
+    float approach_forward_ = 0;
+};
+
+struct ActionProgress {
+    uint64_t started_us = 0;
+    int confirmations = 0, misses = 0, step = 0, hold_misses = 0;
+    float travel = 0, travel_limit = 0, turned = 0, last_heading = 0, last_range = 0;
+    bool heading_seen = false, track_close = false, blind = false;
+};
+struct SearchPhaseData {
+    SearchAction action = SearchAction::Scan;
+    ActionProgress progress;
+    bool cue_mode_ = false;
+    int clear_attempts_ = 0;
+    int near_failures_ = 0;
+    uint64_t clear_commanded_us_ = 0;
+    uint64_t clear_planned_us_ = 0;
+    int search_cue_id_ = -1;
+    int pile_phase_ = 0;
+    int pile_runs_ = 0;
+    int pile_seen_ = 0;
+    uint64_t pile_phase_us_ = 0;
+    uint64_t pile_cool_until_us_ = 0;
+    float pile_yaw0_ = 0;
+    float pile_push0_ = -1.f;
+    int pile_chain_n_ = 0;
+    int approach_last_id_ = -1;
+    float approach_last_heading_ = 0.f;
+    float approach_last_distance_ = 0.f;
+    float approach_last_world_yaw_ = 0.f;
+    bool approach_last_world_valid_ = false;
+    bool approach_rebind_ = false;
+    int16_t approach_pitch_ = kCameraPitchInvalid;
+    int16_t sweep_pitch_ = kCameraPitchInvalid;
+    bool sweep_non_supply_active_ = false;
+    int scatter_approach_n_ = 0;
+    bool scatter_far_ = false;
+    float scatter_approach_m_ = 0;
+    bool burst_drive_used_ = false;
+    bool burst_fast_ = false;
+    bool burst_swing_armed_ = false;
+    bool burst_swing_ = false;
+    int scatter_count_ = 0;
+    int scatter_seen_ = 0;
+    bool scatter_commit_ = false;
+    uint64_t scatter_cool_until_us_ = 0;
+    uint64_t scatter_idle_since_us_ = 0;
+    float scatter_yaw_ = 0;
+    float scatter_range_ = 0;
+    float scan_turn_acc_ = 0;
+    float scan_mid_limit_ = 0;
+    bool post_disperse_mid_ = false;
+    bool disperse_small_ = false;
+    int mid_clear_n_ = 0;
+    int precheck_seen_ = 0;
+    int precheck_rejects_ = 0;
+    int sweep_phase_ = 0;
+    int sweep_attempts_ = 0;
+    int sweep_seen_ = 0;
+    float sweep_travel0_ = 0;
+    float disperse_rush_m_ = 0;
+    float disperse_sign_ = 1;
+    uint64_t disperse_cool_until_us_ = 0;
+    float sweep_yaw0_ = 0;
+    uint64_t sweep_start_us_ = 0;
+    uint64_t sweep_t0_us_ = 0;
+    int unstick_step_ = 0;
+    uint64_t unstick_us_ = 0;
+    int rush_pulse_phase_ = 0;
+    int rush_pulse_count_ = 0;
+    SweepTriggerPlanner sweep_trigger_;
+    DisperseRushStage disperse_rush_;
+    DisperseTurnStage disperse_turn_;
+    DisperseSwingStage disperse_swing_;
+    SearchStage search_;
+    SweepStage sweep_;
+    int lost_round_ = 0;
+    int corridor_retries_ = 0;
+};
+struct CapturePhaseData {
+    CaptureAction action = CaptureAction::Advance;
+    ActionProgress progress;
+    CaptureEvidence evidence = CaptureEvidence::None;
+    bool rush_stall_phase_ = false;
+    int rush_stall_id_ = -1;
+    int rush_stall_samples_ = 0;
+    int rush_stall_obs_frames_ = 0;
+    float rush_stall_ref_m_ = 0;
+    uint64_t rush_stall_ref_us_ = 0;
+    uint64_t rush_stall_last_us_ = 0;
+    uint64_t rush_stall_obs_us_ = 0;
+    int16_t rush_stall_pitch_ = kCameraPitchInvalid;
+    uint64_t prelower_us_ = 0;
+    CaptureVerificationStage capture_verification_;
+};
+struct TransportPhaseData {
+    TransportAction action = TransportAction::Carry;
+    ActionProgress progress;
+    int expected = 0, credited = 0;
+    bool visual = false;
+    int baseline_ = 0;
+    int baseline_other_ = 0;
+    std::string delivery_geometry_id_;
+    uint64_t zone_search_started_us_ = 0;
+    uint64_t carry_us_ = 0;
+    uint64_t hold_seen_us_ = 0;
+    float carried_ = 0;
+    bool drop_locked_ = false;
+    bool half_locked_ = false;
+    bool half_injured_ = false;
+    float half_x_ = 0;
+    int repush_n_ = 0;
+    uint64_t cargo_last_ts_ = 0;
+    uint64_t cargo_ref_us_ = 0;
+    uint64_t cargo_seen_us_ = 0;
+    cv::Point2f cargo_ref_body_;
+    cv::Point2f cargo_ref_zone_;
+    bool cargo_fix_ = false;
+    bool cargo_clipped_ = false;
+    float cargo_rear_x_ = 0;
+    float cargo_rear_y_ = 0;
+    cv::Point2f cargo_body_;
+    bool delivery_visual_ = false;
+    bool assume_pushed_ = false;
+    DeliveryVerificationStage delivery_verification_;
+    ReleaseRetreatStage release_retreat_;
+    PushInStage push_in_;
+    EnterStage enter_;
+    CarryApproachStage carry_approach_;
+    CarrySearchStage carry_search_;
+    cv::Point2f drop_centre_zone_;
+};
+
+struct TaskTick;
 class PushTask {
   public:
     explicit PushTask(TaskTuning tuning = {}) : t_(tuning) {
@@ -650,20 +817,91 @@ class PushTask {
 
   private:
     TaskTuning t_;
+    TripContext trip_context_;
+    TaskPhase phase_ = TaskPhase::Startup;
+    RunStatus run_status_ = RunStatus::Waiting;
+    bool recovering_ = false;
+    PhaseOutcome phase_outcome_ = PhaseOutcome::Running;
+    std::string phase_outcome_reason_;
+    void requestPhase(PhaseOutcome outcome, const char* why) {
+        phase_outcome_ = outcome;
+        phase_outcome_reason_ = why ? why : "";
+    }
+    void applyPhaseOutcome(uint64_t now);
+    void enterSearch(SearchAction action, uint64_t now, const char* why);
+    SearchPhaseData search_phase_;
+    CapturePhaseData capture_phase_;
+    TransportPhaseData transport_phase_;
+    ActionProgress startup_progress_;
+    ActionProgress& actionProgress() {
+        switch (phase_) {
+            case TaskPhase::Search:
+                return search_phase_.progress;
+            case TaskPhase::Capture:
+                return capture_phase_.progress;
+            case TaskPhase::Transport:
+                return transport_phase_.progress;
+            case TaskPhase::Startup:
+                return startup_progress_;
+        }
+        return startup_progress_;
+    }
+    const ActionProgress& actionProgress() const {
+        switch (phase_) {
+            case TaskPhase::Search:
+                return search_phase_.progress;
+            case TaskPhase::Capture:
+                return capture_phase_.progress;
+            case TaskPhase::Transport:
+                return transport_phase_.progress;
+            case TaskPhase::Startup:
+                return startup_progress_;
+        }
+        return startup_progress_;
+    }
+
+    void failStop(TaskTick& tick, const char* why);
+    void scanAfterClear(TaskTick& tick, const char* why);
+    cv::Point2f targetBody(TaskTick& tick);
+    void drive(TaskTick& tick, float vx, float wz);
+    void scanSpin(TaskTick& tick);
+    CarrySearchContext carrySearchContext(TaskTick& tick);
+    bool evadeEnemy(TaskTick& tick);
+    bool unstick(TaskTick& tick);
+    float yawHoldWz(TaskTick& tick);
+    bool preLower(TaskTick& tick, const char* why);
+    void steer(TaskTick& tick, float speed, float heading);
+    bool carrySearch(TaskTick& tick);
+    const char* trackingReason(TaskTick& tick);
+    ClusterGroup
+    findBest(TaskTick& tick, const std::vector<cv::Point2f>& pts, float max_y, float radius);
+    int evalGroup(TaskTick& tick,
+                  const std::vector<cv::Point2f>& pts,
+                  int need_n,
+                  int far_need,
+                  float short_radius = -1.f);
+    void beginScatter(TaskTick& tick, bool far, bool commit, const char* why);
+    void beginPile(TaskTick& tick, const char* why);
+    bool beginPileFromSweep(TaskTick& tick, const char* why);
+    bool lostTarget(TaskTick& tick);
+    void searchLost(TaskTick& tick);
+    int holdCheck(TaskTick& tick);
+    bool cueCandidate(TaskTick& tick);
+    bool sweepFrameReady(TaskTick& tick);
+    bool disperseStep(TaskTick& tick);
+    void updateStartupPhase(TaskTick& tick);
+    void updateSearchPhase(TaskTick& tick);
+    void updateCapturePhase(TaskTick& tick);
+    void updateTransportPhase(TaskTick& tick);
+    void updateRecoveryPhase(TaskTick& tick);
+
     PushState state_ = PushState::WAIT_START, stopped_from_ = PushState::WAIT_START;
-    bool cue_mode_ = false;
-    int clear_attempts_ = 0;
-    int near_failures_ = 0;
-    uint64_t clear_commanded_us_ = 0, clear_planned_us_ = 0;
-    int search_cue_id_ = -1, capture_target_id_ = -1;
-    int target_id_ = -1, confirmations_ = 0, misses_ = 0, step_ = 0;
-    float last_range_ = 0; // last tracked range in MID_APPROACH, inf when none
-    int total_ = 0, baseline_ = 0, baseline_other_ = 0, hold_misses_ = 0;
-    std::string delivery_geometry_id_;
-    std::string label_, reason_;
-    Inventory trip_, pending_, seen_;
-    RuleVerdict verdict_ = RuleVerdict::OK;
-    bool first_ = false, fault_ = false, track_close_ = false;
+
+    int total_ = 0;
+
+    std::string reason_;
+
+    bool first_ = false, fault_ = false;
     uint8_t frame_raised_ = 0; // logical open, independent of wire angle
     bool sweep_open_ = false, sweep_open_done_ = false, sweep_open_disabled_ = false,
          sweep_close_wait_ = false; // sweep_frame_open overlay on the wire angle only
@@ -678,38 +916,23 @@ class PushTask {
     float bounded_approach_ = 0, bounded_retreat_ = 0;
     int16_t multi_view_pitch_ = kCameraPitchInvalid;
     int16_t pitch_cmd_ = t_.far_pitch_cdeg;
-    // PILE state
-    int pile_phase_ = 0, pile_runs_ = 0, pile_seen_ = 0;
-    uint64_t pile_phase_us_ = 0, pile_cool_until_us_ = 0;
-    float pile_yaw0_ = 0, pile_push0_ = -1.f;
-    int pile_chain_n_ = 0;
-    int approach_last_id_ = -1;
-    float approach_last_heading_ = 0.f, approach_last_distance_ = 0.f,
-          approach_last_world_yaw_ = 0.f;
-    bool approach_last_world_valid_ = false;
-    bool approach_rebind_ = false; // 分级下压后允许改绑跟踪器新ID一次
-    int16_t approach_pitch_ =
-        kCameraPitchInvalid; // APPROACH分级下压：远处保持当前角，贴近时 5°→20°→40°
-    int16_t sweep_pitch_ = kCameraPitchInvalid;
-    bool sweep_non_supply_active_ = false; // SCATTER的同款分级下压；非物资目标的扫动标志
+
     uint64_t startup_commanded_us_ = 0;
     float startup_yaw0_ = 0;
     bool startup_yaw0_set_ = false;
-    uint64_t zone_search_started_us_ = 0;
+
     float run_yaw0_ = 0;
     bool run_yaw0_set_ = false; // heading at the first update after reset: the start line
     bool zone_mem_ = false, zone_enemy_ = false;
     float zone_mem_yaw_ = 0, zone_enemy_yaw_ = 0;
     uint64_t zone_mem_us_ = 0;
-    uint64_t last_us_ = 0, phase_us_ = 0, gripper_us_ = 0, carry_us_ = 0, pitch_wait_us_ = 0,
-             hold_seen_us_ = 0;
+    uint64_t last_us_ = 0, gripper_us_ = 0, pitch_wait_us_ = 0;
     // Dead-reckoned from the previous command; only bounds a phase, never proves progress.
-    float travel_ = 0, travel_limit_ = 0, turned_ = 0, last_heading_ = 0, carried_ = 0;
+
     float last_vx_ = 0, last_wz_ = 0;
-    bool drop_locked_ = false;
+
     std::string anchor_dbg_;
-    bool half_locked_ = false, half_injured_ = false;
-    float half_x_ = 0; // 本趟目标半区（进入搬运时锁定，整趟不变）
+
     std::string dropzone_evt_;
     void lockDropHalf(const char* source);
     void noteDropZone(const char* event, const cv::Point2f& hold);
@@ -726,38 +949,10 @@ class PushTask {
     }
     void noteCargo(const char* event, const cv::Point2f& rear, bool fix);
     void trackCargo(const PushObservation& in, uint64_t now);
-    int scatter_approach_n_ = 0;
-    bool scatter_far_ = false;
-    float scatter_approach_m_ = 0;
-    bool burst_drive_used_ = false, burst_fast_ = false, burst_swing_armed_ = false,
-         burst_swing_ = false; // first_burst: drive spent / this far drive is fast / swing waiting
-                               // for the next near scatter / this scatter swings fast
-    int scatter_count_ = 0, scatter_seen_ = 0;
-    bool scatter_commit_ = false;
-    uint64_t scatter_cool_until_us_ = 0, scatter_idle_since_us_ = 0;
-    float scatter_yaw_ = 0, scatter_range_ = 0, scan_turn_acc_ = 0;
-    float scan_mid_limit_ = 0;
-    bool post_disperse_mid_ = false;
-    bool disperse_small_ = false;
-    int mid_clear_n_ = 0;
-    int precheck_seen_ = 0, precheck_rejects_ = 0;
-    bool rush_stall_phase_ = false;
-    int rush_stall_id_ = -1, rush_stall_samples_ = 0, rush_stall_obs_frames_ = 0;
-    float rush_stall_ref_m_ = 0;
-    uint64_t rush_stall_ref_us_ = 0, rush_stall_last_us_ = 0, rush_stall_obs_us_ = 0;
-    int16_t rush_stall_pitch_ = kCameraPitchInvalid;
-    int sweep_phase_ = 0, sweep_attempts_ = 0, sweep_seen_ = 0;
-    float sweep_travel0_ = 0;
-    float disperse_rush_m_ = 0, disperse_sign_ = 1;
-    uint64_t disperse_cool_until_us_ = 0;
-    float sweep_yaw0_ = 0;
-    uint64_t sweep_start_us_ = 0, sweep_t0_us_ = 0;
-    int unstick_step_ = 0;
-    uint64_t unstick_us_ = 0;
+
     bool rush_yaw_ref_set_ = false;
     float rush_yaw_ref_ = 0;
-    uint64_t prelower_us_ = 0;
-    int rush_pulse_phase_ = 0, rush_pulse_count_ = 0;
+
     bool uprightInCorridor(const PushObservation& in,
                            uint64_t now,
                            float& lateral,
@@ -767,7 +962,7 @@ class PushTask {
                              float& lateral,
                              float* along_out = nullptr) const;
     bool cargoVisible(uint64_t now) const {
-        return cargo_seen_us_ && now - cargo_seen_us_ <= 1500000;
+        return transport_phase_.cargo_seen_us_ && now - transport_phase_.cargo_seen_us_ <= 1500000;
     }
     float backTarget(uint64_t now) const;
     bool rushLogic() const {
@@ -779,34 +974,16 @@ class PushTask {
     bool assumeView() const {
         return carryLogic() && t_.assume_view_pitch_cdeg != kCameraPitchInvalid;
     }
-    int repush_n_ = 0;
-    uint64_t cargo_last_ts_ = 0, cargo_ref_us_ = 0, cargo_seen_us_ = 0;
-    cv::Point2f cargo_ref_body_, cargo_ref_zone_;
-    bool cargo_fix_ = false, cargo_clipped_ = false;
-    float cargo_rear_x_ = 0, cargo_rear_y_ = 0;
-    cv::Point2f cargo_body_;
-    bool delivery_visual_ = false;
-    bool assume_pushed_ = false; // 假设模式：已完成“松开后再用下压姿态向区内推”
-    bool assume_blind_ = false; // TEMP_ASSUMPTION blind leg active in this phase
+
     float assume_rush_end_ = 0;
     cv::Point2f last_target_xy_;
     bool last_target_valid_ =
         false; // body-frame position of the locked target on its last tracked frame
-    CaptureVerificationStage capture_verification_;
-    DeliveryVerificationStage delivery_verification_;
-    ReleaseRetreatStage release_retreat_;
-    PushInStage push_in_;
-    EnterStage enter_;
-    CarryApproachStage carry_approach_;
-    CarrySearchStage carry_search_;
-    SweepTriggerPlanner sweep_trigger_;
+
     SweepLedger sweep_ledger_;
-    DisperseRushStage disperse_rush_;
-    DisperseTurnStage disperse_turn_;
-    DisperseSwingStage disperse_swing_;
+
     RecoveryStage recovery_;
-    SearchStage search_;
-    SweepStage sweep_;
+
     // 假设模式：YOLO-pose粗略区域位姿锚定在里程系，视野丢失后用IMU航向+缩放后的指令位移继续推算。
     AnchoredZone zone_;
     float odo_ = 0, ratio_est_ = 0, ratio_odo_ = 0, last_imu_yaw_ = 0;
@@ -823,13 +1000,9 @@ class PushTask {
     float motionRatio() const {
         return ratio_est_ > 0 ? ratio_est_ : t_.assume_motion_ratio;
     }
-    cv::Point2f drop_centre_zone_;
-    bool heading_seen_ = false;
-    int lost_round_ = 0; // LOST_SEARCH: 0 FAR sweep, 1 intermediate (20deg) sweep for close cargo
+
+    // LOST_HOLD also provides a no-blacklist back-off from a blocked corridor.
     bool corridor_retreat_ = false;
-    int corridor_retries_ =
-        0; // LOST_HOLD reused as a no-blacklist back-off from a blocked corridor
-    float approach_forward_ = 0; // forward commanded since the trip started
     std::vector<RejectedBearing> rejected_bearings_;
     std::map<int, uint64_t> rejected_; // primary track id -> blacklist expiry
 

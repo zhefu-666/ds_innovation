@@ -81,6 +81,22 @@ int main() {
         expectFailure({"--not-an-option"}, "Unknown argument");
         expectFailure({"--fps"}, "Missing value");
     }
+    {
+        const auto cli = load({"--detect-core", "4", "--pose-core", "3",
+                               "--pose-model", "zone_pose_int8.rknn", "--parallel-infer"});
+        assert(cli.config.detect_core_mask == 4 && cli.config.pose_core_mask == 3);
+        assert(cli.config.parallel_inference);
+        const auto multicore = directory.write(
+            R"({"schema_version":1,"behavior_policy":"legacy_field_v1","models":{"detect_core_mask":4,"pose_core_mask":3,"pose_model_path":"zone_pose_int8.rknn","parallel_inference":true}})");
+        const auto file = load({"--config", multicore.string()});
+        assert(file.config.detect_core_mask == 4 && file.config.pose_core_mask == 3);
+        assert(file.config.parallel_inference);
+        const auto override = load({"--config", multicore.string(), "--detect-core", "3",
+                                    "--pose-core", "4"});
+        assert(override.config.detect_core_mask == 3 && override.config.pose_core_mask == 4);
+        expectFailure({"--detect-core", "5"}, "Core mask must be");
+        expectFailure({"--pose-core", "5"}, "Core mask must be");
+    }
     const auto config = directory.write(R"({
         "schema_version": 1,
         "behavior_policy": "legacy_field_v1",
@@ -242,8 +258,8 @@ int main() {
         R"({"schema_version":1,"behavior_policy":"legacy_field_v1","models":{"confidence":1.1}})",
         "confidence is outside");
     reject(
-        R"({"schema_version":1,"behavior_policy":"legacy_field_v1","models":{"detect_core_mask":3}})",
-        "detect_core_mask must be one of");
+        R"({"schema_version":1,"behavior_policy":"legacy_field_v1","models":{"detect_core_mask":5}})",
+        "detect_core_mask must be in");
     reject(
         R"({"schema_version":1,"behavior_policy":"legacy_field_v1","hardware":{"imu_baud":100000}})",
         "must be a supported IMU baudrate");

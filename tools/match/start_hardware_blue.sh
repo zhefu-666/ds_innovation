@@ -23,6 +23,6 @@ exec build-release/rescue_upper_host \
   --hardware --no-show --telemetry \
   --team blue --imu --imu-port /dev/ttyUSB0 \
   --calibration config/camera.yaml \
-  --model models/detect_fp.rknn \
-  --pose-model-blue models/zone_pose_fp.rknn \
+  --model models/detect_v5_int8.rknn \
+  --pose-model models/zone_pose_int8.rknn \
   --startup-advance-ms 5000 --startup-speed 1 "$@"

@@ -312,8 +312,13 @@ def verify(binary, repository, directory):
                                       "--dump-config", "-"], work).stdout)
     require(preview["request"]["dry_run"] == 1 and preview["request"]["hardware"] == 0,
             "Preview fragment lost its device-free settings")
-    require(preview["request"]["model_path"] == str(repository / "models/detect_fp.rknn"),
+    require(preview["request"]["model_path"] == str(repository / "models/detect_v5_int8.rknn"),
             "Fragment paths must resolve relative to project.json")
+    require(preview["request"]["class_names"] ==
+            ["blue", "orange", "green", "black", "zone_blue", "zone_red"],
+            "Preview must use the six-class detector contract")
+    require(preview["request"]["pose_model_path"] == str(repository / "models/zone_pose_int8.rknn"),
+            "Preview must use the supplied pose model")
     require(preview["request"]["zone_geometry_file"] == project + "#/zone_geometry",
             "Preview fragment lost its embedded zone geometry")
     replay = run(binary, ["--config", project + "#/runtime_profiles/push_replay"], work)

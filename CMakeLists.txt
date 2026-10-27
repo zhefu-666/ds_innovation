@@ -41,7 +41,9 @@ endif()
 find_package(OpenCV REQUIRED)
 find_package(nlohmann_json 3.6.0 REQUIRED)
 
-set(RESCUE_TASK_SOURCES src/task/push_task.cpp src/task/capture_verification_stage.cpp
+set(RESCUE_TASK_SOURCES src/task/push_task.cpp
+    src/task/startup_phase.cpp src/task/search_phase.cpp src/task/capture_phase.cpp
+    src/task/transport_phase.cpp src/task/recovery_phase.cpp src/task/phase_actions.cpp src/task/capture_verification_stage.cpp
     src/task/delivery_verification_stage.cpp src/task/release_retreat_stage.cpp src/task/push_in_stage.cpp
     src/task/sweep_ledger.cpp src/task/disperse_turn_stage.cpp src/task/disperse_swing_stage.cpp
     src/task/disperse_rush_stage.cpp src/task/recovery_stage.cpp src/task/search_stage.cpp
@@ -146,6 +148,10 @@ target_link_libraries(rescue_sensor_monitor PRIVATE ${OpenCV_LIBS} pthread)
 add_executable(rescue_imu_monitor src/tools/imu_monitor.cpp src/hardware/hipnuc_imu.cpp src/core/utils.cpp)
 target_include_directories(rescue_imu_monitor PRIVATE include ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(rescue_imu_monitor PRIVATE ${OpenCV_LIBS} pthread)
+
+add_executable(rescue_imu_record src/tools/imu_record.cpp src/hardware/hipnuc_imu.cpp)
+target_include_directories(rescue_imu_record PRIVATE include)
+target_link_libraries(rescue_imu_record PRIVATE pthread nlohmann_json::nlohmann_json)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

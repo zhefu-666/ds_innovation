@@ -596,10 +596,10 @@ void sweepTriggerCases() {
             for (int i = 0; i < 20; ++i)
                 s.tick();
             s.task.enter(PushState::SCATTER, s.in.now_us, "test_impact");
-            s.task.sweep_phase_ = 4;
-            s.task.burst_swing_ = true;
-            s.task.disperse_rush_m_ = .5f;
-            s.task.sweep_start_us_ = s.in.now_us;
+            s.task.search_phase_.sweep_phase_ = 4;
+            s.task.search_phase_.burst_swing_ = true;
+            s.task.search_phase_.disperse_rush_m_ = .5f;
+            s.task.search_phase_.sweep_start_us_ = s.in.now_us;
             s.in.path_safe = false;
             s.tick();
             assert(stopped(s.out.motion));
@@ -818,7 +818,7 @@ void sweepTriggerCases() {
             }
         }
     }
-    { // 只有启动段允许超过常态max_speed；进入SCAN后恢复常态上限。
+    { // Deferred startup never commands motion even with legacy high-speed settings.
         TaskTuning t;
         t.startup_advance_us = 3000000;
         t.startup_advance_speed = 1.f;
@@ -838,7 +838,7 @@ void sweepTriggerCases() {
             } else
                 assert(std::abs(out.motion.vx_mps) <= .4f + 1e-4f);
         }
-        assert(fast);
+        assert(!fast);
     }
     { // 扫掠通道内有竖放伤员：低框原地转向扫开（IMU量角），转回后再进入PREPARE；不在通道内/过期/就是目标本身则不动。
         TaskTuning t;

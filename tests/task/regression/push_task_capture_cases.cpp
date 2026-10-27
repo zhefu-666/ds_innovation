@@ -73,6 +73,14 @@ void captureTests() {
     t += 50000;
     monitor.update(in, {box(1, "ordinary_supply", {602, 600, 40, 40}, t)}, t);
     assert(in.hold_observable && in.captured && in.held_complete && in.held == inv(1));
+    // Zone boxes overlapping the holding view are surfaces, never cargo or occluders.
+    t += 50000;
+    monitor.update(in,
+                   {box(1, "ordinary_supply", {602, 600, 40, 40}, t),
+                    box(2, "blue_safe_zone", {500, 500, 400, 200}, t),
+                    box(3, "red_safe_zone", {580, 580, 80, 80}, t)},
+                   t);
+    assert(in.captured && in.held_complete && in.held == inv(1));
     // FAR, or a camera still moving: the region is out of view, nothing is claimed either way.
     auto far = in;
     far.camera_pitch_cdeg = 1200;
@@ -479,7 +487,7 @@ void demoCaptureMotionTests() {
         s.toRush();
         s.in.target_valid = false;
         s.in.corridor = inv(1, 0, 0, 1);
-        s.task.travel_limit_ = 0;
+        s.task.actionProgress().travel_limit = 0;
         s.tick();
         assert(s.out.state == PushState::CAPTURE_FAIL &&
                s.out.reason == "rush_corridor_dangerous" && stopped(s.out.motion));

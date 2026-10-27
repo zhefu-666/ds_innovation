@@ -13,7 +13,10 @@ void detectorTests() {
     Config c;
     c.confidence = 0.25f;
     assert(c.input_size == 640 &&
-           c.class_names == std::vector<std::string>({"blue", "orange", "green", "black"}));
+           c.class_names == std::vector<std::string>(
+                                {"blue", "orange", "green", "black", "zone_blue", "zone_red"}));
+    // Preserve the legacy four-class decode coverage explicitly.
+    c.class_names = {"blue", "orange", "green", "black"};
     cv::Mat bgr(480, 640, CV_8UC3, cv::Scalar(10, 20, 30));
     auto image = prepareModelImage(bgr, 640);
     assert(image.pad_y == 80 && image.pad_x == 0 && image.sx == 1 && image.sy == 1);
@@ -123,6 +126,35 @@ void detectorTests() {
     }
     assert(taskLabel("blue") == "dangerous_object" && taskLabel("orange") == "injured_person");
     assert(taskLabel("green") == "ordinary_supply" && taskLabel("black") == "core_supply");
+    assert(taskLabel("zone_blue") == "blue_safe_zone" && taskLabel("zone_red") == "red_safe_zone");
+    { // Six classes retain separate overlapping zone/object boxes through class-wise NMS.
+        Config six;
+        int shape[] = {1, 10, 7};
+        cv::Mat tensor(3, shape, CV_32F, cv::Scalar(0));
+        float* v = tensor.ptr<float>();
+        for (int i = 0; i < 7; ++i) {
+            v[i] = v[7 + i] = 320;
+            v[14 + i] = 200;
+            v[21 + i] = 100;
+            v[(4 + i % 6) * 7 + i] = i == 6 ? .6f : .95f - .02f * i;
+        }
+        auto decoded = decodeModelOutput(tensor, image, bgr.size(), six, 1000000);
+        assert(decoded.size() == 6);
+        for (int i = 0; i < 6; ++i) {
+            assert(decoded[i].class_id == i && decoded[i].model_label == six.class_names[i]);
+            assert(decoded[i].label == taskLabel(six.class_names[i]));
+            decoded[i].track_id = i + 1;
+        }
+        std::vector<SegDetection> zones{decoded[4], decoded[5]};
+        assert(!makePushObservation(zones, 1050000, true, .25f).target_valid);
+        bool mismatch = false;
+        try {
+            decodeModelOutput(raw, image, bgr.size(), six, 1);
+        } catch (const std::exception&) {
+            mismatch = true;
+        }
+        assert(mismatch);
+    }
     assert(taskLabel("red") == "unmapped_red" && taskLabel("core") == "unmapped_core");
     p[0] = std::numeric_limits<float>::quiet_NaN();
     out = decodeModelOutput(raw, image, bgr.size(), c, 1000000);
@@ -152,6 +184,7 @@ void detectorTests() {
     assert(failed);
     { // Close-range injured scores below the global threshold survive; other classes do not.
         Config d;
+        d.class_names = c.class_names;
         d.confidence = .5f;
         d.injured_confidence = .25f;
         int dm[] = {1, 8, 2};

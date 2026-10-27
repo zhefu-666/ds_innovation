@@ -176,7 +176,7 @@ def make_plan(args, p):
             command += ['--imu', '--imu-port', p['imu_port'], '--imu-baud', str(p['imu_baud']),
                         '--port', p['port'], '--baud', str(p['baud']), '--team', p['team'],
                         '--calibration', p['camera_calibration'], '--zone-geometry', p['zone_geometry'],
-                        '--pose-model', p['pose_model']]
+                        '--pose-model', p['pose_model'], '--pitch-presets', '-3000,-3000,-3000']
             if args.preview:
                 command += ['--dry-run', '--pitch-feedback']
             else:
@@ -186,12 +186,6 @@ def make_plan(args, p):
                     command += ['--assume-all-safe']
                     if getattr(args, 'assume_injured_trip', False):
                         command += ['--assume-injured-trip']
-                    # 目标贴近时按旧标定 5°→20°→40° 请求下压；新协议 TX 上限 +30°，40°请求会被钳位。机械模型仍为临时假设（未实测验证）。
-                    mech = Path(p['camera_calibration']).with_name('camera.mechanical_5_40.yaml')
-                    if not mech.is_file():
-                        issues.append('assume模式缺少机械俯仰模型文件：' + str(mech))
-                    command[command.index('--calibration') + 1] = str(mech)
-                    command += ['--allow-mechanical-pitch-model', '--pitch-presets', '500,4000,4000']
                 native_check = command + ['--check-config']
                 required += ['frame_config', 'acceptance']
     elif action in {'open', 'close', 'frame-status'}:

@@ -54,6 +54,8 @@ void CaptureMonitor::update(PushObservation& in,
     }
     std::vector<const SegDetection*> fresh;
     for (const auto& d : detections) {
+        if (d.label == "blue_safe_zone" || d.label == "red_safe_zone")
+            continue;
         if (d.timestamp_us == 0 || now < d.timestamp_us || now - d.timestamp_us > c_.max_age_us)
             continue;
         if (!std::isfinite(d.confidence) || d.confidence < c_.noise_confidence)

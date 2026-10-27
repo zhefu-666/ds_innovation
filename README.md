@@ -2,9 +2,9 @@
 
 运行于 LubanCat / RK3588S 的智能救援机器人上位机，使用 C++17、OpenCV 和 RKNN 完成视觉感知、任务决策和 MCU 控制，Python/Shell 提供标定、调试和遥测工具。
 
-**本文件是唯一日常维护文档。** 以下说明以板端 `/home/cat/ds_innovation` 为准，更新于 2026-10-26。下发控制包固定 **15 字节**；IMU 在上位机内部参与观测、导航和健康检查，不下发 yaw 或目标转角。软件回归与整车实机验收分开。
+**本文件是唯一日常维护文档。** 以下说明以板端 `/home/cat/ds_innovation` 为准，更新于 2026-10-27。下发控制包固定 **15 字节**；IMU 在上位机内部参与观测、导航和健康检查，不下发 yaw 或目标转角。软件回归与整车实机验收分开。
 
-目录：[项目与代码](#project) · [编译与测试](#build) · [启动与查看](#run) · [配置](#config) · [通信与IMU](#protocol) · [相机标定](#calibration) · [工具与排错](#tools) · [开发参考](#development)
+目录：[项目与代码](#project) · [编译与测试](#build) · [启动与查看](#run) · [夹爪、相机与底盘控制](#manual-control) · [配置](#config) · [通信与IMU](#protocol) · [相机标定](#calibration) · [工具与排错](#tools) · [开发参考](#development)
 
 <a id="project"></a>
 ## 项目与代码
@@ -17,8 +17,12 @@
 | orange | injured_person，伤员 | 单独送入伤员半区 |
 | green | ordinary_supply，普通物资 | 送入物资半区 |
 | black | core_supply，核心物资 | 送入物资半区 |
+| zone_blue | blue_safe_zone，蓝色安全区 | 区域归属与寻区，不作为搬运物或物块遮挡 |
+| zone_red | red_safe_zone，红色安全区 | 区域归属与寻区，不作为搬运物或物块遮挡 |
 
-Pose 模型的 `zone_left` 是物资半区，`zone_right` 是伤员半区；左右以站在安全区入口面向区内定义，不等于画面左右。队伍归属由独立颜色判断确定。
+Pose 模型的 `zone_left` 是物资半区，`zone_right` 是伤员半区；左右以站在安全区入口面向区内定义，不等于画面左右。队伍归属优先由与 pose 可见角点匹配的 zone_blue / zone_red 检测框确定；没有匹配检测时沿用已标定的 HSV 颜色判断。相互矛盾的区域检测保持未知。检测框可提供粗略寻区方向，精确几何与交付位置仍只使用 pose 关键点。
+
+当前默认检测模型为 detect_v5_int8.rknn，类别 ID 0–5 顺序为 blue、orange、green、black、zone_blue、zone_red。检测输出支持单张量 [1,10,N] 或 boxes [1,4,N] + scores [1,6,N]；旧四分类模型仍可通过显式 --model 与 --classes blue,orange,green,black 使用。pose 文件为 zone_pose_int8.rknn，类别、4 个关键点顺序与 [1,18,N] 契约不变。models/detect_v4_manifest.json 仅描述旧模型，不是 v5 元数据。
 
 ~~~text
 相机 → 检测 + 安全区 pose → 跟踪与几何 → 任务观测 → PushTask
@@ -27,7 +31,24 @@ IMU + MCU反馈 ─────────────────────�
 任务与感知快照 → 遥测文件 → 网页 / Foxglove
 ~~~
 
-主要搬运流程：`SCAN → APPROACH → PREPARE → RUSH → LOWER_FRAME → VERIFY_CAPTURE → CARRY → GATE → ENTER → RAISE_RELEASE → BACK_OUT → VERIFY_DELIVERY`。捕获、交付、搜索、清扫、重试和停止条件以当前阶段实现及测试为准。
+业务主流程为 `Startup（冲出）→ Search（搜索）→ Capture（捕获）→ Transport（搬运）→ Search`。
+
+| 业务阶段 | 阶段内动作 | 实现 |
+| --- | --- | --- |
+| Startup | 暂不实现冲出；保持底盘零速度和方框原命令，下一次更新转入搜索 | `src/task/startup_phase.cpp` |
+| Search | 扫描、候选重找、接近、准备、清扫；交付后的离区转向也归搜索 | `src/task/search_phase.cpp`，`search_stage.cpp`，`sweep_stage.cpp` |
+| Capture | 前冲、落框、捕获核验 | `src/task/capture_phase.cpp` |
+| Transport | 搬运寻区、门口对齐、入区、抬框释放、后退、交付核验 | `src/task/transport_phase.cpp` |
+
+`include/rescue/task/task_phase.hpp` 定义四个 `TaskPhase`、阶段内动作及运行状态；`src/task/push_task.cpp` 的 `PushTask::update()` 负责公共输入处理、运行许可和阶段调度。阶段通过 `PhaseOutcome` 请求交接，由主调度统一应用。`SearchPhaseData`、`CapturePhaseData`、`TransportPhaseData` 分别保存动作进度和阶段数据，`TripContext` 保存跨阶段目标与本趟货物；`TaskTick` 只存本次更新的输入、权限与输出。
+
+暂停/等待/故障由独立 `RunStatus` 表示，不增加业务阶段。失败恢复保留所属阶段并运行 `src/task/recovery_phase.cpp`，完成后回到搜索；暂停恢复仍执行原有重新观察/安全退回规则。捕获结果区分 `Verified` 与 `Assumed`，交付结果分别记录应交数量、记账数量、视觉确认，视觉通过不自动等于计分成功。清扫预算、限时、黑名单、帧事务及核验策略沿用已有实现与测试。
+
+当前 Startup 是有意跳过的占位实现；旧 `startup_advance_*` 配置暂不驱动运动，后续冲出动作在 `startup_phase.cpp` 中实现。正常完成一趟或暂停恢复不会重新执行 Startup，显式 reset 才回到启动等待。
+
+遥测提供 `decision.phase`、`decision.action`、`state.run_status`、恢复标志和捕获/交付结果。感知、导航与运动就绪层改读明确的请求字段。`PushState` 暂保留为兼容动作编号，用于既有硬件辅助逻辑、日志及离线回放；主流程已按四阶段调度，但本轮没有删除全部旧动作兼容代码。
+
+回归入口 `rescue_task_phase_tests` 验证启动占位、搜索到捕获的行程/货物交接、暂停保货、恢复归属和故障停止；捕获/交付集成测试覆盖真实证据与假设证据、全部/部分/未确认交付。冻结历史基线保留，`runtime_four_phase_20261026.json` 仅在原协议补充基础上声明 Startup 占位造成的启动输出差异。
 
 | 位置 | 职责 |
 | --- | --- |
@@ -65,8 +86,8 @@ sudo apt install build-essential cmake ninja-build pkg-config libopencv-dev nloh
 RKNN 模型和 SDK 资源独立部署，Git 克隆不包含这些被忽略的文件：
 
 ~~~text
-models/detect_int8_split_20261022.rknn
-models/zone_pose_int8_split_20261022.rknn
+models/detect_v5_int8.rknn
+models/zone_pose_int8.rknn
 benchmark_results/librknnrt.so
 benchmark_results/rknn_api.h
 ~~~
@@ -117,7 +138,20 @@ tools/match/match_main.sh --check
 python3 -m venv .venv-telemetry
 . .venv-telemetry/bin/activate
 python -m pip install 'websockets>=10,<11'
-python3 tools/remote_camera_telemetry/manage_project.py start --config config/project.json --dry-run --no-show --imu --pitch-feedback --vision-log-dir none
+~~~
+
+**运行观测启动命令**（在板端执行；采集视觉、IMU 和 MCU 相机角度反馈，不发送运动控制）：
+
+~~~bash
+cd /home/cat/ds_innovation
+python3 tools/remote_camera_telemetry/manage_project.py start \
+  --config config/project.json \
+  --dry-run --no-show --imu --pitch-feedback --vision-log-dir none
+~~~
+
+启动前退出相机角度控制台；观测运行期间仍会占用 MCU 串口。查看运行状态：
+
+~~~bash
 python3 tools/remote_camera_telemetry/manage_project.py status
 ~~~
 
@@ -137,6 +171,39 @@ python3 tools/remote_camera_telemetry/manage_project.py stop
 
 比赛程序已运行时直接连接它的查看服务，不再启动第二个预览。`project_bridge.py` 读取 `/dev/shm/rescue-telemetry.bin`，不打开相机、不发送控制；独立 `server.py` 会打开相机。Foxglove 可能保留最后一帧，应同时查看连接状态和数据年龄。
 
+#### 观测启动失败：残留 match socket
+
+若启动时显示 `Project preview and viewing service stopped`，随后提示 `A process exited; see telemetry_logs/main.log and bridge.log`，先查看日志；前一行是启动失败后的自动清理提示，具体原因以日志为准。
+
+~~~bash
+cd /home/cat/ds_innovation
+tail -n 80 telemetry_logs/main.log
+tail -n 80 telemetry_logs/bridge.log
+~~~
+
+如果主程序日志包含以下报错，表示控制 socket 已被占用，或上次退出后留下了文件：
+
+~~~text
+[FATAL] Cannot bind match socket (already running or stale path): /tmp/rescue-match.sock
+~~~
+
+先确认是否仍有主程序或 socket 监听者：
+
+~~~bash
+pgrep -af '[r]escue_upper_host'
+ss -xlpn | grep -F /tmp/rescue-match.sock
+ls -l /tmp/rescue-match.sock
+~~~
+
+仅在前两条均无输出、确认主程序已经退出且 socket 文件仍存在时，删除残留文件并重新启动观测。有运行进程时先正常停止对应程序，不要删除正在使用的 socket。
+
+~~~bash
+rm /tmp/rescue-match.sock
+python3 tools/remote_camera_telemetry/manage_project.py start \
+  --config config/project.json \
+  --dry-run --no-show --imu --pitch-feedback --vision-log-dir none
+~~~
+
 ### 比赛与机构入口
 
 | 命令 / 模式 | 行为 |
@@ -148,6 +215,91 @@ python3 tools/remote_camera_telemetry/manage_project.py stop
 | `tools/match/match_main.sh --run --site-clear …` | 实机比赛运行，执行底盘和机构动作 |
 
 比赛启动需要选择现场确认的方框初态及满足运行许可；通过 `bash tools/match/match_main.sh --help` 查看参数。`--frame open/close` 会先发反向再发目标动作，`--frame keep` 需要核对已有状态和编号。停止、急停与 MCU 失联行为须独立实机验收。自动启动是否启用以板端服务状态为准；本次整理不更改服务。
+
+<a id="manual-control"></a>
+### 手动控制夹爪、相机与底盘
+
+以下命令在板端执行，MCU 串口为 `/dev/ttyACM0`、波特率 115200。先退出占用该串口的主程序或其他串口工具；每次只运行一个控制命令。
+
+#### 夹爪打开、关闭与状态
+
+下面带 `/frame/assume` 的打开命令已由用户在实机确认有效。该配置使用 A6 状态 `1=开、0=关`，TX 偏移为 `+5=开、-5=关`。配置仍标记为临时假设，不代表整车验收。
+
+~~~bash
+# 打开夹爪
+python3 /home/cat/ds_innovation/tools/frame/frame_ctl.py open \
+  --frame-config '/home/cat/ds_innovation/config/project.json#/frame/assume'
+
+# 关闭夹爪
+python3 /home/cat/ds_innovation/tools/frame/frame_ctl.py close \
+  --frame-config '/home/cat/ds_innovation/config/project.json#/frame/assume'
+
+# 只读状态，不发送控制包
+python3 /home/cat/ds_innovation/tools/frame/frame_ctl.py status
+~~~
+
+打开、关闭命令同时发送零底盘速度，并保持首次 A6 反馈中的相机角度。需要只读反馈并预览控制包时，在开合命令末尾加 `--dry-run`。省略 `--frame-config` 会读取尚未验收的 `/frame/pending`，报错 `A6 / physical action mapping has not been accepted`。
+
+#### 相机角度控制
+
+先退出占用 MCU 串口的主程序或其他串口工具。通过遥测管理器启动的预览可用 `python3 tools/remote_camera_telemetry/manage_project.py stop` 停止；`--dry-run` 主程序仍会占用串口。
+
+~~~bash
+cd /home/cat/ds_innovation
+
+# 只读当前相机角度，不发送控制包（同样需要串口独占）
+sudo python3 tools/remote_debug/camera_angle_console.py --status
+
+# 启动交互式角度控制台
+sudo python3 tools/remote_debug/camera_angle_console.py
+~~~
+
+出现 `相机角度>` 提示后，输入 `90..150` 内的角度并回车，例如 `120` 回中位、`130` 向下调整；角度增大向下。输入 `s` 读取状态，`q` 退出，退出时不自动复位相机。控制包中的底盘速度固定为零，并保持指定夹爪偏移。
+
+如果提示“编号非0，无法推断夹爪偏移”，需显式提供当前已知的夹爪偏移（范围 `-5..5`）；按上述已确认的夹爪配置，打开为 `5`、关闭为 `-5`。例如，已确认夹爪当前保持打开时：
+
+~~~bash
+sudo python3 tools/remote_debug/camera_angle_console.py --hold-gripper-offset 5
+~~~
+
+不要用猜测的偏移代替当前值，以免同时改变夹爪。默认串口为 `/dev/ttyACM0`、波特率 115200，可通过 `--port` 和 `--baud` 指定。若出现 `[Errno 11] Resource temporarily unavailable`，先用 `fuser /dev/ttyACM0` 或 `lslocks` 查找占用者并退出对应程序；`sudo` 不会绕过串口独占锁。
+
+#### 底盘前进、后退与转向
+
+先在当前终端选择已有的演示配置；每个新终端都需执行一次。该 profile 使用 `/frame/assume` 和临时演示验收配置。
+
+~~~bash
+export RESCUE_DEMO_PROFILE='/home/cat/ds_innovation/config/project.json#/profiles/demo_assume'
+
+# 只检查参数和配置，不打开设备
+python3 /home/cat/ds_innovation/tools/demo/demo.py move-forward --speed 0.05 --seconds 0.5 --check
+
+# 前进：0.05 m/s，持续 0.5 秒
+python3 /home/cat/ds_innovation/tools/demo/demo.py move-forward --speed 0.05 --seconds 0.5 --run --site-clear
+
+# 后退：0.05 m/s，持续 0.5 秒
+python3 /home/cat/ds_innovation/tools/demo/demo.py move-backward --speed 0.05 --seconds 0.5 --run --site-clear
+
+# 原地左转（逆时针）：0.20 rad/s，持续 0.5 秒
+python3 /home/cat/ds_innovation/tools/demo/demo.py turn-left --wz 0.20 --seconds 0.5 --run --site-clear
+
+# 原地右转（顺时针）：0.20 rad/s，持续 0.5 秒
+python3 /home/cat/ds_innovation/tools/demo/demo.py turn-right --wz 0.20 --seconds 0.5 --run --site-clear
+~~~
+
+`--run` 执行动作；`--site-clear` 表示操作者已确认运动空间清空。省略 `--run` 默认仅检查。直线速度 `--speed` 范围为 `(0, 0.10]` m/s，转向速度 `--wz` 为 `(0, 0.25]` rad/s；方向由子命令决定，参数填写正数。显式 `--seconds` 范围为 `(0, 1]` 秒。
+
+**去掉 `--seconds 0.5` 后会持续运动**，直到当前终端按 `Ctrl+C`，或在另一板端终端执行停止命令：
+
+~~~bash
+# 查看本套 demo 工具启动的会话
+python3 /home/cat/ds_innovation/tools/demo/demo.py status
+
+# 停止本套 demo 工具启动的会话
+python3 /home/cat/ds_innovation/tools/demo/demo.py stop
+~~~
+
+底盘工具按初始 A6 反馈保持夹爪和相机目标，正常结束或中断时补发零速度。若提示 A6 动作编号为 0、无法确定夹爪状态，先执行上面的夹爪开合命令再重试。`stop` 只管理本套 demo 会话，不会停止其他独立程序；没有会话记录不等于实物已停车。
 
 <a id="config"></a>
 ## 配置
@@ -163,8 +315,9 @@ python3 tools/remote_camera_telemetry/manage_project.py stop
 | `profiles` | demo 工具 profile，与主程序 runtime profile 区分 |
 | `runtime_profiles/preview`、`runtime_profiles/push_replay` | 独立完整的主程序配置片段 |
 | `frame`、`acceptance`、`task_calibration`、`zone_color`、`zone_geometry` | 测量、假设与验收资源，不能仅凭路径当作已验收 |
-| `config/camera.yaml` | 相机实测结果；仅在当前配置明确选择时使用 |
-| `config/camera.mechanical_5_40.yaml` | 显式启用的机械俯仰假设模型 |
+| `config/camera.yaml` | 当前唯一运行相机参数：2026-10-27 手眼旋转与尺量平移，固定 UI 90°（内部 -3000 cdeg），地面验证已由用户确认完成 |
+
+主程序与所有 demo profile 统一使用上述相机文件；旧 5°/40° 参数仅在 `tests/fixtures/legacy_config/` 作为冻结回归输入保留，不用于启动。原始标定会话保留在 `calibration_runs/`。
 
 请求按“默认值 → JSON → 显式命令行”解析，之后兼容策略和标定还可能调整最终值；用 `--dump-config` 同时检查请求、来源和最终参数。导出快照不是可直接回读的输入 profile。
 
@@ -177,7 +330,7 @@ JSON 片段是完整 schema v1 配置，不与根节点叠加；文件路径相�
 
 配置字段的完整映射见 `src/app/config_loader.cpp`，运行参数见 `./build-release/rescue_upper_host --help`。旧分散配置只在 `tests/fixtures/legacy_config/` 保留冻结字节，不作为当前启动配置。
 
-当前配置仍有机械假设及 `[500,4000,4000]` 俯仰预设；协议发送只允许 ±30° 偏移，40° 请求会钳位。本文不改参数或伪造标定；正式运行前须按实际可达角度重新验证。
+当前运行配置使用已确认地面验证的 2026-10-27 外参，俯仰预设统一为 `[-3000,-3000,-3000]`，对应 UI 90°；比赛入口也定位到此角度。
 
 <a id="protocol"></a>
 ## 通信与 IMU
@@ -252,6 +405,40 @@ HI91 独立接 `/dev/ttyUSB0`，不在 A6 中。`HipnucImu::snapshot()` 提供�
 
 <a id="calibration"></a>
 ## 相机标定
+
+### 相机—IMU 旋转外参：固定板、多轴运动 AX=XB
+
+现在外参采集可使用网页的 handeye 模式。保留原有内参和地面测量入口；本模式只求相机光学系到原始 IMU 设备系的旋转，不把未知平移设为零，也不自动覆盖 config/camera.yaml。
+
+~~~bash
+cd /home/cat/ds_innovation
+python3 tools/camera_calibration/guided.py --mode handeye \
+  --intrinsics config/camera.yaml --imu-port /dev/ttyUSB0 --imu-baud 115200 \
+  --stop-preview
+~~~
+
+浏览器打开 http://<当前板端地址>:8081/。默认 1280×720，必须与内参一致；Foxglove 仍为 8766，沿用 /calibration/image、/calibration/status、/calibration/result。仅预览不记录 IMU；点击开始后连续记录，程序不发送底盘、相机舵机或其他机构动作。
+
+1. 将实物 9×6 圆点板固定竖立在距相机约 1 m 处；填写实测横向 8 间距和纵向 5 间距。板太小或识别失败时使用更大板或调整距离，不能假定 1 m 一定满足像素要求。
+2. 相机与 IMU 刚性连接，保持焦点、相机舵机角度固定。使用稳定支撑，人工整体改变偏航、俯仰、横滚；板保持不动，不使用舵机代替整体俯仰。不具备多轴动作条件时无法完成本模式。
+3. 开始后整体静止至少 5 秒，第一张估计陀螺仪零偏。之后按网页指引转动约 10°～30°，每次停稳约 2 秒再拍摄。两张间隔不超过 45 秒。允许回到之前姿态；相邻两张至少转动 5°，相邻转角不超过 80°。
+4. 共 25 张：前 17 张拟合，后 8 张组成独立验证序列，拟合与验证之间不构造交叉运动对。全部样本都记录图像时间戳、圆心、原图以及完整 IMU JSONL，撤销照片时仍保留原记录。
+5. 自动检查零偏静止段、IMU 数值和序号、设备时间回绕/倒退/100 ms 断流、两路转角一致性、PnP 重投影与单轴退化；对称圆点倒序按姿态连续性处理。拟合/验证分别要求至少 6 段有效转动，旋转轴第二/第一奇异值比至少 0.15。
+6. 默认残差检查为拟合及验证最大 2°、验证中位数 1°；它们是软件初始质量门限，不代表实机精度保证。记录过程使用陀螺仪原始 imu_device 轴、rad/s，积分采用设备时钟间隔；图像使用读取完成的主机单调时间，停稳端点降低时间差影响。--camera-time-offset-ms 将固定毫秒偏移加到图像时间，不自动估计延迟；若存在同步问题，应修正后重采。
+
+输出目录为 calibration_runs/handeye_日期_时间_随机编号/，包含 intrinsics.yaml 快照、imu.jsonl、imu_stderr.log、samples/、detected/、逐帧 JSON、session.json、camera_imu_rotation.yaml、report.json 和使用说明。结果定义为 v_imu_device = R_imu_from_camera · v_camera_optical；同时保存逆矩阵 R_camera_from_imu，translation_estimated=0、extrinsics_validated=0。有告警时状态为 needs_recapture，否则仍为 candidate_requires_validation，需要重复采集和实机独立验证。
+
+~~~bash
+# 保留原始记录，用当前求解器重算完整会话；模式自动从 session.json 识别
+python3 tools/camera_calibration/guided.py --recalculate calibration_runs/<handeye会话目录>
+# 单独检查只读 IMU 记录入口；不连接 MCU
+./build-release/rescue_imu_record --help
+ctest --preset cat-release -L calibration
+~~~
+
+主程序的 T_camera_from_robot、ground_homography 需要平移、地面关系及适用俯仰范围，本结果不能直接替代它们。相机舵机改变角度后 R_imu_from_camera 也会改变，必须在同一机构角度使用或另行建模。项目已确认 IMU→base_link FLU 为 diag(-1,1,-1)；转换车体旋转时可左乘，但地面几何的 robot 坐标约定需另外核对，不混用 FLU 与 x右/y前。
+
+### 原有内参与地面标定
 
 ### 推荐流程：9×6 对称圆点板
 
@@ -394,7 +581,7 @@ python3 foxglove_telemetry/tools/generate_sample_mcap.py rescue_sample.mcap
 
 ### 当前限制与历史证据
 
-当前配置含假设的机构映射和机械标定；识别/几何资格、机构、急停、底盘、捕获搬运和完整交付仍需按现场条件验收。软件回归只证明测试输入下的行为。旧报告中的主机异常、吞吐量和实测记录是历史状态，不直接作为当前结论。
+当前配置含假设的机构映射；相机地面标定已由用户确认完成；识别/几何资格、机构、急停、底盘、捕获搬运和完整交付仍需按现场条件验收。软件回归只证明测试输入下的行为。旧报告中的主机异常、吞吐量和实测记录是历史状态，不直接作为当前结论。
 
 仅保留以下三份不可编辑的原始测试证据，内容可能描述历史协议；**当前使用只看本文**：
 

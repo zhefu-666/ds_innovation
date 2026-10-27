@@ -80,6 +80,9 @@ bool GeometryPipeline::voteUpright(const SegDetection& d, float diff, int& n, fl
     return tv.upright || tv.unconfirmed;
 }
 std::string GeometryPipeline::groundContact(SegDetection& d, const GeometryFrame& f) {
+    // Zone rectangles are surface sightings, not foreground ground contacts.
+    if (d.label == "blue_safe_zone" || d.label == "red_safe_zone")
+        return "zone_detection";
     if (d.timestamp_us != f.capture_us || d.frame_id != f.frame_id)
         return "frame_mismatch";
     if (d.box.width <= 0 || d.box.height <= 0 || d.box.x < 0 || d.box.y < 0 ||
@@ -220,6 +223,9 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,
                             k.capture_us == f.capture_us;
     // IPPE is optional and only cross-checks an already accepted metric fit.
     // Two-point fits and fixed-H files without extrinsics do not require PnP.
+    if (out.zone.valid)
+        out.pnp_reason = out.zone.inlier_ids.size() < 4 ? "insufficient_inliers"
+                                                        : "camera_transform_unavailable";
     cv::Matx34d camera_from_ground;
     if (out.zone.valid && out.zone.inlier_ids.size() >= 4 &&
         calibration_.cameraFromGround(
@@ -245,7 +251,23 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,
                 o.object_points.push_back(objects[point.id]);
                 o.image_points.push_back(point.pixel);
             }
-        auto check = pnp_.estimate(o, f.capture_us);
+        PnpDiagnostics diagnostics;
+        out.pnp_attempted = true;
+        auto check = pnp_.estimate(o, f.capture_us, &diagnostics);
+        out.pnp_solution_valid = check.valid;
+        out.pnp_solver_reason = out.pnp_reason = check.reason;
+        out.pnp_reprojection_error_px = diagnostics.reprojection_error_px;
+        // On failure these deltas describe the diagnostic candidate, not an accepted solution.
+        if (!diagnostics.rvec.empty() && !diagnostics.tvec.empty()) {
+            cv::Mat expected, actual;
+            cv::Rodrigues(o.reference_rvec, expected);
+            cv::Rodrigues(diagnostics.rvec, actual);
+            out.pnp_position_delta_m = cv::norm(diagnostics.tvec - o.reference_tvec);
+            out.pnp_angle_delta_deg =
+                std::acos(std::clamp((cv::trace(expected.t() * actual)[0] - 1) / 2, -1.0, 1.0)) *
+                180 / CV_PI;
+            out.pnp_delta_valid = true;
+        }
         if (check.valid) {
             cv::Mat expected, actual;
             cv::Rodrigues(o.reference_rvec, expected);
@@ -255,6 +277,13 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,
             out.zone.pnp_checked = true;
             out.zone.pnp_consistent =
                 cv::norm(check.tvec - o.reference_tvec) <= .08 && angle <= .20;
+            const bool position_ok = out.pnp_position_delta_m <= .08;
+            const bool angle_ok = angle <= .20;
+            out.pnp_reason = position_ok && angle_ok
+                                 ? "ok"
+                                 : (!position_ok && !angle_ok
+                                        ? "position_and_angle_mismatch"
+                                        : (!position_ok ? "position_mismatch" : "angle_mismatch"));
             if (!out.zone.pnp_consistent) {
                 out.zone.valid = false;
                 out.zone.reason = out.reason = "pnp_disagreement";

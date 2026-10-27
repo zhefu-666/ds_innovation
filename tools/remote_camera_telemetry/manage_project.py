@@ -68,7 +68,9 @@ def start(extra):
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     commands = {
         'bridge': [sys.executable, str(BRIDGE)],
-        'main': ['stdbuf', '-oL', '-eL', str(BINARY), '--dry-run', '--no-show', '--telemetry', *extra],
+        'main': ['stdbuf', '-oL', '-eL', str(BINARY), '--dry-run', '--no-show', '--telemetry',
+                 '--pose-model', str(ROOT / 'models/zone_pose_int8.rknn'),
+                 '--detect-core', '4', '--pose-core', '3', '--parallel-infer', *extra],
     }
     try:
         for name, command in commands.items():
@@ -88,8 +90,8 @@ def start(extra):
                 with urlopen('http://127.0.0.1:8080/status', timeout=1) as response:
                     status = json.load(response)
                 if status['health']['robot_data_connected']:
-                    print('Project preview is running. Foxglove: ws://192.168.175.7:8765')
-                    print('Browser: http://192.168.175.7:8080/')
+                    print('Project preview is running. Foxglove: ws://10.63.153.7:8765')
+                    print('Browser: http://10.63.153.7:8080/')
                     print('Logs:', LOGS)
                     return
             except (OSError, ValueError, KeyError):
