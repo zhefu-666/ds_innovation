@@ -76,6 +76,8 @@ class HipnucImu {
     HipnucImu(const HipnucImu&) = delete;
     HipnucImu& operator=(const HipnucImu&) = delete;
     ImuSnapshot snapshot() const;
+    // Calibration recorder: copy every retained sample newer than sequence.
+    std::vector<ImuSample> samplesAfter(uint64_t sequence) const;
     ImuSnapshot snapshotAt(uint64_t capture_us, uint32_t max_skew_ms = 50) const;
 
   private:

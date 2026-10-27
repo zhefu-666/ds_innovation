@@ -94,6 +94,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     ExpectedStop expected_stop;
     ZoneEstimate vref_estimate;
     bool vref_ok = false;
+    SensorState geometry_sensor;
     // Servo readback at capture time; without the feedback port it stays invalid.
     const FrameSensors frame_sensors = feedback ? feedback->feedbackAt(timestamp) : FrameSensors{};
     for (auto& d : detections)
@@ -118,6 +119,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         geometry_frame.sensors = frame_sensors;
         if (imu)
             geometry_frame.sensors.imu = sensorStateFromImu(imu->snapshotAt(timestamp));
+        geometry_sensor = geometry_frame.sensors.imu;
         KeypointFrame points;
         points.frame_id = frame_sequence;
         points.capture_us = timestamp;
@@ -518,6 +520,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             gripper_ack,
             imu_data,
             sensor,
-            observed_at};
+            observed_at,
+            geometry_sensor};
 }
 } // namespace rescue::app

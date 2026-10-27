@@ -840,6 +840,18 @@ int Runtime::run() {
                     << " reason=" << geometry_result.reason
                     << " inliers=" << input.zone_estimate.inlier_ids.size()
                     << " residual_m=" << input.zone_estimate.residual_m << "\n";
+            if (geometry)
+                log << "[PNP] frame=" << frame_sequence
+                    << " attempted=" << geometry_result.pnp_attempted
+                    << " solution_valid=" << geometry_result.pnp_solution_valid
+                    << " delta_valid=" << geometry_result.pnp_delta_valid
+                    << " position_delta_m=" << geometry_result.pnp_position_delta_m
+                    << " angle_delta_deg=" << geometry_result.pnp_angle_delta_deg
+                    << " reprojection_rms_px=" << geometry_result.pnp_reprojection_error_px
+                    << " solver_reason=" << geometry_result.pnp_solver_reason
+                    << " reason=" << geometry_result.pnp_reason
+                    << " position_limit_m=0.08 angle_limit_deg=" << .20 * 180 / CV_PI
+                    << " reprojection_limit_px=4" << "\n";
             log << "[PERF] loop_fps=" << loop_fps << " inference_ms=" << inference_ms
                 << " detect_ms=" << vision_result.detect_ms << " pose_ms=" << vision_result.pose_ms
                 << " zone_points=" << zone_points.size() << " capture_ms=" << capture_ms
@@ -889,6 +901,16 @@ int Runtime::run() {
             last_report = now;
         }
         vision.drawDetections(frame, detections);
+        if (vref_ready)
+            drawZoneProjection(frame,
+                               zone_points,
+                               vref_calibration,
+                               zone_geometry,
+                               frame_sensors.actuator.camera_pitch_cdeg,
+                               observation.geometry_sensor,
+                               config.pose_keypoint_confidence,
+                               geometry_result.mapping_valid,
+                               geometry_result.reason);
         drawZone(frame, zone_points);
         const char* output_label = !link ? "PREVIEW - NO MCU LINK"
                                    : out.hardware_output_enabled

@@ -309,6 +309,7 @@ endfunction()
 rescue_add_tool_test(board_monitor_tests tools/board_monitor/test_monitor.py "tool;telemetry")
 rescue_add_tool_test(camera_calibration_tests tools/camera_calibration/test_calibrate.py "tool;calibration")
 rescue_add_tool_test(camera_guided_tests tools/camera_calibration/test_guided.py "tool;calibration")
+rescue_add_tool_test(camera_handeye_tests tools/camera_calibration/test_handeye.py "tool;calibration")
 rescue_add_tool_test(camera_foxglove_bridge_tests tools/camera_calibration/test_foxglove_bridge.py "tool;calibration;telemetry")
 rescue_add_tool_test(project_telemetry_bridge_tests tools/remote_camera_telemetry/test_project_bridge.py "tool;telemetry")
 

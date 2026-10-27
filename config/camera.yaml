@@ -17,55 +17,50 @@ image_width: 1280
 image_height: 720
 ground_coordinates: x_right_y_forward_metres
 ground_pixel_domain: undistorted_pixels
-ground_camera_pitch_cdeg: 500
-ground_homography: !!opencv-matrix
-   rows: 3
-   cols: 3
-   dt: d
-   data: [ -8.9189065745459803e-04, -2.3648059268702059e-05,
-       6.2535688244211085e-01, -1.6442992441171940e-05,
-       -1.9424024428457614e-04, -6.6843164135551192e-01,
-       1.2099256716449839e-04, -5.1526231613660415e-03, 1. ]
-...
----
-T_camera_from_robot: !!opencv-matrix
-   rows: 4
-   cols: 4
-   dt: d
-   data: [ 9.9934807633927625e-01, 2.7791041422458359e-02,
-       2.3045180269265390e-02, -5.6341751191560652e-03,
-       2.7716179038774779e-02, -1.8152623159617343e-01,
-       -9.8299544284904128e-01, 1.7963885881900146e-01,
-       -2.3135162339571264e-02, 9.8299332920378824e-01,
-       -1.8217815183049274e-01, -3.6950065382615693e-02, 0., 0., 0., 1. ]
 T_robot_from_camera: !!opencv-matrix
    rows: 4
    cols: 4
    dt: d
-   data: [ 9.9934807633927669e-01, 2.7716179038774786e-02,
-       -2.3135162339571285e-02, -2.0324646734599090e-04,
-       2.7791041422458362e-02, -1.8152623159617351e-01,
-       9.8299332920378879e-01, 6.9087412468523290e-02,
-       2.3045180269265400e-02, -9.8299544284904150e-01,
-       -1.8217815183049282e-01, 1.6998252553754958e-01, 0., 0., 0., 1. ]
-T_camera_from_board: !!opencv-matrix
+   data: [ 9.9959252773500662e-01, 2.8486302440519355e-02,
+       -1.8190848267036397e-03, 0., 7.7772104158847387e-03,
+       -2.1047881720265191e-01, 9.7756748232902979e-01,
+       4.0000000000000001e-02, 2.7464404134925680e-02,
+       -9.7718329809828397e-01, -2.1061459689032339e-01,
+       2.0999999999999999e-01, 0., 0., 0., 1. ]
+T_camera_from_robot: !!opencv-matrix
    rows: 4
    cols: 4
    dt: d
-   data: [ 9.9934807633927625e-01, -2.7791041422458359e-02,
-       -2.3045180269265390e-02, -1.4031120755630105e-01,
-       2.7716179038774779e-02, 1.8152623159617343e-01,
-       9.8299544284904128e-01, -2.0066387485133605e-03,
-       -2.3135162339571264e-02, -9.8299332920378824e-01,
-       1.8217815183049274e-01, 8.4379791795164871e-01, 0., 0., 0., 1. ]
-T_robot_from_board: !!opencv-matrix
-   rows: 4
-   cols: 4
+   data: [ 9.9959252773500717e-01, 7.7772104158846398e-03,
+       2.7464404134925964e-02, -6.0786132849698377e-03,
+       2.8486302440519123e-02, -2.1047881720265185e-01,
+       -9.7718329809828419e-01, 2.1362764528874575e-01,
+       -1.8190848267037986e-03, 9.7756748232903168e-01,
+       -2.1061459689032394e-01, 5.1263660538067623e-03, 0., 0., 0., 1. ]
+camera_position_robot_m: !!opencv-matrix
+   rows: 3
+   cols: 1
    dt: d
-   data: [ 1., 0., 0., -1.6000000000000000e-01, 0., -1., 0.,
-       8.9500000000000002e-01, 0., 0., -1., 1.4999999999999999e-02, 0.,
-       0., 0., 1. ]
+   data: [ 0., 4.0000000000000001e-02, 2.0999999999999999e-01 ]
+R_imu_from_camera: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ -7.7772104158847387e-03, 2.1047881720265191e-01,
+       -9.7756748232902979e-01, -9.9959252773500662e-01,
+       -2.8486302440519355e-02, 1.8190848267036397e-03,
+       -2.7464404134925680e-02, 9.7718329809828397e-01,
+       2.1061459689032339e-01 ]
 extrinsics_validated: 1
-pitch_model_reference_cdeg: 500
-pitch_model_min_cdeg: 500
-pitch_model_max_cdeg: 500
+calibration_status: ground_validated_user_confirmed_20261027
+calibration_source: /home/cat/ds_innovation/calibration_runs/handeye_20261027_163147_f98dd5
+translation_source: "User ruler measurement: forward 40 mm, centered, height 210 mm; at calibration camera angle"
+rotation_fit_max_error_deg: 2.8438775571705395e+00
+rotation_holdout_max_error_deg: 1.3772708711323896e+00
+
+# UI absolute angle 90 deg = protocol offset -30 deg. Fixed pose only.
+pitch_model_reference_cdeg: -3000
+pitch_model_min_cdeg: -3000
+pitch_model_max_cdeg: -3000
+mechanical_assumption: 0
+mechanical_model_note: "Measured handeye rotation plus ruler translation; fixed UI 90 deg; ground validation confirmed by user 2026-10-27"

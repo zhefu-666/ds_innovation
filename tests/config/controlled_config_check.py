@@ -7,7 +7,7 @@ import sys
 binary, root = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
 project = str(root / "config/project.json")
 result = subprocess.run([str(binary), "--check-config", "--controlled-empty-field", "--team", "blue",
-                         "--calibration", str(root / "config/camera.yaml"),
+                         "--calibration", str(root / "tests/fixtures/legacy_config/camera.yaml"),
                          "--zone-geometry", project + "#/zone_geometry",
                          "--task-calibration", project + "#/task_calibration/runtime",
                          "--pose-model-blue", "models/zone_pose_fp.rknn"],

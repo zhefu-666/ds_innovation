@@ -37,6 +37,7 @@ struct ObservationResult {
     ImuSnapshot imu_data;
     SensorState sensor;
     uint64_t observed_at = 0;
+    SensorState geometry_sensor; // Same capture-time IMU used for the geometry overlay.
 };
 
 class ObservationBuilder {

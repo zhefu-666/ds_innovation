@@ -2,7 +2,7 @@
 #include "rescue/perception/keypoint_filter.hpp"
 namespace rescue {
 struct GroundPoseConfig {
-    float inlier_m = .025f, max_inlier_m = .06f, min_baseline_m = .10f;
+    float inlier_m = .05f, max_inlier_m = .06f, min_baseline_m = .10f;
     float max_two_point_turn_rad = .15f, max_two_point_jump_m = .12f;
     float reacquire_jump_m = .25f, reacquire_turn_rad = .35f;
     uint64_t prior_age_us = 350000;

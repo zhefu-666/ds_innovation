@@ -5,6 +5,7 @@
 #include <opencv2/calib3d.hpp>
 
 #include <vector>
+#include <limits>
 
 namespace rescue {
 
@@ -16,6 +17,12 @@ struct SafeZoneObservation {
     cv::Mat reference_rvec, reference_tvec; // optional independent ground-fit cross-check reference
 };
 
+// Optional diagnostic candidate, including rejected solutions; never implies a valid pose.
+struct PnpDiagnostics {
+    cv::Mat rvec, tvec;
+    double reprojection_error_px = std::numeric_limits<double>::quiet_NaN();
+};
+
 class SafeZonePoseEstimator {
   public:
     SafeZonePoseEstimator(cv::Mat camera_matrix,
@@ -23,7 +30,9 @@ class SafeZonePoseEstimator {
                           float max_reprojection_error_px = 4.0f,
                           float max_pose_jump_m = 0.35f);
 
-    SafeZonePose estimate(const SafeZoneObservation& observation, uint64_t timestamp_us = 0);
+    SafeZonePose estimate(const SafeZoneObservation& observation,
+                          uint64_t timestamp_us = 0,
+                          PnpDiagnostics* diagnostics = nullptr);
     void reset();
 
   private:

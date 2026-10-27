@@ -8,7 +8,7 @@ namespace rescue {
 float wrapAngle(float angle);
 struct ZoneGate {
     int min_points = 2;
-    float max_residual_m = .03f, max_position_sigma_m = .05f;
+    float max_residual_m = .05f, max_position_sigma_m = .05f;
     float max_yaw_sigma_rad = .15f, max_prediction_distance_m = .30f;
     uint64_t max_age_us = 200000, max_prediction_age_us = 350000;
 };

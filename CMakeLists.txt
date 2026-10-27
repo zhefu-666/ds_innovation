@@ -149,6 +149,10 @@ add_executable(rescue_imu_monitor src/tools/imu_monitor.cpp src/hardware/hipnuc_
 target_include_directories(rescue_imu_monitor PRIVATE include ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(rescue_imu_monitor PRIVATE ${OpenCV_LIBS} pthread)
 
+add_executable(rescue_imu_record src/tools/imu_record.cpp src/hardware/hipnuc_imu.cpp)
+target_include_directories(rescue_imu_record PRIVATE include)
+target_link_libraries(rescue_imu_record PRIVATE pthread nlohmann_json::nlohmann_json)
+
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()

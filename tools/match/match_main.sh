@@ -15,7 +15,7 @@ usage() {
 --run 开始前自动做同样的下位机只读查询；--frame keep 时记录/给定的编号与下位机编号不一致则拒绝。
 --frame open|close  开局固定先发反向动作、再发目标动作（open=先close再open；不看记录和下位机编号，不跳过），最终停在目标状态(开框0°/关框20°)，并记录已知方框状态；
 --frame keep        不动方框，沿用上次 open/close 的记录，或用 --known-frame-* 显式给出（默认）。
---run 的顺序：静态检查 -> 方框 -> 相机回5° -> 再次静态检查 -> 启动主程序（180秒，--auto-run）。
+--run 的顺序：静态检查 -> 方框 -> 相机回 UI 90°（内部 -30°） -> 再次静态检查 -> 启动主程序（180秒，--auto-run）。
 TXT
   exit 2
 }
@@ -172,7 +172,7 @@ if [[ "$mode" == check ]]; then
   esac
   cam_known=()
   [[ -n "$known_angle" ]] && cam_known=(--known-frame-angle "$known_angle" --known-frame-id "$known_id")
-  demo_tool camera.sh --offset-deg 5 "${cam_known[@]}"
+  demo_tool camera.sh --offset-deg -30 "${cam_known[@]}"
   echo '[check] 完成：未打开设备。'
   exit 0
 fi
@@ -208,7 +208,7 @@ esac
 frame_done=1
 cam_known=()
 [[ -n "$cli_angle" ]] && cam_known=(--known-frame-angle "$cli_angle" --known-frame-id "$cli_id")
-demo_tool camera.sh --offset-deg 5 --run --site-clear "${cam_known[@]}"
+demo_tool camera.sh --offset-deg -30 --run --site-clear "${cam_known[@]}"
 
 # 演示入口自己持有同一把启动锁，所以方框/相机动作结束后才能取锁。
 exec 9>/tmp/rescue-match-launch.lock
