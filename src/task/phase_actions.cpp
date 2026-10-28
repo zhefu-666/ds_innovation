@@ -19,11 +19,13 @@ void PushTask::scanAfterClear(TaskTick& tick, const char* why) {
 }
 
 cv::Point2f PushTask::targetBody(TaskTick& tick) {
+    if (tick.in.target_center_valid)
+        return tick.in.target_center_body;
     return cv::Point2f(-tick.in.distance_m * std::sin(tick.in.heading_error),
                        tick.target_forward_m);
 }
 
-void PushTask::drive(TaskTick& tick, float vx, float wz) {
+void PushTask::drive(TaskTick& tick, float vx, float wz, bool pixel_align) {
     const bool turn_blocked = tick.in.directional_clearance_valid && wz != 0 &&
                               !(vx == 0 ? tick.in.turn_safe : (vx > 0 && tick.in.arc_safe));
     if (turn_blocked) {
@@ -47,6 +49,12 @@ void PushTask::drive(TaskTick& tick, float vx, float wz) {
                              ? std::max(t_.max_speed, t_.startup_advance_speed)
                              : t_.max_speed; // only the start-up run may exceed the normal cap
     tick.motion.vx_mps = std::clamp(vx, -vx_cap, vx_cap);
+    if (pixel_align) {
+        // Preserve proportional pixel steering; no legacy floor, boost or escalation.
+        const float cap = std::min(t_.pixel_align_max_wz, t_.max_wz);
+        tick.motion.wz_rps = std::clamp(wz, -cap, cap);
+        return;
+    }
     // Preserve zero and direction; never let the floor exceed the configured cap.
     const bool demo_capture_turn =
         t_.demo_capture_motion && (state_ == PushState::APPROACH || state_ == PushState::RUSH);
@@ -73,6 +81,124 @@ void PushTask::drive(TaskTick& tick, float vx, float wz) {
         (state_ == PushState::APPROACH || state_ == PushState::MID_APPROACH ||
          state_ == PushState::CUE_APPROACH || state_ == PushState::SELECT_CARGO))
         tick.motion.wz_rps *= t_.inplace_turn_boost;
+}
+
+bool PushTask::pixelAlign(TaskTick& tick, bool strict) {
+    auto& a = pixel_alignment_;
+    const auto& in = tick.in;
+    if (!in.pixel_grasp_target_valid || !in.pixel_grasp_sample_us ||
+        in.pixel_grasp_sample_us > tick.now ||
+        tick.now - in.pixel_grasp_sample_us > t_.frame_timeout_us ||
+        !std::isfinite(in.pixel_grasp_error_px)) {
+        a = {};
+        reason_ = "pixel_target_wait";
+        return false;
+    }
+    const float error = in.pixel_grasp_error_px;
+    const float magnitude = std::abs(error);
+    const bool approach = !in.pixel_grasp_near_view;
+    const float tolerance = approach ? t_.pixel_align_approach_tolerance_px
+                                     : t_.pixel_align_tolerance_px;
+    const float restart = approach ? t_.pixel_align_approach_restart_px
+                                   : t_.pixel_align_restart_px;
+    const float hold_limit = approach ? restart : tolerance;
+    const float sent_vx = in.sent_velocity_valid ? in.sent_vx_mps : last_vx_;
+    const float sent_wz = in.sent_velocity_valid ? in.sent_wz_rps : last_wz_;
+    // Sent commands are not measured wheel velocities. Fresh stationary images are also
+    // required before Advance. Replays use the last task command when no UART exists.
+    const bool stopped = std::isfinite(sent_vx) && std::isfinite(sent_wz) &&
+                         std::abs(sent_vx) <= t_.pixel_align_stopped_vx &&
+                         std::abs(sent_wz) <= t_.pixel_align_stopped_wz;
+    const bool fresh = in.pixel_grasp_sample_us > a.last_sample_us;
+    if (fresh)
+        a.last_sample_us = in.pixel_grasp_sample_us;
+    const int direction = error > 0 ? 1 : (error < 0 ? -1 : 0);
+    const auto brake = [&] {
+        a.stage = PixelAlignment::Stage::Brake;
+        a.stopped_since_us = 0;
+        a.within_tolerance = magnitude <= tolerance;
+        a.stable_frames = 0;
+        a.stable_since_us = 0;
+        reason_ = "pixel_align_brake";
+    };
+    if (a.stage == PixelAlignment::Stage::Advance) {
+        if (magnitude <= (strict ? tolerance : restart) &&
+            (!strict || stopped))
+            return true;
+        brake();
+        return false;
+    }
+    if (a.stage == PixelAlignment::Stage::Correct) {
+        if (magnitude <= tolerance ||
+            (a.direction && direction != a.direction) ||
+            !std::isfinite(sent_vx) || !std::isfinite(sent_wz) ||
+            std::abs(sent_vx) > t_.pixel_align_stopped_vx ||
+            (sent_wz * error < 0 && std::abs(sent_wz) > t_.pixel_align_stopped_wz)) {
+            brake();
+            return false;
+        }
+        reason_ = "pixel_center_align";
+        drive(tick, 0, t_.pixel_align_gain_rps_per_px * error, true);
+        if (tick.motion.wz_rps != 0)
+            a.direction = direction;
+        return false;
+    }
+    if (a.stage == PixelAlignment::Stage::Brake) {
+        reason_ = "pixel_align_brake";
+        if (!stopped) {
+            a.stopped_since_us = 0;
+            a.stable_frames = 0;
+            a.stable_since_us = 0;
+            return false;
+        }
+        if (!a.stopped_since_us)
+            a.stopped_since_us = tick.now;
+        // A zero UART command is not a stationary chassis. Ignore pre-stop images and
+        // require a fresh, low-drift image window before permitting either direction.
+        if (!fresh || in.pixel_grasp_sample_us <= a.stopped_since_us)
+            return false;
+        if (magnitude <= tolerance)
+            a.within_tolerance = true;
+        else if (magnitude > hold_limit)
+            a.within_tolerance = false;
+        if (!a.stable_frames) {
+            a.brake_min_px = a.brake_max_px = error;
+            a.stable_since_us = in.pixel_grasp_sample_us;
+        }
+        a.brake_min_px = std::min(a.brake_min_px, error);
+        a.brake_max_px = std::max(a.brake_max_px, error);
+        if (a.brake_max_px - a.brake_min_px > t_.pixel_align_brake_motion_px) {
+            a.brake_min_px = a.brake_max_px = error;
+            a.stable_since_us = in.pixel_grasp_sample_us;
+            a.stable_frames = 0;
+        }
+        ++a.stable_frames;
+        if (a.stable_frames < t_.pixel_align_stable_frames ||
+            in.pixel_grasp_sample_us - a.stable_since_us < t_.pixel_align_brake_us)
+            return false;
+        a.direction = 0;
+        a.stable_frames = 0;
+        a.stable_since_us = 0;
+        a.stage = a.within_tolerance ? PixelAlignment::Stage::Settle
+                                     : PixelAlignment::Stage::Correct;
+        return false; // retain zero on the decision tick before a new direction
+    }
+    reason_ = "pixel_align_settle";
+    if (!stopped || magnitude > hold_limit) {
+        brake();
+        return false;
+    }
+    if (fresh) {
+        if (!a.stable_frames)
+            a.stable_since_us = in.pixel_grasp_sample_us;
+        ++a.stable_frames;
+        if (a.stable_frames >= t_.pixel_align_stable_frames &&
+            in.pixel_grasp_sample_us - a.stable_since_us >= t_.pixel_align_stable_us) {
+            a.stage = PixelAlignment::Stage::Advance;
+            return true;
+        }
+    }
+    return false;
 }
 
 void PushTask::scanSpin(TaskTick& tick) {

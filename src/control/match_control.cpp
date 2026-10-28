@@ -136,7 +136,13 @@ bool MatchControl::command(MatchCommand c, uint64_t now) {
         tick(now);
         return true;
     }
-    if (c == MatchCommand::RESUME && status_.started_us &&
+    if (c == MatchCommand::RESUME && status_.phase_waiting)
+        return false; // only NEXT can release an intentional phase checkpoint
+    if (c == MatchCommand::NEXT &&
+        (!status_.phase_waiting ||
+         (status_.state != MatchState::PAUSED && status_.state != MatchState::FAULT)))
+        return false;
+    if ((c == MatchCommand::RESUME || c == MatchCommand::NEXT) && status_.started_us &&
         (status_.state == MatchState::PAUSED || status_.state == MatchState::FAULT)) {
         // A movement watchdog expiry cannot be bypassed by repeatedly issuing RESUME.
         if (config_.require_measured_progress && now - progress_us_ >= config_.no_movement_us) {
@@ -144,11 +150,26 @@ bool MatchControl::command(MatchCommand c, uint64_t now) {
             return false;
         }
         status_.state = MatchState::RUNNING;
-        status_.reason = "resumed";
+        status_.reason = c == MatchCommand::NEXT ? "phase_next" : "resumed";
+        status_.phase_waiting = false;
         tick(now);
         return status_.permit;
     }
     return false;
+}
+bool MatchControl::pauseForPhase(const std::string& next_phase, uint64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tick(now);
+    if (status_.state == MatchState::FINISHED || !status_.started_us)
+        return false;
+    status_.phase_waiting = true;
+    if (status_.state == MatchState::FAULT)
+        return false; // retain the fault; NEXT still requires fresh healthy evidence
+    status_.state = MatchState::PAUSED;
+    status_.permit = false;
+    status_.phase_waiting = true;
+    status_.reason = "phase_complete_next_" + next_phase;
+    return true;
 }
 MatchStatus MatchControl::status(uint64_t now) {
     std::lock_guard<std::mutex> lock(mutex_);

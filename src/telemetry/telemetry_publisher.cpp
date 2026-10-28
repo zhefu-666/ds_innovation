@@ -230,7 +230,8 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
     }
     const auto& in = s.observation;
     f << "]" << "state" << "{" << "name" << PushTask::name(s.output.state) << "phase"
-      << phaseName(s.output.phase) << "run_status" << runStatusName(s.output.run_status) << "action"
+      << phaseName(s.output.phase) << "phase_waiting" << int(s.output.phase_waiting)
+      << "next_phase" << phaseName(s.output.next_phase) << "run_status" << runStatusName(s.output.run_status) << "action"
       << PushTask::name(s.output.state) << "recovering" << int(s.output.recovering)
       << "capture_evidence" << int(s.output.capture_evidence) << "delivery_credited"
       << s.output.delivery_credited << "delivery_expected" << s.output.delivery_expected
@@ -289,10 +290,28 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
       << int(in.safety_ok) << "target_id" << in.target_id << "target_label" << in.label
       << "target_is_search_cue" << int(in.target_is_search_cue) << "gripper_closed_observed"
       << int(in.gripper_closed_observed) << "target_valid" << int(in.target_valid)
+      << "capture_position_source" << (in.pixel_grasp_view ? "bbox_center_pixels" : "ground_projection")
+      << "pixel_grasp_view" << int(in.pixel_grasp_view)
+      << "pixel_grasp_near_view" << int(in.pixel_grasp_near_view)
+      << "pixel_grasp_target_valid" << int(in.pixel_grasp_target_valid)
+      << "target_center_px_valid" << int(in.target_center_px_valid)
+      << "pixel_view_handoff_ready" << int(in.pixel_view_handoff_ready)
+      << "pixel_grasp_ready" << int(in.pixel_grasp_ready)
+      << "pixel_grasp_aligned" << int(in.pixel_grasp_aligned)
+      << "pixel_grasp_error_px" << finite(in.pixel_grasp_error_px)
+      << "pixel_grasp_sample_us" << double(in.pixel_grasp_sample_us)
+      << "pixel_align_state" << s.output.pixel_align_state
+      << "pixel_align_stable_frames" << s.output.pixel_align_stable_frames
+      << "target_center_px" << "[" << finite(in.target_center_px.x) << finite(in.target_center_px.y) << "]"
+      << "target_grasp_range_inside" << int(in.target_grasp_range_inside)
       << "target_geometry_valid" << int(in.geometry_valid) << "target_region_known"
       << int(in.target_region_valid) << "target_in_own_zone" << int(in.target_in_zone)
       << "target_distance_m" << finite(in.distance_m) << "target_heading_error_rad"
       << finite(in.heading_error) << "pose_model_ran" << int(s.decision.pose_model_ran)
+      << "zone_sight_valid" << int(in.zone_sight_valid)
+      << "zone_sight_enemy" << int(in.zone_sight_enemy)
+      << "zone_sight_bearing_rad" << finite(in.zone_sight_bearing)
+      << "enemy_zone_seen" << int(in.enemy_zone_seen)
       << "zone_color" << s.decision.zone_color << "zone_color_reason"
       << s.decision.zone_color_reason << "geometry_reason" << s.decision.geometry_reason
       << "zone_identity_verified" << int(in.zone_identity_verified) << "zone_valid"

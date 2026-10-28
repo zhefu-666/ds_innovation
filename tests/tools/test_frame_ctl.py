@@ -10,6 +10,8 @@ import struct
 import subprocess
 import sys
 import time
+import tempfile
+import json
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,10 +27,18 @@ def feedback(state, action_id, pitch):
 
 
 class FrameTests(unittest.TestCase):
-    def exercise(self, action, state=0, action_id=0, pitch=120, dry=False, reply=True, legacy=False, emit=True, config=None, timeout='.25'):
+    def setUp(self):
+        self.state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_dir.cleanup)
+        self.state_file = Path(self.state_dir.name) / 'state.json'
+
+    def exercise(self, action, state=0, action_id=0, pitch=120, dry=False, reply=True, legacy=False, emit=True, config=None, timeout='.25', previous_offset=None, known=None):
         master, slave = pty.openpty()
         script = ROOT / 'tools/gripper/gripper_ctl.py' if legacy else SCRIPT
         cmd = [sys.executable, str(script), action, '--port', os.ttyname(slave), '--timeout', timeout, '--frame-config', str(config or ROOT / 'tests/fixtures/frame_mapping.synthetic.json')]
+        cmd.extend(['--state-file', str(self.state_file)])
+        if known is not None:
+            cmd.extend(['--known-frame-angle', str(known[0]), '--known-frame-id', str(known[1])])
         if dry:
             cmd.append('--dry-run')
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -55,7 +65,15 @@ class FrameTests(unittest.TestCase):
                             break
                         packet = bytes(received[:15]);del received[:15]
                         packets.append(packet)
-                        if reply == 'done':
+                        if reply == 'counter':
+                            offset = struct.unpack_from('<b', packet, 9)[0]
+                            if previous_offset != offset:
+                                response_id = response_id % 255 + 1
+                                previous_offset = offset
+                            response_state = 1
+                        elif reply == 'zero':
+                            response_state, response_id = 0, packet[10]
+                        elif reply == 'done':
                             response_state = 1  # done_flag: echo id with 1 immediately, before any motion
                             response_id = packet[10]
                         elif reply:
@@ -84,10 +102,69 @@ class FrameTests(unittest.TestCase):
         self.addCleanup(os.unlink, f.name)
         return f.name
 
-    def test_legacy_done_flag_rejected_without_tx(self):
-        code, packets, out = self.exercise("close", state=1, action_id=24, config=self.done_config(300))
+    def test_done_flag_close_matches_reported_log(self):
+        code, packets, out = self.exercise('close', state=1, action_id=1,
+                                          config=self.done_config(100), reply='counter', previous_offset=5)
+        self.assertEqual(code, 0, out)
+        for packet in packets: self.assert_packet(packet, 20, 2, 120)
+        self.assertIn('KNOWN_FRAME angle=20 id=2', out)
+
+    def test_done_flag_switch_and_repeat(self):
+        config = self.done_config(100)
+        for action, old_id, old_offset, expected_id, angle in [
+                ('open', 0, 0, 1, 0), ('close', 1, 5, 2, 20),
+                ('close', 2, -5, 2, 20), ('open', 2, -5, 3, 0),
+                ('open', 3, 5, 3, 0)]:
+            code, packets, out = self.exercise(action, state=1, action_id=old_id,
+                    config=config, reply='counter', previous_offset=old_offset)
+            self.assertEqual(code, 0, out)
+            for packet in packets: self.assert_packet(packet, angle, expected_id, 120)
+
+    def test_done_flag_old_id_or_zero_state_times_out(self):
+        for reply in [False, 'zero']:
+            code, packets, out = self.exercise('close', state=1, action_id=1,
+                    config=self.done_config(100), reply=reply)
+            self.assertEqual(code, 1, out)
+            self.assertEqual(len(set(packets)), 1)
+            self.assertFalse(self.state_file.exists())
+
+    def test_done_flag_wait_is_enforced(self):
+        code, packets, out = self.exercise('close', state=1, action_id=1,
+                config=self.done_config(300), reply='done', timeout='.2')
+        self.assertEqual(code, 1, out)
+        self.assertFalse(self.state_file.exists())
+
+    def test_done_flag_stale_record_and_wrap(self):
+        self.state_file.write_text(json.dumps({'angle': 20, 'id': 7}))
+        code, packets, out = self.exercise('close', state=1, action_id=255,
+                config=self.done_config(100), reply='counter', previous_offset=5)
+        self.assertEqual(code, 0, out)
+        for packet in packets: self.assert_packet(packet, 20, 1, 120)
+
+    def test_done_flag_dry_run_no_tx_or_record(self):
+        code, packets, out = self.exercise('close', config=self.done_config(100), dry=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(packets, [])
+        self.assertFalse(self.state_file.exists())
+
+    def test_done_flag_explicit_known_repeat(self):
+        code, packets, out = self.exercise('close', state=1, action_id=2,
+                config=self.done_config(100), reply='counter', previous_offset=-5, known=(20, 2))
+        self.assertEqual(code, 0, out)
+        for packet in packets: self.assert_packet(packet, 20, 2, 120)
+
+    def test_done_flag_bad_known_no_tx(self):
+        code, packets, out = self.exercise('close', state=1, action_id=2,
+                config=self.done_config(100), known=(20, 1))
         self.assertEqual(code, 1, out)
         self.assertEqual(packets, [])
+
+    def test_actual_assume_config(self):
+        code, packets, out = self.exercise('close', state=1, action_id=1,
+                config=str(ROOT / 'config/project.json') + '#/frame/assume',
+                reply='counter', previous_offset=5, timeout='1.5')
+        self.assertEqual(code, 0, out)
+        for packet in packets: self.assert_packet(packet, 20, 2, 120)
 
     def test_up(self):
         code, packets, text = self.exercise('up')

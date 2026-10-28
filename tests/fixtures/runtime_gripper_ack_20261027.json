@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "protocol": "a6-90-150-zero120-startup-deferred",
+  "baseline_sha256": "c828d652eb7316c817ab6182ba13f8202496b59f9b66b06dd9abdbd108b4d79f",
+  "legacy_revision": "bd73a38cea79533807259be1f81be266958dd842",
+  "evidence": [
+    "tests/fixtures/doc_evidence/\u901a\u4fe1\u534f\u8bae.md",
+    "tests/fixtures/doc_evidence/CAT_VEHICLE_ACCEPTANCE_20261024.md",
+    "/tmp/cat-protocol/include/rescue/types.hpp",
+    "/tmp/cat-protocol/src/uart_controller.cpp",
+    "src/task/startup_phase.cpp",
+    "tests/task/integration/task_phase_tests.cpp",
+    "README.md",
+    "src/app/runtime_config.cpp"
+  ],
+  "replacements": [
+    {
+      "case": "push_delivery",
+      "field": "stdout",
+      "from": "camera_protocol_cmd_deg=40",
+      "to": "camera_protocol_cmd_deg=30",
+      "count": 55
+    },
+    {
+      "case": "push_delivery",
+      "field": "stdout",
+      "from": "state=SCAN batch=0 delivered=0 first=0 vx=0 wz=0 frame_offset_deg=0 startup_forward_ms=0 search_cue_id=-1 capture_target_id=-1 cue=0 clear_attempts=0 pitch_cmd=500 camera_protocol_cmd_deg=5 stop=1 reason=startup_advance_complete\n",
+      "to": "state=SCAN batch=0 delivered=0 first=0 vx=0 wz=0 frame_offset_deg=20 startup_forward_ms=0 search_cue_id=-1 capture_target_id=-1 cue=0 clear_attempts=0 pitch_cmd=500 camera_protocol_cmd_deg=5 stop=1 reason=startup_deferred\n",
+      "count": 1
+    },
+    {
+      "case": "push_delivery",
+      "field": "stdout",
+      "from": "state=SCAN batch=0 delivered=0 first=0 vx=0 wz=0 frame_offset_deg=0 startup_forward_ms=0 search_cue_id=-1 capture_target_id=-1 cue=0 clear_attempts=0 pitch_cmd=500 camera_protocol_cmd_deg=5 stop=1 reason=camera_pitch_wait\n",
+      "to": "state=SCAN batch=0 delivered=0 first=0 vx=0 wz=0 frame_offset_deg=20 startup_forward_ms=0 search_cue_id=-1 capture_target_id=-1 cue=0 clear_attempts=0 pitch_cmd=500 camera_protocol_cmd_deg=5 stop=1 reason=camera_pitch_wait\n",
+      "count": 3
+    },
+    {
+      "case": "check_mechanical",
+      "field": "stdout",
+      "from": "means action finished (open or close);",
+      "to": "means action acknowledged (open or close);",
+      "count": 1
+    },
+    {
+      "case": "check_carry_demo",
+      "field": "stdout",
+      "from": "means action finished (open or close);",
+      "to": "means action acknowledged (open or close);",
+      "count": 1
+    }
+  ]
+}

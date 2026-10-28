@@ -15,6 +15,7 @@ enum class MatchCommand {
     START,
     STOP,
     RESUME,
+    NEXT,
     FINISH
 };
 struct MatchConfig {
@@ -28,6 +29,7 @@ struct MatchStatus {
     MatchState state = MatchState::WAITING;
     uint64_t started_us = 0, elapsed_us = 0, remaining_us = 0;
     bool permit = false;
+    bool phase_waiting = false;
     std::string reason = "waiting_start";
 };
 // Thread safe: the serial sender checks the same gate independently of inference.
@@ -42,6 +44,7 @@ class MatchControl {
         uint64_t sample_us, double x, double y, const std::string& reference, double uncertainty_m);
     bool command(MatchCommand command, uint64_t now);
     MatchStatus status(uint64_t now);
+    bool pauseForPhase(const std::string& next_phase, uint64_t now);
     static const char* name(MatchState state);
 
   private:

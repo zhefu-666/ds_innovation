@@ -1,0 +1,344 @@
+{
+  "schema_version": 3,
+  "status": "pixel_center_runtime",
+  "image_size": [
+    1280,
+    720
+  ],
+  "camera_ui_deg": 140,
+  "camera_pitch_cdeg": 2000,
+  "angle_source": "User supplied these samples in response to the request for the UI 140 view; screenshot alone has no valid servo readback.",
+  "coordinate_source": "Original detector box coordinates printed in screenshot table, not screenshot display pixels.",
+  "feature": "bbox_center_xy",
+  "samples": [
+    {
+      "role": "front",
+      "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/01_front.png",
+      "original_filename": "截图 2026-10-28 18-23-37.png",
+      "sha256": "7fd8fe621586fea55017362c1827366336131e0772b63f9822dcf3ccd78eb8b9",
+      "label": "ordinary_supply",
+      "bbox_xywh_px": [
+        541,
+        99,
+        193,
+        254
+      ],
+      "confidence": 0.931
+    },
+    {
+      "role": "correct",
+      "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/02_correct.png",
+      "original_filename": "截图 2026-10-28 18-23-50.png",
+      "sha256": "37ff896e88867dfaf40ccccab0346a6a33d4a67410ceaaa6326e0d4bef6dd4da",
+      "label": "ordinary_supply",
+      "bbox_xywh_px": [
+        541,
+        210,
+        213,
+        254
+      ],
+      "confidence": 0.958
+    },
+    {
+      "role": "rear",
+      "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/03_rear.png",
+      "original_filename": "截图 2026-10-28 18-24-02.png",
+      "sha256": "22039ac457015e24686db2dc0febed65492fd53f477e74dc66823a99274a2455",
+      "label": "ordinary_supply",
+      "bbox_xywh_px": [
+        546,
+        377,
+        244,
+        224
+      ],
+      "confidence": 0.897
+    }
+  ],
+  "lateral_bounds_px": null,
+  "multi_object_examples": [],
+  "runtime_enabled": true,
+  "pixel_alignment": {
+    "pixel_align_gain_rps_per_px": 0.004,
+    "pixel_align_max_wz": 0.2,
+    "pixel_align_tolerance_px": 12.0,
+    "pixel_align_restart_px": 24.0,
+    "pixel_align_approach_tolerance_px": 24.0,
+    "pixel_align_approach_restart_px": 40.0,
+    "pixel_align_brake_us": 150000,
+    "pixel_align_brake_motion_px": 30.0,
+    "pixel_align_stopped_wz": 0.02,
+    "pixel_align_stopped_vx": 0.01,
+    "pixel_align_stable_us": 200000,
+    "pixel_align_stable_frames": 3
+  },
+  "notes": [
+    "用户依次确认：最前边界、正确位置、最后边界。",
+    "使用检测框中心点作为图像位置参考，不计算毫米距离，不使用PnP。",
+    "三张均为单个居中绿色物块；不能由检测框宽度推定夹爪左右容许范围。",
+    "前后区间依据检测框中心Y；正确参考点同时记录中心X/Y。",
+    "2026-10-28: 用户提供伤员/核心前后左右最大可夹取边界。按同一UI140视角解释，使用原图检测框中心建立各类别轴向边界，角点组合未单独采样。",
+    "UI90与UI120均在检测框中心进入画面下四分之一（720高时Y≥540）后停车切下一视角，这是视角交接策略、不是夹取边界实测；UI120像素对准后以近距速度接近，UI140以中心Y=337作为停车闭爪线，保留各类前后/左右边界。无需120/140地面投影参数；普通物块未测横向最大边界，沿用中心对准要求。"
+  ],
+  "reference_center_px": {
+    "front": [
+      637.5,
+      226.0
+    ],
+    "correct": [
+      647.5,
+      337.0
+    ],
+    "rear": [
+      668.0,
+      489.0
+    ]
+  },
+  "classes": {
+    "ordinary_supply": {
+      "samples": [
+        {
+          "role": "front",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/01_front.png",
+          "original_filename": "截图 2026-10-28 18-23-37.png",
+          "sha256": "7fd8fe621586fea55017362c1827366336131e0772b63f9822dcf3ccd78eb8b9",
+          "label": "ordinary_supply",
+          "bbox_xywh_px": [
+            541,
+            99,
+            193,
+            254
+          ],
+          "confidence": 0.931
+        },
+        {
+          "role": "correct",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/02_correct.png",
+          "original_filename": "截图 2026-10-28 18-23-50.png",
+          "sha256": "37ff896e88867dfaf40ccccab0346a6a33d4a67410ceaaa6326e0d4bef6dd4da",
+          "label": "ordinary_supply",
+          "bbox_xywh_px": [
+            541,
+            210,
+            213,
+            254
+          ],
+          "confidence": 0.958
+        },
+        {
+          "role": "rear",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/03_rear.png",
+          "original_filename": "截图 2026-10-28 18-24-02.png",
+          "sha256": "22039ac457015e24686db2dc0febed65492fd53f477e74dc66823a99274a2455",
+          "label": "ordinary_supply",
+          "bbox_xywh_px": [
+            546,
+            377,
+            244,
+            224
+          ],
+          "confidence": 0.897
+        }
+      ],
+      "reference_center_px": {
+        "front": [
+          637.5,
+          226.0
+        ],
+        "correct": [
+          647.5,
+          337.0
+        ],
+        "rear": [
+          668.0,
+          489.0
+        ]
+      },
+      "center_bounds_px": null,
+      "target_center_px": [
+        647.5,
+        337.0
+      ],
+      "target_source": "ordinary correct-position sample"
+    },
+    "injured_person": {
+      "samples": [
+        {
+          "role": "front",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/injured_front.png",
+          "original_filename": "截图 2026-10-28 18-32-35.png",
+          "sha256": "a36b957e70c18e2c34868d6faca266d09ca20d404db115bec046279bde69f5fd",
+          "label": "injured_person",
+          "bbox_xywh_px": [
+            495,
+            104,
+            386,
+            264
+          ],
+          "confidence": 0.775
+        },
+        {
+          "role": "rear",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/injured_rear.png",
+          "original_filename": "codex-clipboard-4911142b-7fd6-4f00-8b5a-dbe078d2007c.png",
+          "sha256": "168fa4f762d6a8a6836a40f0ca62573467d243985463fcc5aa96fac2a3e10274",
+          "label": "injured_person",
+          "bbox_xywh_px": [
+            440,
+            357,
+            456,
+            244
+          ],
+          "confidence": 0.825
+        },
+        {
+          "role": "right",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/injured_right.png",
+          "original_filename": "codex-clipboard-516a957c-15df-483a-be33-002dc6ca5ee2.png",
+          "sha256": "e6cd537cdfc728490f92ebf5027105c3d907bcef5ef8ea976928732739aefc24",
+          "label": "injured_person",
+          "bbox_xywh_px": [
+            764,
+            139,
+            284,
+            416
+          ],
+          "confidence": 0.866
+        },
+        {
+          "role": "left",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/injured_left.png",
+          "original_filename": "codex-clipboard-2c83c0f7-8809-4e6a-afe3-e374c1722d85.png",
+          "sha256": "985527c19279bda77542afce93ac763b2580f0948a03169d6e56925585ec850a",
+          "label": "injured_person",
+          "bbox_xywh_px": [
+            263,
+            145,
+            264,
+            405
+          ],
+          "confidence": 0.893
+        }
+      ],
+      "reference_center_px": {
+        "front": [
+          688.0,
+          236.0
+        ],
+        "rear": [
+          668.0,
+          479.0
+        ],
+        "right": [
+          906.0,
+          347.0
+        ],
+        "left": [
+          395.0,
+          347.5
+        ]
+      },
+      "center_bounds_px": [
+        395.0,
+        236.0,
+        906.0,
+        479.0
+      ],
+      "target_center_px": [
+        647.5,
+        337.0
+      ],
+      "target_source": "Reuse ordinary-supply reference line per user request; no separate correct-position sample supplied."
+    },
+    "core_supply": {
+      "samples": [
+        {
+          "role": "front",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/core_front.png",
+          "original_filename": "codex-clipboard-49da27c7-f1a8-4af7-9c6a-584814bd6bd9.png",
+          "sha256": "a202e8a925e0acad723da536143701535a40ad02b070f2de6e8f1f162fdb02b1",
+          "label": "core_supply",
+          "bbox_xywh_px": [
+            597,
+            165,
+            142,
+            142
+          ],
+          "confidence": 0.855
+        },
+        {
+          "role": "left",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/core_left.png",
+          "original_filename": "codex-clipboard-fe497834-cbd3-4d37-91ae-749f4609ac71.png",
+          "sha256": "71b0f3366ec9861786c4d306ff5848b5225dc790ab38f1253d5565913cfa8004",
+          "label": "core_supply",
+          "bbox_xywh_px": [
+            182,
+            281,
+            173,
+            143
+          ],
+          "confidence": 0.847
+        },
+        {
+          "role": "right",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/core_right.png",
+          "original_filename": "codex-clipboard-b16707b4-92e4-4cf6-8825-c05fd7401a0f.png",
+          "sha256": "83c1f723f685a366d62d449ac3d6f69d9a8ba09a5661e9cce8334de32ed4a232",
+          "label": "core_supply",
+          "bbox_xywh_px": [
+            933,
+            354,
+            168,
+            148
+          ],
+          "confidence": 0.821
+        },
+        {
+          "role": "rear",
+          "screenshot": "calibration_runs/gripper_image_20261028/reference_screenshots/core_rear.png",
+          "original_filename": "codex-clipboard-c8b972e0-065e-4244-b28d-f716c1e167d0.png",
+          "sha256": "9de503f5fc8c1b0898827ae837903bca38cc4122a2cece4b7ee2bcce9d976c6c",
+          "label": "core_supply",
+          "bbox_xywh_px": [
+            571,
+            509,
+            113,
+            92
+          ],
+          "confidence": 0.836
+        }
+      ],
+      "reference_center_px": {
+        "front": [
+          668.0,
+          236.0
+        ],
+        "left": [
+          268.5,
+          352.5
+        ],
+        "right": [
+          1017.0,
+          428.0
+        ],
+        "rear": [
+          627.5,
+          555.0
+        ]
+      },
+      "center_bounds_px": [
+        268.5,
+        236.0,
+        1017.0,
+        555.0
+      ],
+      "target_center_px": [
+        647.5,
+        337.0
+      ],
+      "target_source": "Reuse ordinary-supply reference line per user request; no separate correct-position sample supplied."
+    }
+  },
+  "approach_camera_ui_deg": 120,
+  "approach_camera_pitch_cdeg": 0
+}

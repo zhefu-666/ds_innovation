@@ -19,6 +19,41 @@ using namespace rescue;
 
 int main() {
     {
+        SensorFusion fusion({200, 0.18f, 12.0f});
+        const auto reason = [&](uint64_t now, const char* expected) {
+            assert(std::strcmp(fusion.emergencyStopReason(now), expected) == 0);
+            assert(fusion.emergencyStop(now) == (std::strcmp(expected, "ok") != 0));
+        };
+        reason(1000000, "imu_missing");
+        SensorState sensor;
+        sensor.timestamp_us = 1000000;
+        sensor.imu_valid = true;
+        fusion.update(sensor);
+        // An older observation timestamp must not be used to report a newer live snapshot.
+        reason(999999, "imu_timestamp_future");
+        reason(1000000, "ok");
+        reason(1200000, "ok");
+        reason(1200001, "imu_stale");
+        sensor.imu_valid = false;
+        fusion.update(sensor);
+        reason(1000000, "imu_invalid");
+        sensor.imu_valid = true;
+        sensor.roll_rad = .3f;
+        fusion.update(sensor);
+        reason(1000000, "imu_tilt_limit");
+        sensor.roll_rad = 0;
+        const char* tof_reasons[] = {
+            "tof_front_left", "tof_front_right", "tof_rear_left", "tof_rear_right"};
+        sensor.tof_fl_m = sensor.tof_fr_m = sensor.tof_rl_m = sensor.tof_rr_m = .1f;
+        for (int i = 0; i < 4; ++i) {
+            sensor.tof_valid = {false, false, false, false};
+            sensor.tof_valid[i] = true;
+            fusion.update(sensor);
+            reason(1000000, tof_reasons[i]);
+        }
+    }
+
+    {
         NearestNeighborTracker tracker({30.0f, 2, 4});
         SegDetection first;
         first.label = "ordinary_supply";

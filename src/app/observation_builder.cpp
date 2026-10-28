@@ -210,8 +210,14 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     if (previous.state == PushState::SCATTER || previous.state == PushState::PILE)
         pixel_selector.forgetCenter(); // the sweep swings the view: the old pixel position no
                                        // longer marks where the lock vanished
+    // Zone detections are navigation landmarks; they never enter cargo selection,
+    // crowding, row grouping or gripper inventory as solid objects.
+    std::vector<SegDetection> cargo_detections;
+    for (const auto& d : detections)
+        if (d.label != "blue_safe_zone" && d.label != "red_safe_zone")
+            cargo_detections.push_back(d);
     const auto selection =
-        pixel_selector.update(detections,
+        pixel_selector.update(cargo_detections,
                               frame.size(),
                               frame_sensors.actuator.camera_pitch_cdeg,
                               frame_sensors.actuator.valid && frame_sensors.pitch_stable,
@@ -220,7 +226,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
                               config.confidence,
                               rejected_ids,
                               prefer_label);
-    auto input = makePushObservation(detections,
+    auto input = makePushObservation(cargo_detections,
                                      observed_at,
                                      previous.first_ordinary_delivered,
                                      config.confidence,
@@ -270,46 +276,32 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     input.run = false; // MatchControl supplies the final authorization below.
     if (geometry)
         geometry->apply(input, geometry_result, expected_stop, config.team, imuNowUs());
-    input.enemy_zone_seen = vision_result.pose_ran && zone_color.verified && !zone_color.assumed &&
-                            zone_color.color != config.team;
-    const SegDetection* zone_box = nullptr;
-    for (const auto& d : detections) {
-        if ((d.label != "blue_safe_zone" && d.label != "red_safe_zone") ||
-            !std::isfinite(d.confidence) || d.confidence < config.confidence)
-            continue;
-        const bool own = d.label == config.team + "_safe_zone";
-        input.enemy_zone_seen = input.enemy_zone_seen || !own;
-        if (!zone_box || (own && zone_box->label != config.team + "_safe_zone") ||
-            (d.label == zone_box->label && d.confidence > zone_box->confidence))
-            zone_box = &d;
-    }
-    const bool pose_sight = vision_result.pose_ran && !zone_points.empty() &&
-                            (!zone_box || (zone_color.verified && zone_color.color == config.team));
-    if (vref_ready && (pose_sight || zone_box) &&
-        vref_calibration.cameraMatrix().type() == CV_64F &&
+    const bool stable_view = frame_sensors.actuator.valid && frame_sensors.pitch_stable;
+    const bool detected_zone = vref_ready && applyZoneDetectionSight(
+        input, detections, config.team, frame.size(), vref_calibration.cameraMatrix(),
+        frame_sensors.actuator.camera_pitch_cdeg, stable_view, observed_at, config.confidence);
+    // Detection boxes guide post-capture search even without pose keypoints.
+    // Fall back to pose bearing only when its color is actually identified.
+    const bool pose_sight = !detected_zone && stable_view && vision_result.pose_ran &&
+                            !zone_points.empty() && zone_color.verified && !zone_color.assumed;
+    if (vref_ready && pose_sight && vref_calibration.cameraMatrix().type() == CV_64F &&
         vref_calibration.cameraMatrix().rows == 3) {
-        cv::Point2f c(0, 0);
-        if (pose_sight) {
-            for (const auto& k : zone_points)
-                c += k.pixel;
-            c *= 1.f / float(zone_points.size());
-        } else {
-            c = zone_box->center();
-        }
-        const cv::Mat& K = vref_calibration.cameraMatrix();
-        const double xc = (c.x - K.at<double>(0, 2)) / K.at<double>(0, 0),
-                     yc = (c.y - K.at<double>(1, 2)) / K.at<double>(1, 1);
+        cv::Point2f center(0, 0);
+        for (const auto& point : zone_points)
+            center += point.pixel;
+        center *= 1.f / float(zone_points.size());
+        const cv::Mat& k = vref_calibration.cameraMatrix();
+        const double x = (center.x - k.at<double>(0,2)) / k.at<double>(0,0),
+                     y = (center.y - k.at<double>(1,2)) / k.at<double>(1,1);
         const double pitch = double(frame_sensors.actuator.camera_pitch_cdeg) * .01 * CV_PI / 180.;
-        const double fwd = std::cos(pitch) - yc * std::sin(pitch);
-        if (fwd > .05) {
+        const double forward = std::cos(pitch) - y * std::sin(pitch);
+        if (forward > .05) {
             input.zone_sight_valid = true;
-            input.zone_sight_enemy = pose_sight
-                                         ? (zone_color.verified && zone_color.color != config.team)
-                                         : zone_box->label != config.team + "_safe_zone";
-            input.zone_sight_bearing = float(std::atan2(-xc, fwd));
+            input.zone_sight_enemy = input.enemy_zone_seen = zone_color.color != config.team;
+            input.zone_sight_bearing = float(std::atan2(-x, forward));
         }
     }
-    for (const auto& d : detections)
+    for (const auto& d : cargo_detections)
         if (d.label == "injured_person" && d.track_id != selection.id &&
             (d.injured_upright_rejected || !d.ground_contact_valid) && d.ground_position_valid &&
             d.confidence >= obstacleConfidence(d) && std::isfinite(d.body_xy_m.x) &&
@@ -317,7 +309,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             input.upright_body.push_back(d.body_xy_m);
     if (!input.upright_body.empty())
         input.upright_ts_us = observed_at;
-    for (const auto& d : detections)
+    for (const auto& d : cargo_detections)
         if (d.track_id != selection.id && d.ground_position_valid &&
             d.confidence >= obstacleConfidence(d) && std::isfinite(d.body_xy_m.x) &&
             std::isfinite(d.body_xy_m.y)) {
@@ -328,7 +320,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     if (!input.clutter_body.empty())
         input.clutter_ts_us = observed_at;
     {
-        for (const auto& d : detections)
+        for (const auto& d : cargo_detections)
             if (d.ground_position_valid && d.confidence >= config.confidence &&
                 std::isfinite(d.body_xy_m.x) && std::isfinite(d.body_xy_m.y) &&
                 (d.label == "ordinary_supply" || d.label == "core_supply" ||
@@ -400,7 +392,8 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         }
     }
     // Holding-region and rush-corridor inventory; uncertainty leaves them incomplete.
-    capture.update(input, detections, observed_at);
+    capture.update(input, cargo_detections, observed_at,
+                   previous.phase == TaskPhase::Capture ? task.targetLabel() : std::string());
     if (input.target_valid && input.geometry_valid) {
         static uint64_t last_clutter_log_us = 0;
         if (observed_at - last_clutter_log_us >= 1000000) {
@@ -446,7 +439,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             std::cout << "\n";
         }
     }
-    if (previous.capture_observation_requested) {
+    if (config_.task.require_multi_view && previous.capture_observation_requested) {
         const auto fb = feedback ? feedback->latestActuatorFeedback() : ActuatorFeedback{};
         if (!observing) {
             multi_view.begin(observed_at, fb.gripper_action_id, ++observation_round);
@@ -500,9 +493,12 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     // safety. SensorState uses body axes (Y-180 mounting confirmed 2026-10-26), same steady
     // clock as observed_at.
     const SensorState sensor = sensorStateFromImu(imu_data);
+    const auto safety_checked_at_us = imuNowUs();
+    const char* imu_safety_reason = "imu_missing";
     if (imu) {
         fusion.update(sensor);
-        input.safety_ok = !fusion.emergencyStop(imuNowUs());
+        imu_safety_reason = fusion.emergencyStopReason(safety_checked_at_us);
+        input.safety_ok = std::string(imu_safety_reason) == "ok";
         // Relative yaw only measures the post-delivery turn.
         input.heading_valid = imu_data.fresh && imu_data.sample.measurements_valid &&
                               std::isfinite(imu_data.sample.body_rpy_rad[2]);
@@ -521,6 +517,8 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             imu_data,
             sensor,
             observed_at,
-            geometry_sensor};
+            geometry_sensor,
+            safety_checked_at_us,
+            imu_safety_reason};
 }
 } // namespace rescue::app

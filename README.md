@@ -2,9 +2,18 @@
 
 运行于 LubanCat / RK3588S 的智能救援机器人上位机，使用 C++17、OpenCV 和 RKNN 完成视觉感知、任务决策和 MCU 控制，Python/Shell 提供标定、调试和遥测工具。
 
-**本文件是唯一日常维护文档。** 以下说明以板端 `/home/cat/ds_innovation` 为准，更新于 2026-10-27。下发控制包固定 **15 字节**；IMU 在上位机内部参与观测、导航和健康检查，不下发 yaw 或目标转角。软件回归与整车实机验收分开。
+**本文件是唯一日常维护文档。** 以下说明以板端 `/home/cat/ds_innovation` 为准，更新于 2026-10-29。下发控制包固定 **15 字节**；IMU 在上位机内部参与观测、导航和健康检查，不下发 yaw 或目标转角。软件回归与整车实机验收分开。
 
-目录：[项目与代码](#project) · [编译与测试](#build) · [启动与查看](#run) · [夹爪、相机与底盘控制](#manual-control) · [配置](#config) · [通信与IMU](#protocol) · [相机标定](#calibration) · [工具与排错](#tools) · [开发参考](#development)
+目录：[项目与代码](#project) · [编译与测试](#build) · [启动与查看](#run) · [四阶段独立测试](#phase-tests) · [四阶段逐段调试](#phase-stepping) · [停止与退出](#stop) · [夹爪、相机与底盘控制](#manual-control) · [配置](#config) · [通信与 IMU](#protocol) · [夹取与相机标定](#calibration) · [工具与排错](#tools) · [开发参考](#development)
+
+| 日常操作 | 入口 |
+| --- | --- |
+| 第一次构建、修改后编译 | [编译与测试](#build) |
+| 分别测试 startup / search / capture / transport | [四阶段独立测试命令](#phase-tests) |
+| 同一进程逐阶段停车，人工 next | [四阶段逐段调试](#phase-stepping) |
+| 整场运行、查看图像和日志 | [启动与查看](#run) |
+| Ctrl+C、暂停或结束 | [停止与退出](#stop) |
+| 夹爪开关、相机角度、短程底盘测试 | [手动控制](#manual-control) |
 
 <a id="project"></a>
 ## 项目与代码
@@ -49,6 +58,14 @@ IMU + MCU反馈 ─────────────────────�
 遥测提供 `decision.phase`、`decision.action`、`state.run_status`、恢复标志和捕获/交付结果。感知、导航与运动就绪层改读明确的请求字段。`PushState` 暂保留为兼容动作编号，用于既有硬件辅助逻辑、日志及离线回放；主流程已按四阶段调度，但本轮没有删除全部旧动作兼容代码。
 
 回归入口 `rescue_task_phase_tests` 验证启动占位、搜索到捕获的行程/货物交接、暂停保货、恢复归属和故障停止；捕获/交付集成测试覆盖真实证据与假设证据、全部/部分/未确认交付。冻结历史基线保留，`runtime_four_phase_20261026.json` 仅在原协议补充基础上声明 Startup 占位造成的启动输出差异。
+
+### 六类检测与夹取后寻区
+
+目标检测类别中的 zone_blue / zone_red 分别映射为 blue_safe_zone / red_safe_zone，是安全区地标；blue 仍是危险物块。安全区检测框不参与物块选择、邻居拥挤度、夹取/持有清单、区域内物块计数或未知物体阻挡判断。
+
+夹取成功进入 CARRY 后，利用安全区框中心寻找本方区域：--team blue 选蓝区，--team red 选红区；同时出现两色时优先本方，不因旁边的敌方框启动避让。框提供方向线索，不要求同时检测到区域姿态关键点；仍要求检测新鲜、置信度达标和相机稳定。没有可用检测框时，已确认颜色的姿态观测仍可提供方向。正常场地模式沿现有寻区接近流程运行，严格模式在得到几何路线前只对准；投放位置和交付确认继续使用原有区域几何及货物核验，不能仅凭看见安全区判定夹取/交付成功。
+
+遥测 decision.zone_sight_valid、zone_sight_enemy、zone_sight_bearing_rad 与 enemy_zone_seen 可核对寻区方向；夹取前的物块目标仍通过 target_label/target_id 查看。
 
 | 位置 | 职责 |
 | --- | --- |
@@ -116,6 +133,8 @@ ctest --preset cat-release -R '^rescue_push_tests$'
 ~~~
 
 最终验收使用未筛选的全量 CTest。测试使用合成观测、虚拟串口、临时文件和本机回环服务，不启动真实运动。
+
+2026-10-29 板端核对：cat-release 配置与构建成功，四个 `--phase` 及 `--step-phases` 的静态检查均通过；全量 CTest 为 62/63 通过。失败项 `rescue_runtime_legacy_baseline` 的六个用例存在标准输出差异，已观察到当前 `rush_near_speed=0.08` 对比冻结期望 0.16，以及 `back_m=0.425` 对比 0.5。资源校验和、参数、退出码及标准错误未被比较器报告不一致；仍应先审查完整输出差异，不能据此将失败忽略或重录冻结基线。此次 README 更新未修改业务代码或测试期望。
 
 <a id="run"></a>
 ## 启动与查看
@@ -214,16 +233,114 @@ python3 tools/remote_camera_telemetry/manage_project.py start \
 | `tools/match/match_main.sh --status` | 只读 MCU 状态，需串口独占 |
 | `tools/match/match_main.sh --run --site-clear …` | 实机比赛运行，执行底盘和机构动作 |
 
-比赛启动需要选择现场确认的方框初态及满足运行许可；通过 `bash tools/match/match_main.sh --help` 查看参数。`--frame open/close` 会先发反向再发目标动作，`--frame keep` 需要核对已有状态和编号。停止、急停与 MCU 失联行为须独立实机验收。自动启动是否启用以板端服务状态为准；本次整理不更改服务。
+比赛启动需要选择现场确认的方框初态及满足运行许可。`--frame open/close` 会先发反向再发目标动作，`--frame keep` 需要核对已有状态和编号；整场入口默认 `keep`。通过 `bash tools/match/match_main.sh --help` 查看参数（当前帮助输出退出码为 2）。
+
+整场运行示例（最后一条会操作底盘和机构，执行前确认清场）：
+
+~~~bash
+cd /home/cat/ds_innovation
+bash tools/match/match_main.sh --check --frame open
+python3 tools/remote_camera_telemetry/manage_project.py stop
+bash tools/match/match_main.sh --run --site-clear --frame open
+~~~
+
+启动器固定蓝队，打开硬件输出、IMU、遥测、异步采集和并行推理；默认将子进程限制在 CPU 4–7，可用 `RESCUE_CPUSET=all` 取消或指定其他核。先只读查询 A6、检查配置，完成方框/相机准备后再次检查，再以 `--auto-run` 启动主程序；实时预检通过才开始运行。整场入口及 startup/search 先回相机 UI90，capture/transport 由阶段自行选择观察角度。
+
+整场比赛许可默认 180 秒；到时撤销运动许可，不代表进程立即退出。外层进程默认上限 600 秒，超时发送 SIGTERM，再过 10 秒仍未退出则 SIGKILL。`MATCH_MAX_RUN_S` 可覆盖进程上限。运行日志为 `telemetry_logs/match-main-<日期时间>-<PID>.log`；RUN_HEADER 记录二进制路径、MD5、构建时间和参数，MATCH_MAIN_EXIT_CODE 记录正常收尾后的退出码。
+
+仓库内 `tools/match/match_autostart.sh` 当前打印禁用信息并 exit 0；实际 systemd 单元是否启用、是否使用此脚本仍应在板端查询。本次只更新 README，不更改服务：
+
+~~~bash
+systemctl status match-main.service --no-pager
+systemctl cat match-main.service
+~~~
+
+<a id="phase-tests"></a>
+### 四阶段独立测试（直接指定阶段）
+
+每条命令是独立进程，跳过前序业务阶段，完成所选阶段或出现故障后停车退出，不需要 `next`。先退出占用相机、MCU 串口的预览或其他程序，确认场地和机构扫掠空间清空，再按需执行一条：
+
+~~~bash
+cd /home/cat/ds_innovation
+# 启动准备 + 当前零速 Startup 占位
+bash tools/match/match_main.sh --run --site-clear --phase startup
+# 搜索和接近，进入捕获前停车退出
+bash tools/match/match_main.sh --run --site-clear --phase search
+# 捕获与核验，不继续运输
+bash tools/match/match_main.sh --run --site-clear --phase capture
+# 已装货且已关框后执行运输与交付核验
+bash tools/match/match_main.sh --run --site-clear --phase transport
+~~~
+
+以上命令按需要选一条，不要整段连续运行。startup 执行开局方框准备、相机回90°及当前零速启动占位；search 直接搜索接近，准备捕获前停止；capture 直接进入近视野，在原地确认当前目标和完整通道后前冲、关框、核验，完成后不运输；transport 从已装货且已关框开始，在原地核验货物，再寻区、入区、释放、后退、交付核验，结束后不转向搜索。
+
+startup/search/capture 默认 --frame open（先关再开）；transport 强制 --frame keep，避免开框丢失已有货物。capture 前将目标放在近视野的可捕获范围内；transport 前先装入合法货物并关框。独立会话保留首趟普通物资规则。捕获/运输初始证据8秒内不足会停车失败，不虚构目标或货物。
+
+单阶段结束会记录已应答的方框角度及编号，下一次 transport 仍核对下位机编号。若记录缺失/过期，现场确认后用 --known-frame-angle 20 --known-frame-id N 明确提供已关框状态；用 --status 只读查询编号。运输不执行开局方框翻转；capture/transport 不先回相机90°，由所选阶段控制观察角度。
+
+将 --run --site-clear 改为 --check 可仅检查配置、不打开设备。日志 [PHASE_RESULT] 包含阶段、完成标志、核验结果；故障或交付未确认返回非零退出码。单阶段禁用180秒总限时，保留阶段预算、健康检查和默认600秒进程上限。Ctrl+C 提前结束。原 --step-phases 仍用于连续流程断点调试。
+
+<a id="phase-stepping"></a>
+### 四阶段逐段调试
+
+在同一进程中保留目标、捕获证据及货物状态，每次阶段交接前停车，等待人工继续：
+
+~~~bash
+cd /home/cat/ds_innovation
+# 仅静态检查，不打开设备
+bash tools/match/match_main.sh --check --frame open --step-phases
+# 退出由管理器启动的预览，释放相机和 MCU 串口
+python3 tools/remote_camera_telemetry/manage_project.py stop
+# 清场确认后运行；仍执行开局关框→开框及相机回90°
+bash tools/match/match_main.sh --run --site-clear --frame open --step-phases
+~~~
+
+| 停车点 | 已完成 | next 后执行 |
+| --- | --- | --- |
+| STARTUP → SEARCH | 开局准备；Startup 当前为零速占位 | 搜索、接近、准备 |
+| SEARCH → CAPTURE | 目标选择与接近 | 前冲、关框、捕获核验 |
+| CAPTURE → TRANSPORT | 捕获核验，保留货物信息 | 寻区、入区、释放、后退、交付核验 |
+| TRANSPORT → SEARCH | 本趟交付核验 | 离区转向及下一轮搜索 |
+
+另一个板端终端执行（每次只发一条）：
+
+~~~bash
+cd /home/cat/ds_innovation
+python3 tools/match/match_ctl.py status
+python3 tools/match/match_ctl.py next
+~~~
+
+日志的 [PHASE_STEP] 显示完成阶段、下一阶段和结果；status 返回 phase_waiting=1 及下一阶段。next 仅在阶段断点可用，运行中重复发送不会排队。失败恢复返回搜索也会停在交接点，检查 reason，不将阶段结束视为捕获/交付成功。
+
+中途 stop 使用原有暂停逻辑，resume 使用原有恢复规则；阶段断点必须用 next。finish 结束本次调试并退出，也可 Ctrl+C。等待时保持方框和相机指令，下一阶段计时从 next 开始；操作期间不要搬动目标或底盘。阶段模式禁用180秒总限时，保留阶段预算和健康检查，进程默认上限3600秒（MATCH_MAX_RUN_S 可覆盖）。不带 --step-phases 的整场入口保持原行为。
+
+<a id="stop"></a>
+### 停止、暂停与 Ctrl+C
+
+四条 `--phase` 命令共用主程序退出路径。主程序运行期间在启动终端按 `Ctrl+C`，SIGINT 处理器设置退出标志；当前一轮处理结束后，主循环调用 `MotionLink::stop()`，等待发送线程退出，再尝试下发最后一个 `vx=0、wz=0` 包。这次清零绕过正常速度斜坡；不是按键瞬间在信号处理器里写串口，没有固定的按键到停车时延保证。
+
+零速收尾保持最后的夹爪与相机目标，不自动开爪或复位；尚未到位的机构可能继续完成原目标。命令提交停顿超过 150 ms 时，仍在运行的发送线程也会将过期命令替换成零速度。尚未提交过命令时，stop() 不凭空发送机构目标。
+
+退出日志 `[MCU] stopped: final zero-velocity packet sent` 目前没有根据最终写入结果区分成功和失败，不能独立证明下位机已接收或车轮已静止。串口断开、掉电、SIGKILL 等不能依赖这条正常收尾路径；本节说明软件行为，不代表实车急停验收。启动前的方框/相机准备由独立工具执行，主程序收尾路径适用于主程序已启动后的运行。
+
+主程序仍运行时，可从另一个板端终端选择一条命令：
+
+~~~bash
+cd /home/cat/ds_innovation
+python3 tools/match/match_ctl.py status  # 只读状态
+python3 tools/match/match_ctl.py stop    # 撤销运动许可并暂停，保留进程
+python3 tools/match/match_ctl.py resume  # 按原恢复规则继续；阶段断点须用 next
+python3 tools/match/match_ctl.py finish  # 结束本次运行；单阶段/逐段模式随后退出
+~~~
+
+这些命令通过 `/tmp/rescue-match.sock` 请求主程序处理，不直接访问串口。OK 是主程序受理，不是 MCU 停车应答；主程序已退出时不能用它补发零速。`demo.py stop` 只管理 demo 会话，不替代比赛控制命令。
 
 <a id="manual-control"></a>
-### 手动控制夹爪、相机与底盘
+## 夹爪、相机与底盘控制
 
-以下命令在板端执行，MCU 串口为 `/dev/ttyACM0`、波特率 115200。先退出占用该串口的主程序或其他串口工具；每次只运行一个控制命令。
+### 夹爪打开、关闭与状态
 
-#### 夹爪打开、关闭与状态
-
-下面带 `/frame/assume` 的打开命令已由用户在实机确认有效。该配置使用 A6 状态 `1=开、0=关`，TX 偏移为 `+5=开、-5=关`。配置仍标记为临时假设，不代表整车验收。
+下面带 `/frame/assume` 的打开命令已由用户在实机确认有效。该配置使用 A6 状态 `1=动作应答`，开、关都会返回 1，不能据此判断夹爪开闭；TX 偏移为 `+5=开、-5=关`，开合各等待配置中的 100 ms。配置仍标记为临时假设，不代表整车验收。
 
 ~~~bash
 # 打开夹爪
@@ -240,7 +357,7 @@ python3 /home/cat/ds_innovation/tools/frame/frame_ctl.py status
 
 打开、关闭命令同时发送零底盘速度，并保持首次 A6 反馈中的相机角度。需要只读反馈并预览控制包时，在开合命令末尾加 `--dry-run`。省略 `--frame-config` 会读取尚未验收的 `/frame/pending`，报错 `A6 / physical action mapping has not been accepted`。
 
-#### 相机角度控制
+### 相机角度控制
 
 先退出占用 MCU 串口的主程序或其他串口工具。通过遥测管理器启动的预览可用 `python3 tools/remote_camera_telemetry/manage_project.py stop` 停止；`--dry-run` 主程序仍会占用串口。
 
@@ -264,17 +381,44 @@ sudo python3 tools/remote_debug/camera_angle_console.py --hold-gripper-offset 5
 
 不要用猜测的偏移代替当前值，以免同时改变夹爪。默认串口为 `/dev/ttyACM0`、波特率 115200，可通过 `--port` 和 `--baud` 指定。若出现 `[Errno 11] Resource temporarily unavailable`，先用 `fuser /dev/ttyACM0` 或 `lslocks` 查找占用者并退出对应程序；`sudo` 不会绕过串口独占锁。
 
-#### 底盘前进、后退与转向
+### 底盘前进、后退与转向
 
-先在当前终端选择已有的演示配置；每个新终端都需执行一次。该 profile 使用 `/frame/assume` 和临时演示验收配置。
+**`--check` 只检查配置，不打开串口、不发送运动指令，底盘不会前进。没有 `BLOCKED` 表示静态检查通过，不表示已经执行动作。实际运动必须使用 `--run --site-clear`，并去掉 `--check`。** 省略 `--run` 也默认只检查。
+
+**1. 选择演示配置（每个新终端执行一次）**
+
+该 profile 使用 `/frame/assume` 中的夹爪协议映射和临时演示验收配置；`/frame/gripper` 的 A6 也采用动作应答语义，切换几何配置不能消除未知开闭目标的问题。
 
 ~~~bash
 export RESCUE_DEMO_PROFILE='/home/cat/ds_innovation/config/project.json#/profiles/demo_assume'
+~~~
 
-# 只检查参数和配置，不打开设备
-python3 /home/cat/ds_innovation/tools/demo/demo.py move-forward --speed 0.05 --seconds 0.5 --check
+**2. 仅在缺少夹爪记录时建立记录**
 
-# 前进：0.05 m/s，持续 0.5 秒
+若提示“未知夹爪当前开闭目标/动作编号”或 A6 编号为 0，先由操作者执行一次已确认可用的夹爪开合命令。下面命令会实际打开夹爪，底盘速度为零；希望夹爪关闭时将 `open` 换成 `close`。若同一用户已经成功执行过开合且记录仍有效，可跳过此步。
+
+~~~bash
+python3 /home/cat/ds_innovation/tools/frame/frame_ctl.py open \
+  --frame-config '/home/cat/ds_innovation/config/project.json#/frame/assume'
+~~~
+
+A6 的 `状态=1` 只表示动作应答，开、关都会返回 1，不能据此判断夹爪开闭。成功后会输出 `KNOWN_FRAME angle=… id=…` 并保存默认记录；底盘演示会自动读取，无需手工抄写编号。
+
+**3. 静态检查（不会运动）**
+
+~~~bash
+python3 /home/cat/ds_innovation/tools/demo/demo.py move-forward \
+  --speed 0.05 --seconds 0.5 --check
+~~~
+
+输出 `模式：CHECK_NO_DEVICES` 属于正常的检查结果。没有 `BLOCKED` 后，继续执行下一步的实际运动命令；检查通过本身不会发出运动指令，也不验证实时 A6 编号。
+
+**4. 实际运动（确认运动空间清空后执行）**
+
+`--site-clear` 表示操作者已确认运动空间清空。下面每条命令独立执行一次动作，不要将整个代码块一次性粘贴执行。
+
+~~~bash
+# 前进：0.05 m/s，持续 0.5 秒，随后发送零速度
 python3 /home/cat/ds_innovation/tools/demo/demo.py move-forward --speed 0.05 --seconds 0.5 --run --site-clear
 
 # 后退：0.05 m/s，持续 0.5 秒
@@ -287,9 +431,11 @@ python3 /home/cat/ds_innovation/tools/demo/demo.py turn-left --wz 0.20 --seconds
 python3 /home/cat/ds_innovation/tools/demo/demo.py turn-right --wz 0.20 --seconds 0.5 --run --site-clear
 ~~~
 
-`--run` 执行动作；`--site-clear` 表示操作者已确认运动空间清空。省略 `--run` 默认仅检查。直线速度 `--speed` 范围为 `(0, 0.10]` m/s，转向速度 `--wz` 为 `(0, 0.25]` rad/s；方向由子命令决定，参数填写正数。显式 `--seconds` 范围为 `(0, 1]` 秒。
+实际执行时显示 `模式：EXECUTE`。按指令速度计算，0.05 m/s 持续 0.5 秒的理论距离约为 **2.5 厘米**；实际距离取决于底盘响应，不以该计算值作为实测结果。
 
-**去掉 `--seconds 0.5` 后会持续运动**，直到当前终端按 `Ctrl+C`，或在另一板端终端执行停止命令：
+直线速度 `--speed` 范围为 `(0, 0.10]` m/s，转向速度 `--wz` 为 `(0, 0.25]` rad/s；方向由子命令决定，参数填写正数。显式 `--seconds` 范围为 `(0, 1]` 秒。
+
+**实际运动命令带 `--run --site-clear` 且去掉 `--seconds 0.5` 后会持续运动**，直到当前终端按 `Ctrl+C`，或在另一板端终端执行停止命令。查看与停止本套 demo 会话：
 
 ~~~bash
 # 查看本套 demo 工具启动的会话
@@ -299,7 +445,17 @@ python3 /home/cat/ds_innovation/tools/demo/demo.py status
 python3 /home/cat/ds_innovation/tools/demo/demo.py stop
 ~~~
 
-底盘工具按初始 A6 反馈保持夹爪和相机目标，正常结束或中断时补发零速度。若提示 A6 动作编号为 0、无法确定夹爪状态，先执行上面的夹爪开合命令再重试。`stop` 只管理本套 demo 会话，不会停止其他独立程序；没有会话记录不等于实物已停车。
+底盘工具用已记录的夹爪开闭目标和初始 A6 动作编号保持夹爪，并保持反馈中的相机角度；正常结束或中断时补发零速度。同一板端用户通过 `frame_ctl.py open/close` 成功执行的默认记录可直接被 demo 读取，按串口隔离；自定义 `--state-file` 的记录不自动读取。`--known-frame-angle 0|20` 保留兼容参数名，表示开/关的内部业务值，不是夹爪物理角度；手动指定时必须同时提供实际非零 `--known-frame-id`，不能填占位编号。运行前会核对实时 A6 状态为 1 且编号与记录一致，不匹配则拒绝发送。`stop` 只管理本套 demo 会话，不会停止其他独立程序；没有会话记录不等于实物已停车。
+
+### 底盘速度平滑（2026-10-28）
+
+主程序 MotionLink 在实际串口发送前限制线速度和角速度变化，首次从零起步，反向先减到零再反向加速；按发送间隔计算，不随视觉帧率跳变。当前初始调参为线加速 0.30 m/s²、线减速 0.40 m/s²、角加速 0.80 rad/s²、角减速 1.00 rad/s²，集中于 MotionLinkConfig 并导出到有效配置；它们是软件调参，不是机械实测极限。0→0.16 m/s 至少约0.53秒，+0.2→−0.2 rad/s 至少约0.45秒。
+
+目标短暂丢失且通道仍安全时平滑制动；故障/STOP/结束、指令过期、净空失效、相机/夹爪等待和精确夹取停车直接归零，保留 IMU 倾斜保护及故障锁定；当前根配置 `behavior.imu_tilt_limit_deg=30.0`（C++ 默认值为 12°），运行值以有效配置为准。正常制动存在余程：0.16 m/s 按0.40 m/s²制动的指令积分约3.2厘米，因此没有将精确夹取终点改为渐停。夹爪编号和相机目标不经过速度滤波。
+
+[MCU] requested_vx/requested_wz 为任务目标，sent_vx/sent_wz 为最近成功下发的速度；指令里程、静止观测和运动监控使用平滑后的已发指令（仍不是轮速实测）。[IMU_SAFETY] 在每次安全判定变化时记录失败帧的时间、姿态、有效性和串口计数；周期 estop 复用同一次实际安全判定，避免旧时间检查新样本造成误报。
+
+2026-10-28 历史板端验证：修改前授权短程复现记录俯仰12.23°、28.088毫秒后恢复；修改后一次授权运行含准备动作8.75秒，已记录最大横滚/俯仰4.44°，未触发倾斜故障。两次目标与路线不同，不能视为同工况对照或完整机械验收。
 
 <a id="config"></a>
 ## 配置
@@ -330,7 +486,9 @@ JSON 片段是完整 schema v1 配置，不与根节点叠加；文件路径相�
 
 配置字段的完整映射见 `src/app/config_loader.cpp`，运行参数见 `./build-release/rescue_upper_host --help`。旧分散配置只在 `tests/fixtures/legacy_config/` 保留冻结字节，不作为当前启动配置。
 
-当前运行配置使用已确认地面验证的 2026-10-27 外参，俯仰预设统一为 `[-3000,-3000,-3000]`，对应 UI 90°；比赛入口也定位到此角度。
+当前根配置使用已确认地面验证的 2026-10-27 外参，`calibration.pitch_presets_cdeg=[-3000,-3000,-3000]`，地面投影只在 UI90（内部 -3000）已标定。图像参考 `runtime_enabled=true` 时，UI120/140 像素夹取会在运行时选择相应视角，不能用请求预设判断主程序始终停在 UI90；用 `--dump-config` 查看最终任务参数。
+
+当前根配置另设 `behavior.imu_tilt_limit_deg=30.0`，与 C++ 默认 12°不同；MCU/IMU 端口为 `/dev/ttyACM0`、`/dev/ttyUSB0`。比赛入口还会覆盖硬件输出、IMU、显示、队伍和运行模式等设置。`--gripper` 会选择候选机械尺寸、UI90/120/140 预设及 `config/camera-overlap.yaml`，仍受候选标定门槛限制，不是启用普通像素夹取的必需参数。
 
 <a id="protocol"></a>
 ## 通信与 IMU
@@ -369,13 +527,13 @@ MotionLink 在业务提交时立即发送，默认每 40 ms 重发；命令超�
 | 偏移 | 类型 | 含义 |
 | --- | --- | --- |
 | 0 | uint8 | `0xA6` |
-| 1 | uint8 | 夹爪状态，当前约定 0 关、1 开 |
+| 1 | uint8 | 状态/完成位；当前 frame.assume、frame.gripper 按动作应答解释，1 表示完成，不能推断开闭 |
 | 2 | uint8 | 动作编号 |
 | 3..4 | int16 | 相机绝对舵机角，90..150° |
 | 5..6 | uint16 | CRC16/Modbus，覆盖 0..4，低字节在前 |
 | 7 | uint8 | 帧尾 `0x0A` |
 
-A6 二值状态与 TX 有符号偏移不能混用；状态、编号匹配不独立证明夹持或交付成功。解析按帧头、定长、CRC、帧尾进行，不能按换行切包。默认反馈超过 200 ms 失效；非法角度转换为 `-32768`。
+当前使用 `a6_semantics=done_flag`：开、关都可回 1，开闭目标须结合已知状态记录、动作编号及操作者确认。其他配置若采用位置状态映射，按该配置解释，不能把历史 0关/1开直接套用到当前入口。A6 状态与 TX 有符号偏移不能混用；状态、编号匹配不独立证明夹持或交付成功。解析按帧头、定长、CRC、帧尾进行，不能按换行切包。默认反馈超过 200 ms 失效；非法角度转换为 `-32768`。
 
 主程序和标定内部角度是偏移百分之一度：`pitch_cdeg=(A6绝对角−120)×100`，例如 125° 对应 500；发送时除以 100 并限幅 ±30°。俯仰工具使用绝对角，详见各工具 `--help`。
 
@@ -404,7 +562,62 @@ HI91 独立接 `/dev/ttyUSB0`，不在 A6 中。`HipnucImu::snapshot()` 提供�
 </details>
 
 <a id="calibration"></a>
-## 相机标定
+## 夹取与相机标定
+
+### 左右夹爪候选与三档重叠标定（2026-10-27）
+
+实测夹爪候选为 config/project.json#/frame/gripper：净宽90 mm，夹持前后边界180/70 mm，闭爪目标中心100 mm，张开外宽240 mm；同轴、两侧合拢，可容纳左右或前后排列的多个物体。物体尺寸与车体包络沿用原配置；满载几何中心为125 mm，与100 mm闭爪触发点不是同一个量。A6为动作应答，开闭各等待100 ms；重复同目标沿用原动作编号。闭爪补推保留。
+
+候选使用UI 90/120/140（内部-3000/0/2000），140档单视角连续帧核验完整夹持清单；120档只有半个夹爪，不作完整清单证据。旧35/40度多边形不能复用。当前正常入口尚未切换到这套机械尺寸候选；现行 UI120/140 像素流程见下节。先完成下述标定，再使用 bash tools/match/match_main.sh --gripper --check --frame open。--gripper --run同样沿用原入口的现场确认要求；未完成标定时静态检查会拒绝，不发送动作。
+
+离线标定入口不打开相机或串口，不执行机构动作：
+
+~~~bash
+python3 tools/camera_calibration/overlap.py init --output /tmp/gripper-overlap-points.json
+python3 tools/camera_calibration/overlap.py solve --input /tmp/gripper-overlap-points.json --base config/camera.yaml --output /tmp/gripper-overlap-result --max-error-mm <按停止余量确定的误差上限>
+~~~
+
+填写原图像素：每组机器人保持静止，同一地面标记在90/120或120/140图中的一一对应；建议每对6–12个分散的非共线点。另在每档填写至少3个未参与拟合、尺量过机器人坐标的验证点，包含100 mm闭爪附近范围。填写140档夹内多边形和实测停止余量。先去畸变，再以90档既有米制标定传递两组单应矩阵，不使用PnP。输出独立验证报告与候选camera-overlap.yaml，不自动覆盖当前标定或启用实机。
+
+地面距离直接使用各档重叠单应矩阵；现有物体高度/安全区栏顶校正使用该矩阵与内参分解得到的离散外参，也不调用PnP。仍需验证栏顶和真实目标，不把地面验证视作全部实机验收。当前config/camera.yaml已关闭可选PnP交叉检查。
+
+待完成：将验证后的文件放入config/camera-overlap.yaml，将真实140档多边形填入frame.gripper.frame_views，测量停止余量并完成对应确认。保留的40 mm最大物体深度在100 mm触发点与70 mm后边界之间只剩10 mm余量，旧15 mm余量不适用，不能直接改小并声称验证通过。
+
+### 图像触发位置参考（2026-10-28）
+
+用户新增的140°三张截图按最前边界、正确位置、最后边界保存于 calibration_runs/gripper_image_20261028/reference_screenshots。原始检测坐标为1280×720：前边界框[541,99,193,254]，正确位置框[541,210,213,254]，后边界框[546,377,244,224]；检测框中心分别约为(637.5,226)、(647.5,337)、(668,489) px。坐标取截图检测表，不能用界面缩放后的像素替代。
+
+frame.gripper.image_trigger_reference 指向版本管理内的 config/gripper-image-reference.json。运行 python3 tools/camera_calibration/image_trigger.py 可离线复核三张参考；也可使用 --bbox 541 210 213 254 --image-size 1280 720 --pitch-ui-deg 140 检查一个检测框。仅判断前后位置及相对正确位置的像素差，无距离换算和PnP，不连接相机、串口或控制机构。
+
+这三张是单个居中普通物块的静态样本，中心Y的226–489只代表该样本的前后位置参考；337是正确位置参考线，尚不是经过动态停车验证的控制阈值。普通物块左右最大容许范围、左右/前后多物块示例和动态停车仍待确认；当前软件接入见下文。不得将整个检测框包络当作夹持区域，也不得把所有检测框中心落在该区间的物体判为可闭爪。
+
+2026-10-28 新增伤员和核心物块的前/后/左/右最大夹取边界，原始截图保存于同一 reference_screenshots 目录，配置记录原始文件名、SHA-256 和检测坐标。沿用上述 UI 140°、1280×720 视角，使用检测框中心且边界包含等号：伤员 X=395–906、Y=236–479 px；核心 X=268.5–1017、Y=236–555 px。这些是四个轴向边界样本，角点组合未单独采样。离线工具支持 --label injured_person 或 --label core_supply；正确位置参考线继续复用普通物块 Y=337 px，并非新增的实测停车位置。
+
+主程序 frame.assume 和 frame.gripper 读取同一图像参考文件；runtime_enabled=true 时，正常入口使用UI120/140像素夹取流程，不要求这两档地面投影参数。UI90保留远景接近，中心Y≥540 px后停车切UI120；即使框碰到下沿导致地面几何无效，也允许仅停车切视角。UI120根据中心对准画面中央并以近距速度接近，中心Y≥540 px才停车切UI140。540是720高画面下四分之一的视角交接策略，尚待实机验证，不是夹取边界或地面标定；UI140稳定后重新锁定、开爪并核对图像走廊，再以现有近距速度前进。三类物块中心Y达到337 px、满足各自边界且X对准647.5 px时停车闭爪，横向对齐容差为独立的12 px，按下文“像素对齐控制”的制动和稳定窗口确认，发出闭爪前再次复核。未检测到目标、过期帧或转动中的相机不产生前进/闭爪依据，超时退出；不使用米制距离、行程耗尽或目标消失代替闭爪条件。
+
+普通物块使用已提供的前后范围226–489 px，其横向最大边界仍标记为未测，闭爪要求中心对准；伤员、核心额外使用各自左右边界。图像走廊按已测边界的横向包络计入可见邻居，并保留首趟、危险物禁夹、混装和伤员独运规则。闭爪动作应答后，UI140用连续稳定检测中心和类别清单核验夹持；UI120不提供夹持成功证据。此流程不伪造geometry_valid或米制距离；已配置的受控场地许可用于像素接近，远景导航和交付仍保留原有几何要求。
+
+有效配置的task.pixel_grasp_enabled、capture.pixel_grasp_enabled、capture.grasp_center_ranges显示启用状态、原图边界和目标中心；遥测capture_position_source=bbox_center_pixels及pixel_grasp_ready可核对实际判定。geometry_reason=pitch_not_calibrated仍如实说明该角度没有地面投影，但不再阻塞120/140像素接近和夹取。337 px来自普通物块静态正确位置样本，动态停车效果仍需低速实机验证。本次软件验证不运行机构；上节--gripper候选的机械尺寸验收与当前像素方案是独立事项。
+
+### 像素对齐控制（2026-10-28）
+
+UI120 对齐画面中心，UI140 对齐各类别已有标定中心。参数集中在
+config/gripper-image-reference.json 的 pixel_alignment（首轮初始值，尚未实机标定）：
+比例增益维持 0.004 rad/s/px、转速上限 0.20 rad/s。UI120 使用独立粗对齐参数：
+pixel_align_approach_tolerance_px=24、pixel_align_approach_restart_px=40；进入 ±24 px 后，
+制动、稳定确认和前进均保持滞回，超过 ±40 px 才重新纠偏。UI140 保留 ±12 px 精对齐，
+前进时允许 ±24 px，准备及闭爪时仍须 ±12 px。视角交接仍要求中心 Y≥画面高度的 75%。
+越过中心或进入对齐范围先制动，发送速度达到 |vx|≤0.01 m/s、|wz|≤0.02 rad/s 后，
+只接受此停车时刻之后的新图像：至少 3 张，覆盖 pixel_align_brake_us=150000，窗口误差
+最大值与最小值之差不超过 pixel_align_brake_motion_px=30，才允许重新纠偏或开始稳定确认。
+漂移超限重新计时；重复图像不推进窗口；发送速度回升重新等待停车。
+随后在当前视角保持范围内至少 3 张新图像、持续 200 ms 才允许前进。
+发送速度并非实测轮速，图像稳定是视觉代理证据；上述阈值仍待实机验收。
+重复图像不累计确认，检测失效、目标/类别/视角变化或停止会重置对齐状态。
+UI140 到达闭爪线后重新确认 ±12 px 和停车条件，原抓取边界及闭爪前复核仍生效。
+遥测新增 pixel_grasp_error_px、pixel_grasp_sample_us、pixel_align_state 和
+pixel_align_stable_frames；状态为 idle / correct / brake / settle / advance。
+上述像素对齐阈值尚未完成实机运动验收。
 
 ### 相机—IMU 旋转外参：固定板、多轴运动 AX=XB
 
@@ -438,9 +651,7 @@ ctest --preset cat-release -L calibration
 
 主程序的 T_camera_from_robot、ground_homography 需要平移、地面关系及适用俯仰范围，本结果不能直接替代它们。相机舵机改变角度后 R_imu_from_camera 也会改变，必须在同一机构角度使用或另行建模。项目已确认 IMU→base_link FLU 为 diag(-1,1,-1)；转换车体旋转时可左乘，但地面几何的 robot 坐标约定需另外核对，不混用 FLU 与 x右/y前。
 
-### 原有内参与地面标定
-
-### 推荐流程：9×6 对称圆点板
+### 内参与地面标定：9×6 对称圆点板
 
 1. 固定镜头焦点、分辨率和相机安装姿态；避免其他预览占用摄像头。
 2. 在板端启动 `python3 tools/camera_calibration/guided.py --stop-preview`，打开 `http://<当前板子IP>:8081/`；圆点板地址为 `/board.pdf`。默认 1280×720，须与实际主程序一致。

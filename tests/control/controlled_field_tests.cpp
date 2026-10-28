@@ -61,6 +61,15 @@ int main() {
     tick({d});
     tick({d});
     assert(in.zone_counts_valid && in.zone_supply_count == 1 && in.zone_occupied.size() == 1);
+    // A detector zone box covers its contents but is not an unlocated obstacle/cargo.
+    SegDetection zone_blue, zone_red;
+    zone_blue.label = "blue_safe_zone"; zone_red.label = "red_safe_zone";
+    zone_blue.box = zone_red.box = {0,0,700,400};
+    tick({d, zone_blue, zone_red});
+    assert(in.zone_counts_valid && in.zone_inventory_complete && in.zone_supply_count == 1 &&
+           in.zone_occupied.size() == 1 && in.path_safe);
+    tick({zone_blue, zone_red}); tick({zone_blue, zone_red}); tick({zone_blue, zone_red});
+    assert(in.zone_counts_valid && in.zone_inventory_complete && in.zone_supply_count == 0);
     d.body_xy_m = {.16, .65};
     tick({d});
     assert(!in.zone_counts_valid && field.reason() == "wrong_half_or_divider");
@@ -74,6 +83,19 @@ int main() {
     halves[1].valid = true;
     tick({}, false);
     assert(!in.path_safe && !in.retreat_safe && !in.zone_counts_valid);
+    // Controlled-field permission can serve pixel approach without claiming metric geometry.
+    in.pixel_grasp_view = in.camera_pitch_stable = true;
+    previous.phase = TaskPhase::Search;
+    tick({}, false);
+    assert(in.path_safe && in.turn_safe && !in.geometry_valid && !in.zone_counts_valid);
+    in.camera_pitch_stable = false;
+    tick({}, false);
+    assert(!in.path_safe);
+    in.camera_pitch_stable = true;
+    previous.phase = TaskPhase::Transport;
+    tick({}, false);
+    assert(!in.path_safe); // pixel capture does not replace navigation geometry
+    in.pixel_grasp_view = false;
     // dangerous_object never restricts motion (only carrying it is forbidden): in the body, ahead,
     // or unlocated.
     d.label = "dangerous_object";
@@ -152,6 +174,26 @@ int main() {
         directional.update(obs, {blue}, halves, {1280, 720}, previous, true);
         assert(!obs.turn_safe);
     }
+    { // Zone surfaces are not unknown solid obstacles, including unprojected pixel views.
+        ControlledField field(g, .32f, {.22f, .10f, .15f, .15f, .18f, .22f});
+        PushObservation obs;
+        PushOutput search;
+        search.phase = TaskPhase::Search;
+        obs.pixel_grasp_view = obs.camera_pitch_stable = true;
+        SegDetection zone;
+        for (const char* label : {"blue_safe_zone", "red_safe_zone"}) {
+            zone.label = label;
+            for (bool mapping : {false, true}) {
+                field.update(obs, {zone}, halves, {1280, 720}, search, mapping);
+                assert(obs.path_safe && obs.retreat_safe && obs.turn_safe && obs.arc_safe &&
+                       obs.jaw_open_safe && field.blockers().empty());
+            }
+        }
+        SegDetection unknown;
+        unknown.label = "unknown";
+        field.update(obs, {zone, unknown}, halves, {1280, 720}, search, false);
+        assert(!obs.path_safe && !obs.turn_safe && !obs.jaw_open_safe);
+    }
     { // Only explicit contact-test permission overrides missing and blocked clearance.
         ControlledField field(g, .32f, {.22f, .10f, .15f, .15f, .18f, .22f});
         PushObservation obs;
@@ -176,6 +218,10 @@ int main() {
         blue.timestamp_us = obs.now_us;
         field.update(obs, {blue}, halves, {1280, 720}, previous, true);
         assert(obs.clear_push_safe);
+        field.update(obs, {blue, zone_blue, zone_red}, halves, {1280, 720}, previous, true);
+        assert(obs.clear_push_safe);
+        field.update(obs, {zone_blue, zone_red}, halves, {1280, 720}, previous, true);
+        assert(!obs.clear_push_safe); // Landmark alone is not evidence of pushable contact.
         obs.zone_identity_verified = false;
         field.update(obs, {blue}, halves, {1280, 720}, previous, true);
         assert(!obs.clear_push_safe);

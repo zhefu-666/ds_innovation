@@ -27,6 +27,8 @@ class DemoTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        shared_record = patch.object(demo, 'state_record_path', side_effect=lambda port: self.root / ('shared-' + Path(port).name + '.json'))
+        shared_record.start();self.addCleanup(shared_record.stop)
         self.profile = demo.load_profile(str(ROOT/'config/project.json') + '#/profiles/demo_default')
         for key in ('binary', 'model', 'pose_model', 'rknn_library', 'camera_calibration', 'zone_geometry'):
             path = self.root/key;path.write_text('test fixture, not a live resource')
@@ -135,6 +137,64 @@ class DemoTests(unittest.TestCase):
             _, plan = self.plan('search')
         self.assertIn('--known-frame-id', plan['command']);self.assertEqual(plan['command'][plan['command'].index('--known-frame-id')+1], '7')
         _, plan = self.plan('open');self.assertEqual(plan['issues'], [])
+
+    def test_direct_gripper_record_is_shared_with_all_wheel_actions(self):
+        self.done_profile()
+        record = demo.state_record_path(self.profile['port'])
+        record.write_text(json.dumps({'angle': 20, 'id': 25}))
+        with patch.object(demo, 'KNOWN_FILE', self.root/'missing.json'):
+            for action in sorted(demo.WHEELS):
+                _, plan = self.plan(action)
+                self.assertEqual(plan['issues'], [])
+                self.assertEqual(plan['known'][:2], (20, 25))
+            args = demo.parser().parse_args(['move-forward'])
+            self.assertIsNone(demo.known_frame(args, '/dev/another-port'))
+
+    def test_shared_gripper_record_precedes_legacy_and_cli_wins(self):
+        self.done_profile()
+        record = demo.state_record_path(self.profile['port'])
+        record.write_text(json.dumps({'angle': 20, 'id': 25}))
+        legacy = self.root/'legacy.json'
+        legacy.write_text(json.dumps({'angle': 0, 'id': 7}))
+        with patch.object(demo, 'KNOWN_FILE', legacy):
+            self.assertEqual(self.plan('move-forward')[1]['known'][:2], (20, 25))
+            self.assertEqual(self.plan('move-forward', '--known-frame-angle', '0', '--known-frame-id', '8')[1]['known'][:2], (0, 8))
+            record.write_text('{}')
+            self.assertTrue(self.plan('move-forward')[1]['issues'])
+
+    def test_missing_gripper_record_check_still_never_opens_devices(self):
+        self.done_profile()
+        with patch.object(demo, 'KNOWN_FILE', self.root/'missing.json'), patch.object(demo, 'load_profile', return_value=self.profile), patch.object(demo_serial.frame, 'serial_port') as port, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(demo.main(['move-forward', '--check']), 2)
+            port.assert_not_called()
+        self.assertIn('未知夹爪', output.getvalue())
+
+    def test_open_preserves_shared_record_until_frame_ctl_checks_repeat(self):
+        self.done_profile()
+        shared = demo.state_record_path(self.profile['port'])
+        shared.write_text(json.dumps({'angle': 0, 'id': 25}))
+        args, plan = self.plan('open', '--run', '--site-clear')
+        def child(command, seconds, lines):
+            self.assertEqual(json.loads(shared.read_text()), {'angle': 0, 'id': 25})
+            return 0
+        with patch.object(demo, 'KNOWN_FILE', self.root/'legacy.json'), patch.object(demo, 'demo_lock', return_value=contextlib.nullcontext()), patch.object(demo, 'child_run', side_effect=child):
+            self.assertEqual(demo.run(args, self.profile, plan), 0)
+
+    def test_decision_clears_both_gripper_records_before_child(self):
+        self.done_profile()
+        shared = demo.state_record_path(self.profile['port'])
+        legacy = self.root/'legacy.json'
+        for record in (shared, legacy):
+            record.write_text(json.dumps({'angle': 0, 'id': 25}))
+        with patch.object(demo, 'KNOWN_FILE', legacy):
+            args, plan = self.plan('carry', '--run', '--site-clear')
+            plan['native_check'] = None
+            def child(command, seconds, lines):
+                self.assertFalse(shared.exists())
+                self.assertFalse(legacy.exists())
+                return 0
+            with patch.object(demo, 'demo_lock', return_value=contextlib.nullcontext()), patch.object(demo, 'child_run', side_effect=child):
+                self.assertEqual(demo.run(args, self.profile, plan), 0)
 
     def test_done_flag_manual_motion_needs_flag_one_and_matching_id(self):
         import frame_semantics as fs

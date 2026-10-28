@@ -9,6 +9,9 @@
 #include <ostream>
 #include <stdexcept>
 #include <type_traits>
+#include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 namespace rescue {
 namespace {
@@ -16,6 +19,19 @@ namespace {
 template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
 #define F(name) visit(#name, t.name)
     F(require_multi_view);
+    F(pixel_grasp_enabled);
+    F(pixel_align_gain_rps_per_px);
+    F(pixel_align_max_wz);
+    F(pixel_align_tolerance_px);
+    F(pixel_align_restart_px);
+    F(pixel_align_approach_tolerance_px);
+    F(pixel_align_approach_restart_px);
+    F(pixel_align_brake_us);
+    F(pixel_align_brake_motion_px);
+    F(pixel_align_stopped_wz);
+    F(pixel_align_stopped_vx);
+    F(pixel_align_stable_us);
+    F(pixel_align_stable_frames);
     F(demo_search_only);
     F(demo_carry_once);
     F(assume_all_safe);
@@ -411,6 +427,7 @@ template <class Visit> void visitCapture(const CaptureConfig& c, Visit visit) {
 #define F(name) visit(#name, c.name)
     F(pitch_tolerance_cdeg);
     F(edge_margin_px);
+    F(pixel_align_tolerance_px);
     F(follow_tolerance_px);
     F(follow_frames);
     F(mouth_y_m);
@@ -508,6 +525,8 @@ template <class Visit> void visitRequest(const Config& c, Visit visit) {
     F(telemetry_fps);
     F(telemetry_file);
     F(auto_run);
+    F(step_phases);
+    F(single_phase);
     F(allow_mechanical_pitch_model);
     F(known_frame_angle);
     F(known_frame_id);
@@ -812,6 +831,102 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
         tuning.scan_wz = cli_scan_wz;
         tuning.attempt_budget_us = cli_budget_us;
         capture_config = measured.capture;
+        const auto task_ref = splitFileReference(config.task_calibration_file);
+        cv::FileStorage task_file(task_ref.file, cv::FileStorage::READ);
+        const auto task_root = selectFileNode(task_file, task_ref.fragment);
+        std::string image_reference;
+        task_root["image_trigger_reference"] >> image_reference;
+        if (!image_reference.empty()) {
+            const auto file = std::filesystem::path(task_ref.file).parent_path().parent_path() /
+                              image_reference;
+            std::ifstream stream(file);
+            nlohmann::json reference;
+            stream >> reference;
+            if (reference.at("schema_version") != 3 || reference.at("feature") != "bbox_center_xy" ||
+                reference.at("image_size") != nlohmann::json::array({config.frame_width, config.frame_height}))
+                throw std::runtime_error("Invalid class grasp centre reference or image size");
+            const int pitch = reference.at("camera_pitch_cdeg").get<int>();
+            if (pitch < -3000 || pitch > 3000)
+                throw std::runtime_error("Invalid class grasp reference pitch");
+            capture_config.pixel_grasp_enabled = reference.value("runtime_enabled", false);
+            if (reference.contains("pixel_alignment")) {
+                const auto& alignment = reference.at("pixel_alignment");
+                visitTask(tuning, [&](const char* name, auto value) {
+                    if (std::string(name).rfind("pixel_align_", 0) != 0 || !alignment.contains(name))
+                        return;
+                    using T = decltype(value);
+                    const auto raw = alignment.at(name).get<double>();
+                    if (!std::isfinite(raw) || raw <= 0 ||
+                        raw > double(std::numeric_limits<T>::max()))
+                        throw std::runtime_error(std::string("Invalid pixel alignment parameter: ") + name);
+                    if constexpr (std::is_integral_v<T>)
+                        if (std::floor(raw) != raw)
+                            throw std::runtime_error(std::string("Noninteger pixel alignment parameter: ") + name);
+                    // visitTask supplies values; assign the approved fields explicitly below.
+                });
+#define ALIGN(name) tuning.name = alignment.value(#name, tuning.name)
+                ALIGN(pixel_align_gain_rps_per_px);
+                ALIGN(pixel_align_max_wz);
+                ALIGN(pixel_align_tolerance_px);
+                ALIGN(pixel_align_restart_px);
+                ALIGN(pixel_align_approach_tolerance_px);
+                ALIGN(pixel_align_approach_restart_px);
+                ALIGN(pixel_align_brake_us);
+                ALIGN(pixel_align_brake_motion_px);
+                ALIGN(pixel_align_stopped_wz);
+                ALIGN(pixel_align_stopped_vx);
+                ALIGN(pixel_align_stable_us);
+                ALIGN(pixel_align_stable_frames);
+#undef ALIGN
+                mark(r, "image reference pixel_alignment (initial, not field calibrated)",
+                     {"task.pixel_align_gain_rps_per_px", "task.pixel_align_max_wz",
+                      "task.pixel_align_tolerance_px", "task.pixel_align_restart_px",
+                      "task.pixel_align_stopped_wz", "task.pixel_align_stopped_vx",
+                      "task.pixel_align_stable_us", "task.pixel_align_stable_frames",
+                      "task.pixel_align_approach_tolerance_px",
+                      "task.pixel_align_approach_restart_px",
+                      "task.pixel_align_brake_us",
+                      "task.pixel_align_brake_motion_px"});
+            }
+            if (tuning.pixel_align_approach_restart_px <= tuning.pixel_align_approach_tolerance_px ||
+                tuning.pixel_align_restart_px <= tuning.pixel_align_tolerance_px ||
+                tuning.pixel_align_max_wz > tuning.max_wz ||
+                tuning.pixel_align_stopped_wz >= tuning.pixel_align_max_wz ||
+                tuning.pixel_align_stable_frames < 3)
+                throw std::runtime_error("Invalid pixel alignment hysteresis, speed or sample limits");
+            capture_config.pixel_align_tolerance_px = tuning.pixel_align_tolerance_px;
+            capture_config.pixel_approach_pitch_cdeg =
+                reference.value("approach_camera_pitch_cdeg", 0);
+            for (const auto& entry : reference.at("classes").items()) {
+                auto bounds = entry.value().at("center_bounds_px");
+                const bool lateral = !bounds.is_null();
+                if (!lateral) {
+                    if (!capture_config.pixel_grasp_enabled)
+                        continue;
+                    const auto& centers = entry.value().at("reference_center_px");
+                    bounds = nlohmann::json::array({0, centers.at("front").at(1),
+                                                   config.frame_width - 1, centers.at("rear").at(1)});
+                }
+                if ((entry.key() != "ordinary_supply" && entry.key() != "injured_person" &&
+                     entry.key() != "core_supply") || !bounds.is_array() || bounds.size() != 4)
+                    throw std::runtime_error("Invalid class grasp centre bounds");
+                const RectArea area{bounds.at(0).get<float>(), bounds.at(1).get<float>(),
+                                    bounds.at(2).get<float>(), bounds.at(3).get<float>()};
+                const auto& target = entry.value().at("target_center_px");
+                const cv::Point2f center(target.at(0).get<float>(), target.at(1).get<float>());
+                if (!std::isfinite(area.x1) || !std::isfinite(area.x2) ||
+                    !std::isfinite(area.y1) || !std::isfinite(area.y2) ||
+                    area.x1 < 0 || area.y1 < 0 || area.x1 >= area.x2 || area.y1 >= area.y2 ||
+                    area.x2 >= config.frame_width || area.y2 >= config.frame_height ||
+                    !std::isfinite(center.x) || !std::isfinite(center.y) ||
+                    center.x < area.x1 || center.x > area.x2 ||
+                    center.y < area.y1 || center.y > area.y2)
+                    throw std::runtime_error("Class grasp bounds outside original image");
+                capture_config.grasp_center_ranges.push_back(
+                    {entry.key(), int16_t(pitch), config.frame_width, config.frame_height,
+                     area, center, lateral});
+            }
+        }
         r.measured_load_radius = measured.load_radius_m;
         r.measured_body_radius = measured.robot_swept_radius_m;
         r.load_half_width = measured.load_half_width_m;
@@ -897,7 +1012,7 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
     if (config.push_replay.empty()) {
         tuning.max_speed = .40f;
         tuning.approach_speed = .40f;
-        tuning.carry_speed = .34f;
+        tuning.carry_speed = .05f; // 2026-10-28: operator-requested transport speed
         tuning.rush_speed = .32f;
         tuning.rush_budget_us = 12000000;
         tuning.blind_scatter_max_y_m = .50f;
@@ -958,8 +1073,9 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
         tuning.disperse_swing_vx = 0.f;
         tuning.disperse_passes = 1;
         tuning.blind_scatter_passes = 1;
-        tuning.enter_speed = .30f;
-        tuning.back_speed = .32f;
+        tuning.enter_speed = .05f;
+        tuning.back_speed = .05f;
+        tuning.assume_repush_speed_gain = 0.f; // keep repeated pushes at 0.05 m/s too
         tuning.turn_wz = .55f;
         tuning.max_wz = std::max(.55f, std::min(tuning.scan_wz, .8f));
         tuning.min_turn_wz = std::min(tuning.min_turn_wz, .40f);
@@ -1043,6 +1159,7 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
               "task.disperse_passes",
               "task.enter_speed",
               "task.back_speed",
+              "task.assume_repush_speed_gain",
               "task.turn_wz",
               "task.max_wz",
               "task.min_turn_wz",
@@ -1073,11 +1190,38 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
              "explicit assume_all_safe legacy overrides",
              {"task.turn_min_rad", "task.assume_all_safe", "task.assume_injured_trip"});
     }
+    // Explicit lateral-jaw single-view profiles use the measured stop point and
+    // the configured three presets after legacy field overrides have finished.
+    if (r.task_calibrated && !tuning.require_multi_view && r.frame_views.size() == 1) {
+        tuning.assume_rush_trigger_m = tuning.grasp_trigger_y_m;
+        tuning.far_pitch_cdeg = config.pitch_presets_cdeg[0];
+        tuning.track_pitch_cdeg = config.pitch_presets_cdeg[1];
+        tuning.near_pitch_cdeg = r.frame_views.front().pitch_cdeg;
+        tuning.intermediate_pitch_cdeg = config.pitch_presets_cdeg[1];
+        tuning.assume_view_pitch_cdeg = tuning.near_pitch_cdeg;
+        mark(r, "measured lateral-jaw profile", {"task.assume_rush_trigger_m",
+             "task.far_pitch_cdeg", "task.track_pitch_cdeg", "task.near_pitch_cdeg",
+             "task.intermediate_pitch_cdeg", "task.assume_view_pitch_cdeg"});
+    }
+    // Pixel control is installed after all legacy pitch overrides.
+    if (capture_config.pixel_grasp_enabled) {
+        if (capture_config.grasp_center_ranges.size() != 3 ||
+            capture_config.pixel_approach_pitch_cdeg != 0 ||
+            capture_config.grasp_center_ranges.front().pitch_cdeg != 2000)
+            throw std::runtime_error("Pixel grasp requires UI120 approach and UI140 class references");
+        tuning.pixel_grasp_enabled = true;
+        tuning.require_multi_view = false;
+        tuning.track_pitch_cdeg = tuning.intermediate_pitch_cdeg = 0;
+        tuning.near_pitch_cdeg = tuning.assume_view_pitch_cdeg = 2000;
+        mark(r, "user pixel centre references (UI120/UI140)",
+             {"task.pixel_grasp_enabled", "task.require_multi_view", "task.track_pitch_cdeg",
+              "task.intermediate_pitch_cdeg", "task.near_pitch_cdeg", "task.assume_view_pitch_cdeg"});
+    }
     r.a6_known = r.a6_done_flag ? config.known_frame_angle >= 0 && config.known_frame_id > 0
                                 : r.feedback_open >= 0;
     if (r.a6_done_flag)
         diagnostics << "[A6] TEMP_ASSUMPTION a6_semantics=done_flag: byte1==1 with matching id "
-                       "means action finished (open or close);"
+                       "means action acknowledged (open or close);"
                        " frame state = last completed target sent by this host; startup state from "
                        "--known-frame-angle "
                     << config.known_frame_angle << " --known-frame-id " << config.known_frame_id
@@ -1087,7 +1231,9 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
                        "judged from per-pitch image polygons;"
                        " no ground ranging inside the frame; views compared by class counts only\n";
     if (config.hardware &&
-        (!r.a6_known || (config.demo_mode != "search" && r.frame_views.size() < 2)))
+        (!r.a6_known || (config.demo_mode != "search" &&
+                         (!tuning.pixel_grasp_enabled && (tuning.require_multi_view ? r.frame_views.size() < 2
+                                                    : r.frame_views.size() != 1)))))
         throw std::runtime_error(r.a6_done_flag
                                      ? "Done-flag A6 requires --known-frame-angle and "
                                        "--known-frame-id plus schema 2 views before hardware output"
@@ -1116,7 +1262,9 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
          {"match.evidence_timeout_us", "match.no_movement_us", "match.movement_threshold_m"});
     mark(r,
          "MotionLinkConfig defaults",
-         {"motion_link.period_ms", "motion_link.command_timeout_ms"});
+         {"motion_link.period_ms", "motion_link.command_timeout_ms",
+          "motion_link.linear_accel_mps2", "motion_link.linear_decel_mps2",
+          "motion_link.angular_accel_rps2", "motion_link.angular_decel_rps2"});
     addAssumptions(r);
     return r;
 }
@@ -1175,6 +1323,21 @@ void printRuntimeTuning(const ResolvedRuntimeConfig& r, std::ostream& diagnostic
                 << " frame_range_m=" << tuning.disperse_turn_frame_range_m
                 << " frame_half_m=" << tuning.disperse_turn_frame_half_m
                 << " frame_extra_rad=" << tuning.disperse_turn_frame_extra_rad << "\n";
+    if (tuning.pixel_grasp_enabled)
+        diagnostics << "[PIXEL_ALIGN_TUNING] enabled=1"
+                << " pixel_align_gain_rps_per_px=" << tuning.pixel_align_gain_rps_per_px
+                << " pixel_align_max_wz=" << tuning.pixel_align_max_wz
+                << " pixel_align_tolerance_px=" << tuning.pixel_align_tolerance_px
+                << " pixel_align_restart_px=" << tuning.pixel_align_restart_px
+                << " pixel_align_approach_tolerance_px=" << tuning.pixel_align_approach_tolerance_px
+                << " pixel_align_approach_restart_px=" << tuning.pixel_align_approach_restart_px
+                << " pixel_align_brake_us=" << tuning.pixel_align_brake_us
+                << " pixel_align_brake_motion_px=" << tuning.pixel_align_brake_motion_px
+                << " pixel_align_stable_us=" << tuning.pixel_align_stable_us
+                << " pixel_align_stable_frames=" << tuning.pixel_align_stable_frames
+                << " pixel_align_stopped_wz=" << tuning.pixel_align_stopped_wz
+                << " pixel_align_stopped_vx=" << tuning.pixel_align_stopped_vx
+                << "\n";
 }
 
 void writeEffectiveConfig(const ResolvedRuntimeConfig& r, std::ostream& output) {
@@ -1244,6 +1407,19 @@ void writeEffectiveConfig(const ResolvedRuntimeConfig& r, std::ostream& output) 
     visitCapture(r.capture, [&](const char* name, const auto& value) {
         scalar(f, name, value);
     });
+    scalar(f, "pixel_grasp_enabled", r.capture.pixel_grasp_enabled);
+    scalar(f, "pixel_approach_pitch_cdeg", r.capture.pixel_approach_pitch_cdeg);
+    if (!r.capture.grasp_center_ranges.empty()) {
+        f << "grasp_center_ranges" << "[";
+        for (const auto& range : r.capture.grasp_center_ranges) {
+            f << "{" << "label" << range.label << "pitch_cdeg" << int(range.pitch_cdeg);
+            area(f, "center_bounds_px", range.area);
+            f << "target_center_px" << "[" << range.target_center_px.x << range.target_center_px.y << "]";
+            scalar(f, "lateral_measured", range.lateral_measured);
+            f << "}";
+        }
+        f << "]";
+    }
     f << "holding" << "[";
     for (const auto& view : r.capture.holding) {
         f << "{" << "pitch_cdeg" << int(view.pitch_cdeg);
@@ -1268,6 +1444,10 @@ void writeEffectiveConfig(const ResolvedRuntimeConfig& r, std::ostream& output) 
     f << "}" << "motion_link" << "{";
     scalar(f, "period_ms", r.motion_link.period_ms);
     scalar(f, "command_timeout_ms", r.motion_link.command_timeout_ms);
+    scalar(f, "linear_accel_mps2", r.motion_link.linear_accel_mps2);
+    scalar(f, "linear_decel_mps2", r.motion_link.linear_decel_mps2);
+    scalar(f, "angular_accel_rps2", r.motion_link.angular_accel_rps2);
+    scalar(f, "angular_decel_rps2", r.motion_link.angular_decel_rps2);
     f << "}" << "hardware" << "{";
     scalar(f, "output_enabled", r.request.hardware);
     scalar(f, "feedback_only", r.request.pitch_feedback);

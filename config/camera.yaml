@@ -64,3 +64,6 @@ pitch_model_min_cdeg: -3000
 pitch_model_max_cdeg: -3000
 mechanical_assumption: 0
 mechanical_model_note: "Measured handeye rotation plus ruler translation; fixed UI 90 deg; ground validation confirmed by user 2026-10-27"
+
+# User 2026-10-27: distance must not use PnP. Ground mapping remains calibrated.
+enable_pnp_crosscheck: 0

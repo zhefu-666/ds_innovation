@@ -10,6 +10,9 @@ usage() {
   tools/match/match_main.sh [--check] [--frame open|close|keep] [--known-frame-angle 0|20 --known-frame-id N]
   tools/match/match_main.sh --run --site-clear [--frame open|close|keep] [--known-frame-angle 0|20 --known-frame-id N]
 
+--phase NAME        直接执行 startup|search|capture|transport，结束后停车退出；不执行前序阶段。transport 保持已关方框并核验现有货物。
+--step-phases       四阶段调试：阶段交接前停车，另一个终端用 match_ctl.py next 继续；禁用180秒总限时，默认进程上限3600秒。
+--gripper           使用2026-10-27实测夹爪候选、90/120/140三档和config/camera-overlap.yaml；未完成停止余量/140°区域/重叠标定时静态检查拒绝，不能直接运行。
 --status            只读查询下位机A6反馈(完成位/动作编号/相机角)和本机记录的方框状态，TX=0，不动任何机构；
 --clear-neighbours  给主程序加 --clear-neighbours（扫开目标走廊内的邻近物资，不搬运）；
 --run 开始前自动做同样的下位机只读查询；--frame keep 时记录/给定的编号与下位机编号不一致则拒绝。
@@ -23,19 +26,27 @@ TXT
 mode=check
 site_clear=0
 frame=keep
+frame_explicit=0
+single_phase=
 cli_angle=
 cli_id=
 startup_ms=0
 startup_speed=.10
 clear_neighbours=0
+gripper_profile=0
+step_phases=0
 while (( $# )); do
   case "$1" in
     --check) mode=check ;;
+    --step-phases) step_phases=1 ;;
+    --phase) [[ $# -ge 2 ]] || usage; single_phase="$2"; shift ;;
+    --help|-h) usage ;;
+    --gripper) gripper_profile=1 ;;
     --status) mode=status ;;
     --clear-neighbours) clear_neighbours=1 ;;
     --run) mode=run ;;
     --site-clear) site_clear=1 ;;
-    --frame) [[ $# -ge 2 ]] || usage; frame="$2"; shift ;;
+    --frame) [[ $# -ge 2 ]] || usage; frame="$2"; frame_explicit=1; shift ;;
     --known-frame-angle) [[ $# -ge 2 ]] || usage; cli_angle="$2"; shift ;;
     --known-frame-id) [[ $# -ge 2 ]] || usage; cli_id="$2"; shift ;;
     --startup-advance-ms) [[ $# -ge 2 ]] || usage; startup_ms="$2"; shift ;;
@@ -44,6 +55,14 @@ while (( $# )); do
   esac
   shift
 done
+if [[ -n "$single_phase" ]]; then
+  case "$single_phase" in startup|search|capture|transport) ;; *) usage ;; esac
+  (( step_phases == 0 )) || { echo '--phase 不能与 --step-phases 同用' >&2; exit 2; }
+  if (( ! frame_explicit )) && [[ -z "$cli_angle$cli_id" && "$single_phase" != transport ]]; then frame=open; fi
+  if [[ "$single_phase" == transport && "$frame" != keep ]]; then
+    echo 'transport 直接从已装货且已关框状态开始，必须 --frame keep，不能开局翻转方框。' >&2; exit 2
+  fi
+fi
 [[ "$frame" == open || "$frame" == close || "$frame" == keep ]] || usage
 if [[ -n "$cli_angle$cli_id" ]]; then
   [[ "$cli_angle" == 0 || "$cli_angle" == 20 ]] || { echo '--known-frame-angle 必须是 0 或 20' >&2; exit 2; }
@@ -104,10 +123,16 @@ build_args() {
   args=(--config config/project.json
     --team blue --no-show --parallel-infer --async-capture
     --controlled-empty-field --match-seconds 180
-    --startup-advance-ms "$startup_ms" --startup-speed "$startup_speed" --scan-wz 1.6 --turn-wz .25
+    --startup-advance-ms "$startup_ms" --startup-speed "$startup_speed" --scan-wz 0.4 --turn-wz .25
     --telemetry --telemetry-fps 30
     --hardware --imu --imu-port /dev/ttyUSB0 --imu-baud 115200 --port /dev/ttyACM0 --baud 115200
     --known-frame-angle "$known_angle" --known-frame-id "$known_id")
+  if (( gripper_profile )); then
+    args+=(--task-calibration config/project.json#/frame/gripper
+           --pitch-presets -3000,0,2000 --calibration config/camera-overlap.yaml)
+  fi
+  [[ -z "$single_phase" ]] || args+=(--phase "$single_phase" --no-match-time-limit)
+  (( step_phases )) && args+=(--step-phases --no-match-time-limit)
   (( clear_neighbours )) && args+=(--clear-neighbours)
   return 0
 }
@@ -126,6 +151,15 @@ static_check() {
     fi
     known_angle=0; known_id=1; placeholder=1
     echo '[check] 方框状态将由 --frame 动作写入，现在 --known-frame-* 用占位值 0/1，仅用于配置检查，不会发给设备。'
+  fi
+  if [[ "$single_phase" == transport && "$known_angle" != 20 ]]; then
+    if [[ "$mode" == check ]]; then
+      echo '[check] transport 运行前需已装货、已关框及匹配的A6编号；本次仅检查配置。'
+      known_angle=20
+    else
+      echo 'transport 需要已关框(20°)：先装货关框，或确认现场状态后提供 --known-frame-angle 20 --known-frame-id N。' >&2
+      return 1
+    fi
   fi
   build_args
   echo "[check] 方框已知状态：angle=$known_angle id=$known_id ($known_src)"
@@ -172,7 +206,7 @@ if [[ "$mode" == check ]]; then
   esac
   cam_known=()
   [[ -n "$known_angle" ]] && cam_known=(--known-frame-angle "$known_angle" --known-frame-id "$known_id")
-  demo_tool camera.sh --offset-deg -30 "${cam_known[@]}"
+  [[ "$single_phase" == capture || "$single_phase" == transport ]] || demo_tool camera.sh --offset-deg -30 "${cam_known[@]}"
   echo '[check] 完成：未打开设备。'
   exit 0
 fi
@@ -208,7 +242,7 @@ esac
 frame_done=1
 cam_known=()
 [[ -n "$cli_angle" ]] && cam_known=(--known-frame-angle "$cli_angle" --known-frame-id "$cli_id")
-demo_tool camera.sh --offset-deg -30 --run --site-clear "${cam_known[@]}"
+[[ "$single_phase" == capture || "$single_phase" == transport ]] || demo_tool camera.sh --offset-deg -30 --run --site-clear "${cam_known[@]}"
 
 # 演示入口自己持有同一把启动锁，所以方框/相机动作结束后才能取锁。
 exec 9>/tmp/rescue-match-launch.lock
@@ -220,13 +254,22 @@ static_check
 args+=(--auto-run)
 
 source tools/match/telemetry_bridge.sh
+if [[ -n "$single_phase" ]]; then
+  echo "[PHASE_DIRECT] phase=$single_phase：直接执行所选阶段，完成或失败后停车退出。"
+elif (( step_phases )); then
+  echo '[PHASE_STEP] 启动 -> 搜索接近 -> 捕获 -> 运输交付；每阶段后停车，等待 match_ctl.py next。'
+  echo '[PHASE_STEP] 已禁用180秒总限时；阶段预算和健康检查保留。status 查询，stop 暂停，finish 终止。'
+else
 cat <<'TXT'
 整场主程序：180 秒（超过 10 分钟自动停止），--auto-run 在实时预检通过后自动发 START；无 demo/assume 标志。
 统一配置中的 frame.assume 与机械俯仰模型均为临时假设，结果不构成验收。
 Ctrl+C 或 match_ctl.py 可停止；零速发送以现场急停为准。
 TXT
 # 主程序整场只需 180 秒；超过 MATCH_MAX_RUN_S（默认 600 秒）仍未退出则发 SIGTERM（主程序会收尾停车），10 秒后仍在则 SIGKILL。
-max_run_s=${MATCH_MAX_RUN_S:-600}
+fi
+default_max_run_s=600
+(( step_phases )) && default_max_run_s=3600
+max_run_s=${MATCH_MAX_RUN_S:-$default_max_run_s}
 set +e
 start_s=$SECONDS
 echo "[CPU] affinity=$cpu_set; OpenCV threads=${RESCUE_OPENCV_THREADS:-1}"

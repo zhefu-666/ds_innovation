@@ -109,6 +109,8 @@ const std::vector<Field>& fields() {
         {"runtime", "telemetry_fps", "--telemetry-fps", Kind::Integer, 1, 30},
         {"runtime", "telemetry_file", "--telemetry-file", Kind::Path},
         {"runtime", "auto_run", "--auto-run", Kind::Boolean},
+        {"runtime", "step_phases", "--step-phases", Kind::Boolean},
+        {"runtime", "single_phase", "--phase", Kind::Text},
         {"runtime", "no_match_time_limit", "--no-match-time-limit", Kind::Boolean},
         {"runtime", "vision_log_dir", "--vision-log-dir", Kind::Path},
         {"runtime", "match_socket", "--match-socket", Kind::Path},

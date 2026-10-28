@@ -36,7 +36,25 @@ float CaptureMonitor::footprintHalf(const std::string& label) const {
 }
 void CaptureMonitor::update(PushObservation& in,
                             const std::vector<SegDetection>& detections,
-                            uint64_t now) {
+                            uint64_t now,
+                            const std::string& capture_label) {
+    in.pixel_grasp_view = in.pixel_grasp_near_view = false;
+    in.pixel_grasp_target_valid = in.pixel_grasp_ready = in.pixel_grasp_aligned = false;
+    in.pixel_grasp_steering = in.pixel_grasp_error_px = 0;
+    in.pixel_grasp_sample_us = 0;
+    in.target_center_px = {};
+    in.target_center_px_valid = in.pixel_view_handoff_ready = false;
+    if (c_.pixel_grasp_enabled && in.camera_pitch_cdeg != kCameraPitchInvalid) {
+        in.pixel_grasp_view = std::abs(int(in.camera_pitch_cdeg) -
+                                      int(c_.pixel_approach_pitch_cdeg)) <= c_.pitch_tolerance_cdeg;
+        for (const auto& range : c_.grasp_center_ranges)
+            if (std::abs(int(in.camera_pitch_cdeg) - int(range.pitch_cdeg)) <= c_.pitch_tolerance_cdeg)
+                in.pixel_grasp_near_view = true;
+        in.pixel_grasp_view = in.pixel_grasp_view || in.pixel_grasp_near_view;
+    }
+    in.target_grasp_range_applicable = false;
+    in.target_grasp_range_valid = in.target_grasp_range_inside = false;
+    in.target_grasp_range_lateral = in.target_grasp_range_past_rear = false;
     in.held = {};
     in.held_objects.clear();
     in.captured = false;
@@ -47,6 +65,11 @@ void CaptureMonitor::update(PushObservation& in,
     in.corridor_occlusion_free = false;
     diag_ = {};
     corridor_diag_.clear();
+    const auto& range_label = capture_label.empty() ? in.label : capture_label;
+    for (const auto& range : c_.grasp_center_ranges)
+        if (range.label == range_label && in.camera_pitch_cdeg != kCameraPitchInvalid &&
+            std::abs(int(in.camera_pitch_cdeg) - int(range.pitch_cdeg)) <= c_.pitch_tolerance_cdeg)
+            in.target_grasp_range_applicable = true;
     // Image positions are only comparable at one fixed, settled camera pitch.
     if (!in.camera_pitch_stable || in.camera_pitch_cdeg == kCameraPitchInvalid) {
         reset();
@@ -64,9 +87,140 @@ void CaptureMonitor::update(PushObservation& in,
             continue;
         fresh.push_back(&d);
     }
+    if (c_.pixel_grasp_enabled)
+        for (const auto* d : fresh) {
+            const auto r = std::find_if(c_.grasp_center_ranges.begin(), c_.grasp_center_ranges.end(),
+                [&](const GraspCenterRange& range) { return range.label == d->label; });
+            if (r == c_.grasp_center_ranges.end() || !in.target_valid ||
+                d->track_id != in.target_id || d->label != in.label ||
+                d->confidence < c_.min_confidence || d->box.x < 0 || d->box.y < 0 ||
+                d->box.br().x > r->image_width_px || d->box.br().y > r->image_height_px)
+                continue;
+            in.target_center_px_valid = true;
+            in.target_center_px = d->center();
+            // View-management policy, not a grasp boundary or ground calibration:
+            // retain the current view until the centre reaches its lower quarter.
+            // At 1280x720 this is Y540 for both FAR->UI120 and UI120->UI140.
+            in.pixel_view_handoff_ready = in.target_center_px.y >= .75f * r->image_height_px;
+            in.pixel_grasp_target_valid = in.pixel_grasp_view;
+            if (in.pixel_grasp_view) {
+                const float target_x = in.pixel_grasp_near_view ? r->target_center_px.x
+                                                                : r->image_width_px * .5f;
+                const float error = target_x - in.target_center_px.x;
+                in.pixel_grasp_error_px = error;
+                in.pixel_grasp_sample_us = d->timestamp_us;
+                in.pixel_grasp_aligned = std::abs(error) <= c_.pixel_align_tolerance_px;
+                in.pixel_grasp_steering = error / (r->image_width_px * .5f);
+            }
+            break;
+        }
+    // These samples describe a 140-degree view, not a ground-contact estimate.
+    for (const auto& range : c_.grasp_center_ranges) {
+        if (range.label != range_label ||
+            std::abs(int(in.camera_pitch_cdeg) - int(range.pitch_cdeg)) > c_.pitch_tolerance_cdeg)
+            continue;
+        in.target_grasp_range_applicable = true;
+        for (const auto* d : fresh) {
+            if (!in.target_valid || d->track_id != in.target_id || d->label != range_label ||
+                d->confidence < c_.min_confidence || d->box.x < 0 || d->box.y < 0 ||
+                d->box.br().x > range.image_width_px || d->box.br().y > range.image_height_px)
+                continue;
+            const auto center = d->center();
+            in.target_grasp_range_valid = true;
+            in.target_grasp_range_lateral = center.x >= range.area.x1 && center.x <= range.area.x2;
+            in.target_grasp_range_past_rear = center.y > range.area.y2;
+            in.target_grasp_range_inside = in.target_grasp_range_lateral &&
+                                           center.y >= range.area.y1 && center.y <= range.area.y2;
+            in.pixel_grasp_ready = in.pixel_grasp_near_view &&
+                                    in.target_grasp_range_inside && center.y >= range.target_center_px.y;
+            break;
+        }
+        break;
+    }
     const auto labelOf = [&](const SegDetection& d) {
         return d.confidence >= c_.min_confidence ? d.label : std::string("unknown");
     };
+    // At UI140 the supplied box-centre limits replace ground projection for both
+    // the capture inventory and post-close image evidence. UI120 never borrows them.
+    if (in.pixel_grasp_near_view) {
+        const auto& ref = c_.grasp_center_ranges.front();
+        float left = float(ref.image_width_px), right = 0, front = float(ref.image_height_px);
+        for (const auto& range : c_.grasp_center_ranges) {
+            if (range.lateral_measured) {
+                left = std::min(left, range.area.x1);
+                right = std::max(right, range.area.x2);
+            }
+            front = std::min(front, range.area.y1);
+        }
+        const float corridor_front = in.pixel_grasp_target_valid
+                                         ? std::min(front, in.target_center_px.y) : front;
+        bool complete = in.pixel_grasp_target_valid, occlusion_free = true, followed = true;
+        bool ambiguous = false;
+        std::vector<const SegDetection*> members;
+        std::map<int, std::vector<cv::Point2f>> next;
+        if (view_ != -2 || !in.gripper_closed_observed)
+            history_.clear();
+        view_ = -2;
+        for (const auto* d : fresh) {
+            const auto center = d->center();
+            const bool primary = d->track_id == in.target_id && d->label == in.label;
+            const bool swept = primary || (center.x >= left && center.x <= right &&
+                                           center.y >= corridor_front);
+            if (swept) {
+                in.corridor.add(labelOf(*d));
+                members.push_back(d);
+                if (d->box.x < 0 || d->box.y < 0 || d->box.br().x >= ref.image_width_px ||
+                    d->box.br().y >= ref.image_height_px)
+                    complete = false;
+                CorridorEntry e;
+                e.track_id = d->track_id; e.label = labelOf(*d); e.confidence = d->confidence;
+                e.age_us = now - d->timestamp_us; e.counted = true; e.reason = "pixel_capture_corridor";
+                corridor_diag_.push_back(e);
+            }
+            if (!in.gripper_closed_observed)
+                continue;
+            const auto range = std::find_if(c_.grasp_center_ranges.begin(), c_.grasp_center_ranges.end(),
+                [&](const GraspCenterRange& r) { return r.label == labelOf(*d); });
+            bool held = false;
+            if (range != c_.grasp_center_ranges.end()) {
+                held = center.y >= range->area.y1 && center.y <= range->area.y2 &&
+                       (range->lateral_measured
+                            ? center.x >= range->area.x1 && center.x <= range->area.x2
+                            : center.x >= left && center.x <= right);
+            } else if (swept) {
+                held = true; // unknown / forbidden neighbours remain visible to trip rules
+            }
+            if (!held)
+                continue;
+            if (d->box.x < 0 || d->box.y < 0 || d->box.br().x >= ref.image_width_px ||
+                d->box.br().y >= ref.image_height_px)
+                ambiguous = true;
+            in.held.add(labelOf(*d));
+            in.held_objects.push_back({d->track_id, labelOf(*d), d->confidence});
+            auto& history = next[d->track_id];
+            if (const auto it = history_.find(d->track_id); it != history_.end())
+                history = it->second;
+            history.push_back(center);
+            if (int(history.size()) > c_.follow_frames)
+                history.erase(history.begin());
+            bool still = d->track_id >= 0 && int(history.size()) >= c_.follow_frames;
+            for (const auto& point : history)
+                still = still && cv::norm(point - center) <= c_.follow_tolerance_px;
+            followed = followed && still;
+        }
+        for (size_t i = 0; i < members.size(); ++i)
+            for (size_t j = i + 1; j < members.size(); ++j)
+                if (iou(members[i]->box, members[j]->box) > c_.occlusion_iou &&
+                    !(labelOf(*members[i]) == "ordinary_supply" && labelOf(*members[j]) == "ordinary_supply"))
+                    occlusion_free = false;
+        history_ = std::move(next);
+        in.hold_observable = in.gripper_closed_observed;
+        in.captured = in.hold_observable && in.held.total() > 0 && followed;
+        in.held_complete = in.captured && !ambiguous && occlusion_free;
+        in.corridor_complete = complete;
+        in.corridor_occlusion_free = complete && occlusion_free;
+        return;
+    }
     // Holding region.
     const HoldingView* v = view(in.camera_pitch_cdeg, true);
     const int index = v ? int(v - c_.holding.data()) : -1;

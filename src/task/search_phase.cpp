@@ -6,6 +6,146 @@
 #include <limits>
 namespace rescue {
 void PushTask::updateSearchPhase(TaskTick& tick) {
+    const bool image_search = search_phase_.action == SearchAction::Scan ||
+                              search_phase_.action == SearchAction::LostSearch ||
+                              search_phase_.action == SearchAction::MidReacquire ||
+                              search_phase_.action == SearchAction::NearReacquire ||
+                              search_phase_.action == SearchAction::SelectCargo ||
+                              search_phase_.action == SearchAction::MidApproach ||
+                              search_phase_.action == SearchAction::Approach;
+    if (t_.pixel_grasp_enabled && image_search && tick.in.camera_pitch_stable &&
+        tick.in.camera_pitch_cdeg != kCameraPitchInvalid &&
+        std::abs(int(tick.in.camera_pitch_cdeg) - int(t_.far_pitch_cdeg)) <= t_.pitch_tolerance_cdeg) {
+        // A bottom-edge box can have a valid image centre but no ground contact.
+        // Stop and recover it in UI120; missing geometry never authorizes FAR driving.
+        if (tick.in.pixel_view_handoff_ready && candidate(tick.in, tick.now)) {
+            trip_context_.target_id_ = trip_context_.capture_target_id_ = tick.in.target_id;
+            trip_context_.label_ = tick.in.label;
+            enter(PushState::APPROACH, tick.now, "pixel_center_switch_to_120");
+            search_phase_.approach_pitch_ = t_.track_pitch_cdeg;
+            return;
+        }
+        if (search_phase_.action == SearchAction::Approach) {
+            if (tick.elapsed > t_.approach_budget_us) {
+                scanAfterClear(tick, "pixel_far_approach_timeout");
+                return;
+            }
+            const auto remember_target = [&] {
+                search_phase_.approach_last_id_ = trip_context_.target_id_;
+                search_phase_.approach_last_heading_ = tick.in.heading_error;
+                search_phase_.approach_last_distance_ = tick.in.distance_m;
+                search_phase_.approach_last_world_valid_ =
+                    tick.in.heading_valid && std::isfinite(tick.in.heading_rad);
+                if (search_phase_.approach_last_world_valid_)
+                    search_phase_.approach_last_world_yaw_ =
+                        wrapAngle(tick.in.heading_rad + tick.in.heading_error);
+            };
+            if (!tick.in.target_center_px_valid || !tracking(tick.in)) {
+                // This FAR path bypasses SearchStage::approach: retain its same-object
+                // re-ID limits instead of waiting for the obsolete ID until timeout.
+                if (tick.in.target_center_px_valid &&
+                    search_phase_.approach_last_id_ == trip_context_.target_id_ &&
+                    trip_context_.target_id_ >= 0 &&
+                    tick.in.target_id != trip_context_.target_id_ &&
+                    tick.in.label == trip_context_.label_ && candidate(tick.in, tick.now) &&
+                    std::abs(approachHeadingShift(tick.in)) <= .3f &&
+                    std::abs(tick.in.distance_m - search_phase_.approach_last_distance_) <= .35f) {
+                    trip_context_.target_id_ = trip_context_.capture_target_id_ = tick.in.target_id;
+                    actionProgress().misses = 0;
+                    remember_target();
+                    reason_ = "pixel_far_id_rebound_same_object";
+                    return; // keep zero velocity on the rebind tick
+                }
+                reason_ = "pixel_far_target_wait";
+                if (lostTarget(tick))
+                    scanAfterClear(tick, "pixel_far_target_lost");
+                return;
+            }
+            actionProgress().misses = 0;
+            remember_target();
+            reason_ = "pixel_far_approach";
+            steer(tick, t_.approach_speed, tick.in.heading_error);
+            return;
+        }
+    }
+    if (t_.pixel_grasp_enabled && tick.in.pixel_grasp_view && image_search) {
+        if (tick.elapsed > t_.approach_budget_us) {
+            scanAfterClear(tick, "pixel_target_reacquire_timeout");
+            return;
+        }
+        if (!candidate(tick.in, tick.now)) {
+            reason_ = "pixel_target_wait";
+            return;
+        }
+        trip_context_.target_id_ = trip_context_.capture_target_id_ = tick.in.target_id;
+        trip_context_.label_ = tick.in.label;
+        if (!pixelAlign(tick, tick.in.pixel_grasp_near_view))
+            return;
+        if (!tick.in.pixel_grasp_near_view) {
+            if (tick.in.pixel_view_handoff_ready) {
+                enter(PushState::APPROACH, tick.now, "pixel_center_switch_to_140");
+                search_phase_.approach_pitch_ = t_.near_pitch_cdeg;
+                return;
+            }
+            commandFrame(1, tick.now);
+            const int g = frameWait(tick.in, 1, tick.now);
+            if (g < 0) { failStop(tick, "gripper_open_timeout"); return; }
+            if (g == 0) { reason_ = "gripper_feedback_wait"; return; }
+            reason_ = "pixel_center_approach_120";
+            drive(tick, t_.rush_near_speed, 0);
+            return;
+        }
+        if (!tick.in.target_grasp_range_valid || tick.in.target_grasp_range_past_rear) {
+            enter(PushState::CAPTURE_FAIL, tick.now, "target_outside_grasp_center_range");
+            return;
+        }
+        // Keep an already-open search overlay open across the phase transition.
+        commandFrame(1, tick.now);
+        enter(PushState::PREPARE, tick.now, "pixel_target_prepare");
+        return;
+    }
+    // Pixel PREPARE keeps UI140 throughout opening and inventories the image corridor.
+    if (t_.pixel_grasp_enabled && search_phase_.action == SearchAction::Prepare) {
+        const int p = pitchWait(tick.in, tick.now);
+        if (p < 0) {
+            failStop(tick, "camera_pitch_timeout");
+            return;
+        }
+        if (p == 0) { reason_ = "camera_pitch_wait"; return; }
+        commandFrame(1, tick.now);
+        const int g = frameWait(tick.in, 1, tick.now);
+        if (g < 0) { failStop(tick, "gripper_open_timeout"); return; }
+        if (g == 0) { reason_ = "gripper_feedback_wait"; return; }
+        if (tick.elapsed > t_.prepare_budget_us) {
+            enter(PushState::CAPTURE_FAIL, tick.now, "pixel_corridor_unresolved");
+            return;
+        }
+        if (!tracking(tick.in)) {
+            reason_ = "pixel_target_wait";
+            actionProgress().confirmations = 0;
+            return;
+        }
+        trip_context_.verdict_ = checkCorridor(tick.in.corridor, tick.in.corridor_complete,
+            tick.in.corridor_occlusion_free, trip_context_.label_, first_);
+        if (trip_context_.verdict_ == RuleVerdict::INCOMPLETE) {
+            actionProgress().confirmations = 0;
+            reason_ = "pixel_corridor_incomplete";
+            return;
+        }
+        if (trip_context_.verdict_ != RuleVerdict::OK) {
+            enter(PushState::CAPTURE_FAIL, tick.now, "pixel_corridor_rejected");
+            return;
+        }
+        if (trip_context_.seen_ != tick.in.corridor) {
+            trip_context_.seen_ = tick.in.corridor;
+            actionProgress().confirmations = 0;
+        }
+        if (++actionProgress().confirmations < t_.corridor_confirm_frames)
+            return;
+        trip_context_.pending_ = tick.in.corridor;
+        requestPhase(PhaseOutcome::CaptureReady, "pixel_corridor_ok");
+        return;
+    }
     switch (search_phase_.action) {
         case SearchAction::Scan:
         case SearchAction::LostSearch:

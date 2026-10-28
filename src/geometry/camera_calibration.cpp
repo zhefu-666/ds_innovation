@@ -65,6 +65,54 @@ bool CameraCalibration::load(const std::string& path, bool allow_mechanical_assu
         tilt_limit_deg_ = static_cast<float>(limit);
     }
 
+    if (!file["enable_pnp_crosscheck"].empty()) {
+        const auto node = file["enable_pnp_crosscheck"];
+        if (!node.isInt() || (int(node) != 0 && int(node) != 1)) return false;
+        pnp_crosscheck_enabled_ = int(node) == 1;
+    }
+    const auto overlap = file["overlap_ground_views"];
+    if (!overlap.empty()) {
+        if (!overlap.isSeq() || domain != "undistorted_pixels") return false;
+        for (const auto& view : overlap) {
+            int16_t preset;
+            cv::Mat h;
+            if (!readInt16(view["pitch_cdeg"], preset) ||
+                (preset != -3000 && preset != 0 && preset != 2000)) return false;
+            view["homography"] >> h;
+            if (h.rows != 3 || h.cols != 3 || h.channels() != 1 || !finiteMat(h) ||
+                std::abs(cv::determinant(h)) < 1e-12 || overlap_ground_.count(preset)) return false;
+            h.convertTo(h, CV_64F);
+            cv::Matx33d m;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) m(r,c) = h.at<double>(r,c);
+            overlap_ground_.emplace(preset, m);
+            // H maps image to metric floor. Recover [r1 r2 t] from K^-1 H^-1,
+            // orthogonalize R, and retain the discrete pose for object-height
+            // correction and existing size checks. No PnP call is involved.
+            cv::Mat k64; camera_matrix_.convertTo(k64, CV_64F);
+            if (k64.rows != 3 || k64.cols != 3 || !finiteMat(k64) ||
+                std::abs(cv::determinant(k64)) < 1e-12) return false;
+            cv::Mat a = k64.inv() * h.inv();
+            const double n1 = cv::norm(a.col(0)), n2 = cv::norm(a.col(1));
+            if (n1 < 1e-12 || n2 < 1e-12) return false;
+            const double scale = (a.at<double>(2,2) < 0 ? -2.0 : 2.0) / (n1+n2);
+            a *= scale;
+            cv::Mat rotation(3,3,CV_64F);
+            a.col(0).copyTo(rotation.col(0)); a.col(1).copyTo(rotation.col(1));
+            cv::Mat third = a.col(0).cross(a.col(1)); third.copyTo(rotation.col(2));
+            cv::SVD svd(rotation);
+            cv::Mat r = svd.u * svd.vt;
+            if (cv::determinant(r) < 0) { svd.u.col(2) *= -1; r = svd.u * svd.vt; }
+            cv::Matx34d t;
+            for (int row=0; row<3; ++row) {
+                for (int col=0; col<3; ++col) t(row,col)=r.at<double>(row,col);
+                t(row,3)=a.at<double>(row,2);
+            }
+            overlap_camera_.emplace(preset,t);
+        }
+        pnp_crosscheck_enabled_ = false;
+    }
+
     // 优先：已验收外参 + 标定时pitch → 按读回pitch实时计算H。
     cv::Mat extrinsic;
     int validated = 0;
@@ -195,6 +243,8 @@ bool CameraCalibration::valid() const {
 bool CameraCalibration::pitchUsable(int16_t cdeg) const {
     if (cdeg == kCameraPitchInvalid)
         return false;
+    for (const auto& entry : overlap_ground_)
+        if (std::abs(int(cdeg) - int(entry.first)) <= 50) return true;
     if (mode_ == GroundMode::FIXED_PITCH)
         return std::abs(static_cast<int>(cdeg) - fixed_pitch_cdeg_) <= pitch_tolerance_cdeg_;
     if (mode_ == GroundMode::PITCH_MODEL)
@@ -220,6 +270,19 @@ bool CameraCalibration::cameraFromGroundAt(int16_t cdeg,
                                            cv::Matx34d& T) const {
     // 舵机绕相机x轴（图像右）转动，正值向下：新相机C'相对参考相机C有 p_C' = Rx(Δ)(p_C - pivot) +
     // pivot。
+    for (const auto& entry : overlap_camera_) {
+        if (std::abs(int(cdeg)-int(entry.first)) > 50) continue;
+        T = entry.second;
+        if (sensor) {
+            const double dp = sensor->pitch_rad - imu_ref_pitch_rad_;
+            const double dr = sensor->roll_rad - imu_ref_roll_rad_;
+            const cv::Matx33d r = T.get_minor<3,3>(0,0) * (rotX(-dp)*rotY(dr)).t();
+            for (int row=0; row<3; ++row)
+                for (int col=0; col<3; ++col) T(row,col)=r(row,col);
+        }
+        return true;
+    }
+    if (cdeg < min_pitch_cdeg_ || cdeg > max_pitch_cdeg_) return false;
     const double delta = (static_cast<int>(cdeg) - reference_pitch_cdeg_) * kPi / 18000.0;
     const cv::Matx33d servo = rotX(delta);
     const cv::Vec3d servo_t = pivot_camera_m_ - servo * pivot_camera_m_;
@@ -266,6 +329,21 @@ bool CameraCalibration::planeHomographyAt(int16_t cdeg,
         return false;
     if (!std::isfinite(height_m))
         return false;
+    for (const auto& entry : overlap_ground_) {
+        if (std::abs(int(cdeg) - int(entry.first)) > 50) continue;
+        if (sensor) {
+            const float limit = kFixedPitchTiltLimitDeg * float(kPi / 180.0);
+            if (std::abs(sensor->pitch_rad - imu_ref_pitch_rad_) > limit ||
+                std::abs(sensor->roll_rad - imu_ref_roll_rad_) > limit) return false;
+        }
+        if (height_m == 0.0) {
+            homography = entry.second;
+            return true;
+        }
+        // Raised-plane correction uses the discrete homography-derived pose.
+        // Ground distance itself stays on the measured overlap homography.
+        break;
+    }
     if (mode_ == GroundMode::FIXED_PITCH) {
         if (height_m != 0.0)
             return false;
@@ -328,10 +406,10 @@ bool CameraCalibration::pixelToPlane(const cv::Point2f& pixel,
     if (mode_ == GroundMode::PITCH_MODEL) {
         // 地平线以上的像素反投影到相机后方，必须拒绝。
         cv::Matx34d T;
-        cameraFromGroundAt(cdeg, sensor, T);
-        const cv::Vec3d camera_point = T * cv::Vec4d(ground.x, ground.y, height_m, 1.0);
-        if (camera_point[2] <= 0.0)
-            return false;
+        if (cameraFromGroundAt(cdeg, sensor, T)) {
+            const cv::Vec3d camera_point = T * cv::Vec4d(ground.x, ground.y, height_m, 1.0);
+            if (camera_point[2] <= 0.0) return false;
+        }
     }
     xy_m = ground;
     return true;

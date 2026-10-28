@@ -48,6 +48,523 @@ void rulesTests() {
 }
 
 void captureTests() {
+    { // Pure observations: no devices. Exercise the approved centering controller.
+        TaskTuning t;
+        t.pixel_grasp_enabled = true;
+        t.require_multi_view = false;
+        t.startup_advance_us = 0;
+        t.track_pitch_cdeg = t.intermediate_pitch_cdeg = 0;
+        t.near_pitch_cdeg = 2000;
+        PushTask task(t);
+        PushObservation in;
+        in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+        in.target_valid = in.pixel_grasp_view = in.pixel_grasp_target_valid = true;
+        in.camera_pitch_stable = true;
+        in.camera_pitch_cdeg = 0;
+        in.target_id = 7;
+        in.label = "ordinary_supply";
+        in.sent_velocity_valid = true;
+        in.gripper_done = true;
+        in.gripper_feedback_open = 1;
+        in.now_us = 1000000;
+        task.update(in);
+        task.enter(PushState::MID_APPROACH, in.now_us, "alignment_regression");
+        PushOutput out;
+        auto step = [&](float error, bool new_image = true, uint64_t image_age = 0) {
+            in.now_us += 50000;
+            if (new_image) in.pixel_grasp_sample_us = in.now_us - image_age;
+            in.pixel_grasp_error_px = error;
+            in.pixel_grasp_steering = error / 640.f;
+            in.pixel_grasp_aligned = std::abs(error) <= 12.f;
+            out = task.update(in);
+            return out;
+        };
+        auto settle = [&] {
+            for (int i = 0; i < 20 && out.motion.vx_mps == 0; ++i) step(0);
+            assert(out.motion.vx_mps > 0 && out.pixel_align_state == "advance");
+        };
+        step(80); assert(std::abs(out.motion.wz_rps - .20f) < 1e-6f);
+        step(50); assert(std::abs(out.motion.wz_rps - .20f) < 1e-6f);
+        step(30); assert(std::abs(out.motion.wz_rps - .12f) < 1e-6f);
+        // Crossing the centre must brake, including the still-old-direction UART command.
+        in.sent_wz_rps = .12f;
+        step(-50); assert(stopped(out.motion) && out.reason == "pixel_align_brake");
+        step(-50); assert(stopped(out.motion));
+        in.sent_wz_rps = 0;
+        step(-50, false); // first observation of zero sent speed
+        step(-50, true, 75000); // new image, but captured before the stop observation
+        assert(stopped(out.motion) && out.pixel_align_stable_frames == 0);
+        step(-50);
+        assert(out.pixel_align_stable_frames == 1);
+        for (int i=0; i<3; ++i) {
+            step(-50, false);
+            assert(stopped(out.motion) && out.pixel_align_stable_frames == 1);
+        }
+        // Continued image motion resets the brake window even with zero sent speed.
+        for (float error : {-56.f,-62.f,-68.f}) {
+            step(error);
+            assert(stopped(out.motion) && out.pixel_align_stable_frames == 1);
+        }
+        for (int i=0; i<3; ++i) { step(-68); assert(stopped(out.motion)); }
+        step(-68); assert(std::abs(out.motion.wz_rps + .20f) < 1e-6f);
+        // Zero image error cannot authorize Advance until both sent axes have stopped.
+        in.sent_vx_mps = .04f;
+        step(0);
+        for (int i=0; i<7; ++i) { step(0); assert(stopped(out.motion)); }
+        in.sent_vx_mps = 0; in.sent_wz_rps = .03f;
+        for (int i=0; i<7; ++i) { step(0); assert(stopped(out.motion)); }
+        in.sent_wz_rps = 0;
+        for (int i=0; i<5; ++i) step(0); // stationary brake window, then Settle
+        assert(out.pixel_align_state == "settle");
+        step(0);
+        const auto frames = out.pixel_align_stable_frames;
+        assert(frames == 1);
+        for (int i=0; i<3; ++i) {
+            step(0, false);
+            assert(stopped(out.motion) && out.pixel_align_stable_frames == frames);
+        }
+        step(0); // 200 ms elapsed, but only two distinct stable images
+        assert(stopped(out.motion) && out.pixel_align_stable_frames == 2);
+        step(0); assert(out.motion.vx_mps > 0);
+        // UI120 keeps advancing within its coarse hysteresis, including +/-40 px.
+        for (float error : {13.f,-18.f,24.f,-24.f,35.f,-40.f}) {
+            step(error); assert(out.motion.vx_mps > 0 && out.motion.wz_rps == 0);
+        }
+        step(41); assert(stopped(out.motion) && out.reason == "pixel_align_brake");
+        step(0); settle();
+        // Initial alignment need not reach +/-12. Once inside +/-24, the entire
+        // brake/settle sequence tolerates jitter up to +/-40 without chasing it.
+        in.target_id = 9;
+        step(23); assert(stopped(out.motion));
+        step(23);
+        for (int i=0; i<4; ++i) step(26);
+        assert(out.pixel_align_state == "settle");
+        for (float error : {25.f,30.f,39.f,26.f}) {
+            step(error); assert(stopped(out.motion) && out.pixel_align_state == "settle");
+        }
+        step(28); assert(out.motion.vx_mps > 0);
+        // Being outside the entry band from the start cannot authorize forward motion.
+        in.target_id = 10;
+        for (int i=0; i<20; ++i) { step(30); assert(out.motion.vx_mps == 0); }
+        step(0); settle();
+        // Stale/missing images discard confirmation and require a fresh stable window.
+        in.pixel_grasp_target_valid = false;
+        step(0); assert(stopped(out.motion));
+        in.pixel_grasp_target_valid = true;
+        step(0); assert(stopped(out.motion)); settle();
+        step(0, false); step(0, false); step(0, false); step(0, false); step(0, false);
+        assert(stopped(out.motion));
+        step(0); assert(stopped(out.motion)); settle();
+        in.target_id = 8;
+        step(0); assert(stopped(out.motion)); settle();
+        in.label = "core_supply"; task.first_ = true;
+        step(0); assert(stopped(out.motion)); settle();
+        in.camera_pitch_stable = false;
+        step(0); assert(stopped(out.motion));
+        in.camera_pitch_stable = true;
+        step(0); assert(stopped(out.motion)); settle();
+        // A stop/resume must not reuse an old alignment confirmation.
+        in.run = false; step(0); assert(stopped(out.motion));
+        in.run = true;
+        task.enter(PushState::APPROACH, in.now_us, "resume_regression");
+        step(0); assert(stopped(out.motion)); settle();
+        // Near-view entry resets confirmation and keeps class-specific close checks strict.
+        in.camera_pitch_cdeg = 2000;
+        in.pixel_grasp_near_view = true;
+        in.target_grasp_range_valid = in.target_grasp_range_lateral = true;
+        in.target_grasp_range_inside = true;
+        in.corridor.core = 1;
+        in.corridor_complete = in.corridor_occlusion_free = true;
+        step(0); assert(stopped(out.motion));
+        task.enter(PushState::RUSH, in.now_us, "near_regression");
+        for(int i=0;i<20 && out.motion.vx_mps==0;++i) step(0);
+        assert(out.motion.vx_mps>0);
+        step(18); assert(out.motion.vx_mps>0); // forward hysteresis only
+        in.pixel_grasp_ready = true;
+        in.sent_vx_mps = .10f;
+        step(18); assert(stopped(out.motion) && out.state==PushState::RUSH);
+        in.sent_vx_mps=0;
+        step(0);
+        for(int i=0;i<20 && out.state!=PushState::LOWER_FRAME;++i) step(0);
+        assert(out.state==PushState::LOWER_FRAME);
+        auto veto=task;
+        auto bad=in; bad.now_us+=50000; bad.pixel_grasp_aligned=false;
+        assert(veto.update(bad).state==PushState::CAPTURE_FAIL);
+    }
+
+    // The complete image route works at UI120/UI140 with absent metric geometry.
+    for (const bool demo : {false, true})
+    for (const std::string label : {"ordinary_supply", "injured_person", "core_supply"}) {
+        TaskTuning t;
+        t.pixel_grasp_enabled = true;
+        t.demo_capture_motion = demo;
+        t.frame_open_default = true;
+        t.require_multi_view = false;
+        t.startup_advance_us = 0;
+        t.intermediate_pitch_cdeg = t.track_pitch_cdeg = 0;
+        t.near_pitch_cdeg = 2000;
+        PushTask task(t);
+        PushObservation in;
+        in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+        in.target_valid = true;
+        in.target_id = 7; in.label = label;
+        in.pixel_bearing_valid = true;
+        in.pixel_bearing = .2f;
+        in.geometry_valid = in.target_region_valid = in.target_center_valid = false;
+        in.distance_m = in.heading_error = std::numeric_limits<float>::quiet_NaN();
+        in.camera_pitch_cdeg = 0; in.camera_pitch_stable = true;
+        in.now_us = 1000000;
+        task.update(in);
+        task.first_ = label != "ordinary_supply";
+        task.enter(PushState::MID_APPROACH, in.now_us, "pixel_test_start");
+        CaptureConfig config;
+        config.pixel_grasp_enabled = true;
+        config.grasp_center_ranges = {
+            {"ordinary_supply",2000,1280,720,{0,226,1279,489},{647.5f,337},false},
+            {"injured_person",2000,1280,720,{395,236,906,479},{647.5f,337}},
+            {"core_supply",2000,1280,720,{268.5f,236,1017,555},{647.5f,337}}};
+        CaptureMonitor monitor(config);
+        SegDetection d;
+        d.track_id=7; d.label=label; d.confidence=.95f;
+        d.box={500,200,100,100}; // centre Y250, bottom Y300; still ahead of Y337
+        PushOutput out;
+        auto step = [&](bool fresh = true) {
+            in.now_us += 50000;
+            d.timestamp_us = fresh ? in.now_us : in.now_us - 300000;
+            monitor.update(in, {d}, in.now_us, label);
+            out = task.update(in);
+            assert(!in.geometry_valid && !in.target_center_valid && !in.target_region_valid);
+            return out;
+        };
+        step();
+        assert(out.reason == "pixel_center_align" && out.motion.wz_rps == .2f && out.motion.vx_mps == 0);
+        // Both directions preserve proportional speed, with a zero-command braking tick
+        // before reversing; no legacy floor, boost or one-second escalation.
+        for (int i = 0; i < 30; ++i) {
+            d.box.x = i < 10 ? 500 : (i < 20 ? 620 : 560);
+            step();
+            assert(out.motion.vx_mps == 0);
+            if (out.reason == "pixel_center_align") {
+                const float expected = std::clamp(.004f * in.pixel_grasp_error_px, -.2f, .2f);
+                assert(std::abs(out.motion.wz_rps - expected) < 1e-6f);
+            } else assert(out.reason == "pixel_align_brake" && stopped(out.motion));
+        }
+        assert(!in.target_grasp_range_applicable && !in.pixel_grasp_ready);
+        in.pixel_bearing = 0;
+        d.box.x = 598;
+        in.gripper_done = true; in.gripper_feedback_open = 1;
+        d.box.y = 15; // Recorded failure: aligned but at the top of UI120.
+        for (int i=0;i<20;++i) step();
+        assert(out.reason == "pixel_center_approach_120" && out.motion.vx_mps > 0 &&
+               out.motion.camera_pitch_cdeg == 0 && !in.pixel_view_handoff_ready);
+        step(false);
+        assert(stopped(out.motion) && out.reason == "pixel_target_wait");
+        d.box.y = 450; // Bottom is already below 540, but centre is only 500.
+        for (int i=0;i<20;++i) step();
+        assert(out.motion.vx_mps > 0 && out.motion.camera_pitch_cdeg == 0);
+        d.box.y = 490; // Centre reaches UI120 view handoff Y540.
+        step();
+        assert(out.reason == "pixel_center_switch_to_140" && stopped(out.motion) &&
+               out.motion.camera_pitch_cdeg == 2000);
+        in.camera_pitch_stable = false;
+        step();
+        assert(stopped(out.motion) && out.reason == "camera_pitch_wait");
+        in.camera_pitch_cdeg = 2000; in.camera_pitch_stable = true;
+        d.box.y = 200; // Same object recovered in the new view; centre Y250.
+        for (int i=0;i<20 && out.state!=PushState::PREPARE;++i) step();
+        assert(out.state == PushState::PREPARE && out.motion.gripper_offset == 0);
+        in.gripper_done = true; in.gripper_feedback_open = 1;
+        for (int i=0;i<20 && out.state!=PushState::RUSH;++i) step();
+        assert(out.state == PushState::RUSH);
+        // Near-view alignment also bypasses the legacy turn floor and boost.
+        for (int i = 0; i < 30; ++i) {
+            d.box.x = i < 15 ? 560 : 630;
+            step();
+            assert(out.motion.vx_mps == 0);
+            if (out.reason == "pixel_center_align") {
+                const float expected = std::clamp(.004f * in.pixel_grasp_error_px, -.2f, .2f);
+                assert(std::abs(out.motion.wz_rps - expected) < 1e-6f);
+            } else assert(out.reason == "pixel_align_brake" && stopped(out.motion));
+        }
+        in.directional_clearance_valid = true;
+        in.turn_safe = false;
+        step();
+        assert(stopped(out.motion) && out.reason == "turn_sweep_blocked");
+        in.directional_clearance_valid = false;
+        d.box.x = 598;
+        for (int i=0;i<20;++i) step();
+        assert(out.reason == "pixel_center_approach" && out.motion.vx_mps > 0 && out.motion.wz_rps == 0);
+        step(false);
+        assert(out.state == PushState::RUSH && stopped(out.motion) && !in.pixel_grasp_ready);
+        // A bottom below the stop line is not a centre crossing.
+        d.box.y = 250; // centre Y300, bottom Y350
+        for (int i=0;i<20;++i) step();
+        assert(out.state == PushState::RUSH && out.motion.vx_mps > 0);
+        d.box.y = 287; // centre Y337, exact stop line
+        for (int i=0;i<20 && out.state!=PushState::LOWER_FRAME;++i) step();
+        assert(out.state == PushState::LOWER_FRAME && stopped(out.motion));
+        // A fresh pre-close range failure must veto issuing the close command.
+        auto veto = task;
+        auto bad = in; bad.now_us += 50000; bad.pixel_grasp_ready = false;
+        const auto rejected = veto.update(bad);
+        assert(rejected.state == PushState::CAPTURE_FAIL && rejected.motion.gripper_offset == 0);
+        step();
+        assert(out.motion.gripper_offset == 20);
+        in.gripper_feedback_open = 0; in.gripper_closed_observed = true;
+        for (int i=0;i<30 && out.state!=PushState::CARRY;++i) step();
+        assert(out.state == PushState::CARRY && out.capture_evidence == CaptureEvidence::Verified);
+        // Moving camera and stale boxes cannot count as held or trigger capture.
+        in.camera_pitch_stable = false;
+        monitor.update(in,{d},in.now_us,label);
+        assert(!in.captured && !in.held_complete && !in.pixel_grasp_ready);
+        in.camera_pitch_stable = true;
+        d.timestamp_us = in.now_us - 300000;
+        monitor.update(in,{d},in.now_us,label);
+        assert(!in.captured && !in.pixel_grasp_target_valid);
+    }
+    { // Reproduce the real SCAN lock at UI90 with an unprojectable lower-edge box.
+        TaskTuning t;
+        t.pixel_grasp_enabled = true;
+        t.frame_open_default = true;
+        t.far_pitch_cdeg = -3000;
+        t.intermediate_pitch_cdeg = t.track_pitch_cdeg = 0;
+        t.near_pitch_cdeg = 2000;
+        PushTask task(t);
+        PushObservation in;
+        in.now_us = 1000000;
+        in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+        in.camera_pitch_cdeg = -3000; in.camera_pitch_stable = true;
+        in.target_valid = true; in.target_id = 2; in.label = "ordinary_supply";
+        in.geometry_valid = in.target_region_valid = false;
+        task.update(in);
+        task.enter(PushState::SCAN, in.now_us, "recorded_scan");
+        CaptureConfig config;
+        config.pixel_grasp_enabled = true;
+        config.grasp_center_ranges = {
+            {"ordinary_supply",2000,1280,720,{0,226,1279,489},{647.5f,337},false}};
+        CaptureMonitor monitor(config);
+        SegDetection d;
+        d.track_id=2; d.label=in.label; d.confidence=.84f; d.box={607,607,122,113};
+        in.now_us += 50000; d.timestamp_us=in.now_us;
+        monitor.update(in,{d},in.now_us);
+        assert(in.target_center_px_valid && in.pixel_view_handoff_ready &&
+               in.target_center_px == cv::Point2f(668,663.5f) && !in.pixel_grasp_view);
+        auto rejected = [&](PushObservation bad) {
+            auto copy=task;
+            const auto out=copy.update(bad);
+            assert(out.motion.camera_pitch_cdeg == -3000 && out.motion.vx_mps == 0);
+        };
+        auto bad=in; bad.target_in_zone=true; rejected(bad);
+        bad=in; bad.camera_pitch_stable=false; rejected(bad);
+        bad=in; bad.label="core_supply"; rejected(bad); // First-trip rule still applies.
+        bad=in; bad.target_is_search_cue=true; rejected(bad);
+        auto stale=in;
+        monitor.update(stale,{d},in.now_us+300000);
+        assert(!stale.target_center_px_valid && !stale.pixel_view_handoff_ready);
+        rejected(stale);
+        const auto out=task.update(in);
+        assert(out.state == PushState::APPROACH && stopped(out.motion) &&
+               out.reason == "pixel_center_switch_to_120" && out.motion.camera_pitch_cdeg == 0);
+        assert(!in.geometry_valid && !in.target_region_valid);
+        // A normal far lock retains UI90 and its metric approach until the centre is low.
+        task.enter(PushState::SCAN,in.now_us,"reset_far");
+        task.pitch_cmd_ = -3000;
+        task.enter(PushState::APPROACH,in.now_us,"far_lock");
+        task.trip_context_.target_id_=task.trip_context_.capture_target_id_=2;
+        task.trip_context_.label_=in.label;
+        d.box={590,200,100,100};
+        in.now_us+=50000; d.timestamp_us=in.now_us;
+        in.geometry_valid=in.target_region_valid=true;
+        in.distance_m=1; in.heading_error=0;
+        monitor.update(in,{d},in.now_us);
+        auto far=task.update(in);
+        assert(far.motion.camera_pitch_cdeg == -3000 && far.motion.vx_mps > 0 &&
+               far.reason == "pixel_far_approach");
+        // A re-ID at the same position must resume without consuming the 15 s budget.
+        const auto far_task = task;
+        const auto far_input = in;
+        in.target_id = d.track_id = 20;
+        in.distance_m = .82f; in.heading_error = .04f;
+        in.now_us += 50000; d.timestamp_us = in.now_us;
+        monitor.update(in,{d},in.now_us);
+        far = task.update(in);
+        assert(far.state == PushState::APPROACH && stopped(far.motion) &&
+               far.reason == "pixel_far_id_rebound_same_object" &&
+               far.capture_target_id == 20);
+        in.now_us += 50000; d.timestamp_us = in.now_us;
+        monitor.update(in,{d},in.now_us);
+        far = task.update(in);
+        assert(far.reason == "pixel_far_approach" && far.motion.vx_mps > 0);
+        // A further re-ID uses the refreshed target history, not the original ID.
+        in.target_id = d.track_id = 21; in.now_us += 50000; d.timestamp_us = in.now_us;
+        monitor.update(in,{d},in.now_us);
+        far = task.update(in);
+        assert(stopped(far.motion) && far.capture_target_id == 21 &&
+               far.reason == "pixel_far_id_rebound_same_object");
+        // Invalid, unrelated or blacklisted detections cannot replace the old target.
+        for (int mode = 0; mode < 11; ++mode) {
+            auto copy = far_task;
+            auto bad = far_input;
+            bad.target_id = 30;
+            if (mode == 0) bad.target_valid = false;
+            if (mode == 1) bad.geometry_valid = false;
+            if (mode == 2) bad.target_region_valid = false;
+            if (mode == 3) bad.target_in_zone = true;
+            if (mode == 4) bad.label = "core_supply";
+            if (mode == 5) bad.label = "dangerous_object";
+            if (mode == 6) bad.target_is_search_cue = true;
+            if (mode == 7) bad.distance_m = 2.f;
+            if (mode == 8) bad.heading_error = .5f;
+            if (mode == 9) bad.target_center_px_valid = false;
+            if (mode == 10) copy.rejected_[30] = bad.now_us + 1000000;
+            for (int i = 0; i <= t.hold_grace_frames; ++i) {
+                bad.now_us += 50000;
+                const auto waiting = copy.update(bad);
+                assert(stopped(waiting.motion) && waiting.capture_target_id != 30);
+                if (i < t.hold_grace_frames)
+                    assert(waiting.state == PushState::APPROACH &&
+                           waiting.reason == "pixel_far_target_wait");
+                else
+                    assert(waiting.state == PushState::SCAN &&
+                           waiting.reason == "pixel_far_target_lost");
+            }
+        }
+        // Rebinding does not bypass the existing forward-clearance checks.
+        for (bool blocked_path : {false, true}) {
+            auto copy = far_task;
+            auto blocked = far_input;
+            blocked.target_id = 40;
+            blocked.path_safe = !blocked_path;
+            blocked.opponent_zone_clear = blocked_path;
+            for (int i = 0; i < 2; ++i) {
+                blocked.now_us += 50000;
+                assert(stopped(copy.update(blocked).motion));
+            }
+        }
+        task = far_task; in = far_input; d.track_id = in.target_id;
+        in.geometry_valid=false; in.now_us+=50000; d.timestamp_us=in.now_us;
+        monitor.update(in,{d},in.now_us);
+        far=task.update(in);
+        assert(stopped(far.motion) && far.reason == "pixel_far_target_wait");
+    }
+    // The bottom can cross the close line while the box centre is still ahead.
+    // Both normal and demo capture must wait for the centre, including precise rush.
+    for (bool demo : {false, true})
+        for (bool precise : {false, true}) {
+            TaskTuning tuning;
+            tuning.field_rush = demo;
+            tuning.demo_capture_motion = demo;
+            tuning.precise_rush = precise;
+            Sim sim(tuning);
+            sim.toRush();
+            const float trigger = demo ? tuning.assume_rush_trigger_m : tuning.grasp_trigger_y_m;
+            sim.in.distance_m = trigger - .03f;
+            sim.in.target_center_valid = true;
+            sim.in.target_center_body = {0.f, trigger + .05f};
+            sim.tick();
+            assert(sim.out.state == PushState::RUSH && sim.out.motion.vx_mps > 0);
+            // Conversely, a distant bottom-derived range must not postpone centre-based closure.
+            sim.in.distance_m = trigger + .08f;
+            sim.in.target_center_body.y = trigger;
+            sim.tick();
+            assert(sim.out.state == PushState::LOWER_FRAME &&
+                   sim.out.reason == "frame_enclosure_position" && stopped(sim.out.motion));
+        }
+    // Class-specific limits use the box centre, including half-pixel boundaries.
+    CaptureConfig center_config;
+    center_config.grasp_center_ranges = {
+        {"injured_person", 2000, 1280, 720, {395, 236, 906, 479}},
+        {"core_supply", 2000, 1280, 720, {268.5f, 236, 1017, 555}}};
+    const std::vector<std::pair<std::string, cv::Rect>> samples = {
+        {"injured_person", {495,104,386,264}}, {"injured_person", {440,357,456,244}},
+        {"injured_person", {764,139,284,416}}, {"injured_person", {263,145,264,405}},
+        {"core_supply", {597,165,142,142}}, {"core_supply", {182,281,173,143}},
+        {"core_supply", {933,354,168,148}}, {"core_supply", {571,509,113,92}}};
+    CaptureMonitor center_monitor(center_config);
+    PushObservation center_input;
+    center_input.target_valid = true;
+    center_input.target_id = 9;
+    center_input.camera_pitch_cdeg = 2000;
+    center_input.camera_pitch_stable = true;
+    SegDetection sample;
+    sample.track_id = 9;
+    sample.confidence = .9f;
+    sample.timestamp_us = 1000000;
+    for (const auto& entry : samples) {
+        center_input.label = sample.label = entry.first;
+        sample.box = entry.second;
+        center_monitor.update(center_input, {sample}, sample.timestamp_us);
+        assert(center_input.target_grasp_range_applicable && center_input.target_grasp_range_valid &&
+               center_input.target_grasp_range_inside);
+    }
+    // Core's left sample shifted one original pixel is outside; its box overlaps the region.
+    center_input.label = sample.label = "core_supply";
+    sample.box = {181,281,173,143};
+    center_monitor.update(center_input, {sample}, sample.timestamp_us);
+    assert(center_input.target_grasp_range_valid && !center_input.target_grasp_range_inside &&
+           !center_input.target_grasp_range_lateral);
+    center_monitor.update(center_input, {sample}, sample.timestamp_us + 300000);
+    assert(center_input.target_grasp_range_applicable && !center_input.target_grasp_range_valid);
+    center_input.label.clear();
+    center_input.target_valid = false;
+    center_monitor.update(center_input, {}, sample.timestamp_us, "core_supply");
+    assert(center_input.target_grasp_range_applicable && !center_input.target_grasp_range_valid);
+    center_input.label = "core_supply";
+    center_input.target_valid = true;
+    center_input.camera_pitch_stable = false;
+    center_monitor.update(center_input, {sample}, sample.timestamp_us);
+    assert(center_input.target_grasp_range_applicable && !center_input.target_grasp_range_valid);
+    center_input.camera_pitch_stable = true;
+    center_input.camera_pitch_cdeg = 0;
+    center_monitor.update(center_input, {sample}, sample.timestamp_us);
+    assert(!center_input.target_grasp_range_applicable); // no reuse at another camera view
+    center_input.camera_pitch_cdeg = 2000;
+    center_input.label = sample.label = "ordinary_supply";
+    center_monitor.update(center_input, {sample}, sample.timestamp_us);
+    assert(!center_input.target_grasp_range_applicable); // ordinary calibration is unchanged
+    // Feed both classes through the actual capture state machine and monitor.
+    for (const char* label : {"injured_person", "core_supply"}) {
+        for (int scenario = 0; scenario < 5; ++scenario) {
+            Sim sim;
+            sim.toRush();
+            sim.task.first_ = true;
+            sim.task.trip_context_.label_ = sim.in.label = label;
+            sim.in.corridor = {};
+            sim.in.corridor.add(label);
+            sim.in.target_center_valid = true;
+            sim.in.target_center_body = {0, sim.tune.grasp_trigger_y_m};
+            sample.track_id = sim.in.target_id;
+            sample.label = label;
+            sample.box = scenario == 0 ? cv::Rect(600,300,100,100) :
+                         scenario == 1 ? cv::Rect(0,300,100,100) :
+                         scenario == 2 ? cv::Rect(600,560,100,100) :
+                         scenario == 3 ? cv::Rect(600,100,100,100) : cv::Rect(600,300,100,100);
+            PushObservation range_input;
+            range_input.target_valid = true;
+            range_input.target_id = sample.track_id;
+            range_input.label = label;
+            range_input.camera_pitch_cdeg = 2000;
+            range_input.camera_pitch_stable = true;
+            center_monitor.update(range_input, {sample}, sample.timestamp_us + (scenario == 4 ? 300000 : 0));
+            sim.in.target_grasp_range_applicable = range_input.target_grasp_range_applicable;
+            sim.in.target_grasp_range_valid = range_input.target_grasp_range_valid;
+            sim.in.target_grasp_range_inside = range_input.target_grasp_range_inside;
+            sim.in.target_grasp_range_lateral = range_input.target_grasp_range_lateral;
+            sim.in.target_grasp_range_past_rear = range_input.target_grasp_range_past_rear;
+            sim.tick();
+            if (scenario == 0) {
+                assert(sim.out.state == PushState::LOWER_FRAME);
+                // Losing the centre after arrival but before command must not close.
+                sim.in.target_grasp_range_valid = false;
+                for (int i = 0; i < 30 && sim.out.state == PushState::LOWER_FRAME; ++i)
+                    sim.tick();
+                assert(sim.out.state == PushState::CAPTURE_FAIL && sim.task.frame_raised_ == 1);
+            } else if (scenario == 3)
+                assert(sim.out.state == PushState::RUSH); // centre has not entered front boundary
+            else
+                assert(sim.out.state == PushState::CAPTURE_FAIL && stopped(sim.out.motion));
+        }
+    }
     CaptureConfig old_view;
     old_view.holding = {{3500, {540, 570, 820, 690}}};
     CaptureMonitor monitor(old_view);

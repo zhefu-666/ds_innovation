@@ -147,11 +147,18 @@ void PushTask::updateTransportPhase(TaskTick& tick) {
                 break;
             }
             if (!zoneOk(tick.in)) {
+                if (tick.in.zone_sight_valid && !tick.in.zone_sight_enemy &&
+                    std::isfinite(tick.in.zone_sight_bearing)) {
+                    reason_ = "aligning_to_detected_own_zone";
+                    if (std::abs(tick.in.zone_sight_bearing) > t_.heading_deadband_rad)
+                        drive(tick, 0, t_.heading_gain * tick.in.zone_sight_bearing);
+                    break; // A detection locates a bearing, not a metric route or release point.
+                }
                 if (evadeEnemy(tick))
                     break;
                 reason_ = "searching_own_zone";
                 scanSpin(tick);
-                break; // rotate with closed gripper; never drive blind toward a guessed zone
+                break;
             }
             reason_ = "carrying_to_own_zone";
             const bool fresh_plan = tick.in.navigation_timestamp_us &&

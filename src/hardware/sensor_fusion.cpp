@@ -1,6 +1,7 @@
 #include "rescue/hardware/sensor_fusion.hpp"
 
 #include <cmath>
+#include <cstring>
 
 namespace rescue {
 
@@ -23,17 +24,34 @@ bool SensorFusion::tiltUnsafe() const {
            std::abs(state_.roll_rad) > limit_rad;
 }
 
+const char* SensorFusion::emergencyStopReason(uint64_t now_us) const {
+    if (!state_.timestamp_us)
+        return "imu_missing";
+    if (now_us < state_.timestamp_us)
+        return "imu_timestamp_future";
+    if (!fresh(now_us))
+        return "imu_stale";
+    if (!state_.imu_valid)
+        return "imu_invalid";
+    if (tiltUnsafe())
+        return "imu_tilt_limit";
+    if (state_.tof_valid[0] && state_.tof_fl_m > 0.0f &&
+        state_.tof_fl_m <= config_.tof_stop_distance_m)
+        return "tof_front_left";
+    if (state_.tof_valid[1] && state_.tof_fr_m > 0.0f &&
+        state_.tof_fr_m <= config_.tof_stop_distance_m)
+        return "tof_front_right";
+    if (state_.tof_valid[2] && state_.tof_rl_m > 0.0f &&
+        state_.tof_rl_m <= config_.tof_stop_distance_m)
+        return "tof_rear_left";
+    if (state_.tof_valid[3] && state_.tof_rr_m > 0.0f &&
+        state_.tof_rr_m <= config_.tof_stop_distance_m)
+        return "tof_rear_right";
+    return "ok";
+}
+
 bool SensorFusion::emergencyStop(uint64_t now_us) const {
-    if (!fresh(now_us) || tiltUnsafe())
-        return true;
-    return (state_.tof_valid[0] && state_.tof_fl_m > 0.0f &&
-            state_.tof_fl_m <= config_.tof_stop_distance_m) ||
-           (state_.tof_valid[1] && state_.tof_fr_m > 0.0f &&
-            state_.tof_fr_m <= config_.tof_stop_distance_m) ||
-           (state_.tof_valid[2] && state_.tof_rl_m > 0.0f &&
-            state_.tof_rl_m <= config_.tof_stop_distance_m) ||
-           (state_.tof_valid[3] && state_.tof_rr_m > 0.0f &&
-            state_.tof_rr_m <= config_.tof_stop_distance_m);
+    return std::strcmp(emergencyStopReason(now_us), "ok") != 0;
 }
 
 MotionCommand SensorFusion::protect(const MotionCommand& requested, uint64_t now_us) {

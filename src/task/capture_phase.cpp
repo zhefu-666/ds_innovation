@@ -8,6 +8,36 @@ namespace rescue {
 void PushTask::updateCapturePhase(TaskTick& tick) {
     switch (capture_phase_.action) {
         case CaptureAction::Advance: {
+            if (t_.pixel_grasp_enabled) {
+                if (tick.elapsed > t_.rush_budget_us) {
+                    enter(PushState::CAPTURE_FAIL, tick.now, "pixel_capture_timeout");
+                    break;
+                }
+                if (!tick.in.pixel_grasp_near_view || !tracking(tick.in) ||
+                    !tick.in.target_grasp_range_valid) {
+                    reason_ = "pixel_target_wait";
+                    break;
+                }
+                if (!tick.in.target_grasp_range_lateral || tick.in.target_grasp_range_past_rear) {
+                    enter(PushState::CAPTURE_FAIL, tick.now, "target_outside_grasp_center_range");
+                    break;
+                }
+                trip_context_.verdict_ = checkCorridor(tick.in.corridor, tick.in.corridor_complete,
+                    tick.in.corridor_occlusion_free, trip_context_.label_, first_);
+                if (trip_context_.verdict_ != RuleVerdict::OK) {
+                    enter(PushState::CAPTURE_FAIL, tick.now, "pixel_corridor_rejected");
+                    break;
+                }
+                if (!pixelAlign(tick, tick.in.pixel_grasp_ready))
+                    break;
+                if (tick.in.pixel_grasp_ready) {
+                    enter(PushState::LOWER_FRAME, tick.now, "pixel_center_enclosure_position");
+                    break;
+                }
+                reason_ = "pixel_center_approach";
+                drive(tick, std::min(t_.rush_speed, t_.rush_near_speed), 0);
+                break;
+            }
             // Restoring demo motion does not restore its assumed inventory. Even on a blind
             // completion/budget tick, an observed illegal neighbour must veto enclosure.
             if (t_.demo_capture_motion && !t_.assume_all_safe && tick.in.corridor.total() > 0) {
@@ -20,7 +50,19 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                     break;
                 }
             }
+            // At the sampled view, a visible target outside the side/rear bounds
+            // must not be advanced or enclosed by a distance/budget fallback.
+            if (tick.in.target_grasp_range_applicable &&
+                (!tick.in.target_grasp_range_valid || !tick.in.target_grasp_range_lateral ||
+                 tick.in.target_grasp_range_past_rear)) {
+                enter(PushState::CAPTURE_FAIL, tick.now, "target_outside_grasp_center_range");
+                break;
+            }
             const auto finishRush = [&](const char* why) {
+                if (tick.in.target_grasp_range_applicable && !tick.in.target_grasp_range_inside) {
+                    enter(PushState::CAPTURE_FAIL, tick.now, "target_outside_grasp_center_range");
+                    return;
+                }
                 if (t_.demo_capture_motion)
                     enter(PushState::LOWER_FRAME, tick.now, why);
                 else
@@ -39,7 +81,8 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                 const bool in_frame = seen && tick.in.captured && tick.in.held_complete &&
                                       tick.in.held.count(targetKind(trip_context_.label_)) >= 1 &&
                                       checkTrip(tick.in.held, first_) == RuleVerdict::OK;
-                if (in_frame) {
+                if (in_frame && (!tick.in.target_grasp_range_applicable ||
+                                 tick.in.target_grasp_range_inside)) {
                     preLower(tick, "rush_stall_in_frame_evidence");
                     break;
                 }
@@ -133,7 +176,8 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                 break;
             }
             if (tick.target_forward_m <=
-                (rushLogic() ? t_.assume_rush_trigger_m : t_.grasp_trigger_y_m)) {
+                    (rushLogic() ? t_.assume_rush_trigger_m : t_.grasp_trigger_y_m) &&
+                (!tick.in.target_grasp_range_applicable || tick.in.target_grasp_range_inside)) {
                 enter(PushState::LOWER_FRAME, tick.now, "frame_enclosure_position");
                 break;
             }
@@ -183,6 +227,19 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
             break;
         }
         case CaptureAction::LowerFrame: {
+            if (t_.pixel_grasp_enabled && frame_raised_ != 0 &&
+                (!tick.in.pixel_grasp_near_view || !tracking(tick.in) || !tick.in.pixel_grasp_ready ||
+                 !tick.in.pixel_grasp_aligned ||
+                 checkCorridor(tick.in.corridor, tick.in.corridor_complete,
+                    tick.in.corridor_occlusion_free, trip_context_.label_, first_) != RuleVerdict::OK)) {
+                enter(PushState::CAPTURE_FAIL, tick.now, "pixel_preclose_recheck_failed");
+                break;
+            }
+            if (frame_raised_ != 0 && tick.in.target_grasp_range_applicable &&
+                (!tick.in.target_grasp_range_valid || !tick.in.target_grasp_range_inside)) {
+                enter(PushState::CAPTURE_FAIL, tick.now, "target_outside_grasp_center_range");
+                break;
+            }
             commandFrame(0, tick.now);
             const int g = frameWait(tick.in, 0, tick.now);
             if (g < 0) {

@@ -201,6 +201,28 @@ int main() {
         const auto at_capture = imu.snapshotAt(first.sample.received_us);
         assert(at_capture.fresh && at_capture.sample.sequence == first.sample.sequence);
         assert(!imu.snapshotAt(first.sample.received_us + 60000, 50).fresh);
+        // A single CRC-valid bad numeric frame must be visible immediately, not hidden by
+        // the previous healthy sample; the next valid frame can restore sensor readiness.
+        auto invalid_numeric = frame;
+        timeAt(invalid_numeric, 1001);
+        const uint32_t nan_bits = 0x7fc00000;
+        for (int i = 0; i < 4; ++i)
+            invalid_numeric[18 + i] = (nan_bits >> (8 * i)) & 255;
+        checksum(invalid_numeric);
+        assert(write(master, invalid_numeric.data(), 82) == 82);
+        waitUntil([&] {
+            return imu.snapshot().sample.device_time_ms == 1001;
+        });
+        const auto fault = imu.snapshot();
+        assert(fault.fresh && !fault.sample.measurements_valid);
+        assert(fault.crc_errors == 0);
+        timeAt(frame, 1002);
+        assert(write(master, frame.data(), 82) == 82);
+        waitUntil([&] {
+            return imu.snapshot().sample.device_time_ms == 1002;
+        });
+        first = imu.snapshot();
+        assert(first.fresh && first.sample.measurements_valid);
         uint8_t output;
         assert(read(master, &output, 1) < 0); // Reader sends no commands.
         assert(write(master, frame.data(), 82) == 82);

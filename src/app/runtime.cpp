@@ -58,6 +58,7 @@
 #include "rescue/app/perception_pipeline.hpp"
 #include "rescue/app/diagnostics.hpp"
 #include <fstream>
+#include <unistd.h>
 
 namespace rescue::app {
 namespace {
@@ -186,7 +187,8 @@ int checkConfiguration(const ResolvedRuntimeConfig& resolved, std::ostream& outp
         missing += !ok;
     };
     check(task_calibrated, "task_calibration");
-    check(a6_known && (config.demo_mode == "search" || frame_views.size() >= 2),
+    check(a6_known && (config.demo_mode == "search" || tuning.pixel_grasp_enabled ||
+                          (tuning.require_multi_view ? frame_views.size() >= 2 : frame_views.size() == 1)),
           "new_frame_mapping_and_required_calibration");
     const auto g = ZoneGeometry::load(config.zone_geometry_file, config.team + "_safe_zone");
     check(loadFitsHalf(measured_load_radius,
@@ -199,9 +201,11 @@ int checkConfiguration(const ResolvedRuntimeConfig& resolved, std::ostream& outp
     CameraCalibration c;
     const bool mapped = !config.calibration_file.empty() &&
                         c.load(config.calibration_file, config.allow_mechanical_pitch_model);
-    check(mapped && c.pitchUsable(tuning.far_pitch_cdeg) && c.pitchUsable(tuning.track_pitch_cdeg),
-          "far_track_ground_calibration");
-    if (tuning.intermediate_pitch_cdeg != kCameraPitchInvalid)
+    check(mapped && c.pitchUsable(tuning.far_pitch_cdeg) &&
+              (tuning.pixel_grasp_enabled || c.pitchUsable(tuning.track_pitch_cdeg)),
+          tuning.pixel_grasp_enabled ? "far_ground_and_pixel_capture_reference"
+                                     : "far_track_ground_calibration");
+    if (!tuning.pixel_grasp_enabled && tuning.intermediate_pitch_cdeg != kCameraPitchInvalid)
         check(mapped && c.pitchUsable(tuning.intermediate_pitch_cdeg), "intermediate_ground_model");
     check(!config.zone_color_file.empty() && ZoneColorConfig::load(config.zone_color_file).measured,
           "zone_identity_source");
@@ -234,6 +238,8 @@ int Runtime::run() {
     const auto a6_done_settle_ms = resolved.a6_done_settle_ms;
     const auto task_calibrated = resolved.task_calibrated;
     PushTask task(tuning);
+    task.setPhaseStepping(config.step_phases);
+    task.setSinglePhase(config.single_phase);
     if (!config.dry_run && !config.hardware)
         throw std::runtime_error("Select --dry-run (perception only) or --hardware (MCU output). "
                                  "No serial port was opened.");
@@ -307,6 +313,10 @@ int Runtime::run() {
             const int open = feedback->confirmedFrameOpen(fb);
             if (open < 0)
                 throw std::runtime_error("Frame position unknown at startup; nothing was sent");
+            if (config.single_phase == "transport" && open != 0)
+                throw std::runtime_error("--phase transport requires an already closed frame with cargo");
+            if (!config.single_phase.empty())
+                task.setInitialFrameOpen(open != 0);
             demo_hold_angle = open ? 0 : 20;
             demo_hold_pitch = fb.camera_pitch_cdeg;
             std::cout << "[MCU] startup frame angle=" << demo_hold_angle << " source="
@@ -408,6 +418,7 @@ int Runtime::run() {
     MotionWatch motion_watch;
     const auto demo_started = Clock::now();
     int demo_exit = 0;
+    std::string last_imu_safety_reason;
     while (!g_should_exit.load()) {
         if (config.demo_mode != "none" &&
             Clock::now() - demo_started >= std::chrono::seconds(config.demo_seconds)) {
@@ -465,6 +476,13 @@ int Runtime::run() {
         auto detections = tracker.update(raw, timestamp);
         const double inference_ms =
             std::chrono::duration<double, std::milli>(Clock::now() - now).count();
+        // Capture stillness must use the last output command after ramping, not a zero target
+        // while the chassis is still braking.
+        if (link) {
+            const auto sent = link->stats();
+            previous.motion.vx_mps = sent.sent_vx_mps;
+            previous.motion.wz_rps = sent.sent_wz_rps;
+        }
         auto observation = observations.build(
             frame,
             vision_result,
@@ -483,6 +501,43 @@ int Runtime::run() {
         const auto& imu_data = observation.imu_data;
         const auto& sensor = observation.sensor;
         const auto observed_at = observation.observed_at;
+        // Preserve the exact decision, including failures between periodic reports.
+        // Transition records bypass the bounded async queue so it cannot drop a fault frame.
+        if (observation.imu_safety_reason != last_imu_safety_reason) {
+            const auto& p = imu_data.sample;
+            const auto checked_at = observation.safety_checked_at_us;
+            const double checked_age_ms = p.received_us && checked_at >= p.received_us
+                                              ? (checked_at - p.received_us) / 1000.0
+                                              : -1.0;
+            std::ostringstream detail;
+            detail << "[IMU_SAFETY] checked_at_us=" << checked_at
+                   << " reason=" << observation.imu_safety_reason
+                   << " previous=" << last_imu_safety_reason
+                   << " safety_ok=" << input.safety_ok
+                   << " observed_at_us=" << observed_at
+                   << " sampled_at_us=" << imu_data.sampled_at_us
+                   << " received_us=" << p.received_us
+                   << " checked_age_ms=" << checked_age_ms
+                   << " snapshot_age_ms=" << imu_data.age_ms
+                   << " connected=" << imu_data.connected << " fresh=" << imu_data.fresh
+                   << " numeric_ok=" << p.measurements_valid << " sensor_valid=" << sensor.imu_valid
+                   << " seq=" << p.sequence << " device_time_ms=" << p.device_time_ms
+                   << " body_rpy_rad=" << p.body_rpy_rad[0] << "," << p.body_rpy_rad[1] << ","
+                   << p.body_rpy_rad[2]
+                   << " quaternion=" << p.quaternion_wxyz[0] << "," << p.quaternion_wxyz[1]
+                   << "," << p.quaternion_wxyz[2] << "," << p.quaternion_wxyz[3]
+                   << " status=" << p.status << " imu_timeout_ms=" << imu_data.timeout_ms
+                   << " sensor_timeout_ms=" << config.sensor_timeout_ms
+                   << " tilt_limit_deg=" << config.imu_tilt_limit_deg
+                   << " bytes=" << imu_data.bytes << " valid_frames=" << imu_data.valid_frames
+                   << " crc_errors=" << imu_data.crc_errors
+                   << " invalid_frames=" << imu_data.invalid_frames
+                   << " duplicate_times=" << imu_data.duplicate_times
+                   << " backward_times=" << imu_data.backward_times
+                   << " io_errors=" << imu_data.io_errors << "\n";
+            std::cerr << detail.str();
+            last_imu_safety_reason = observation.imu_safety_reason;
+        }
         // A dead link (write failures or stale feedback) vetoes motion permission.
         std::string preflight_reason;
         if (!imu || !input.safety_ok)
@@ -513,7 +568,8 @@ int Runtime::run() {
         else if (!frame_sensors.actuator.valid || input.camera_pitch_cdeg == kCameraPitchInvalid)
             preflight_reason = "camera_pitch_feedback_invalid";
         // 2026-10-08用户要求：开机静止位RX40（旧0°）也可启动，启动后由任务自行转到旧5°(RX45)再搜索。
-        else if (!match.status(imuNowUs()).started_us &&
+        else if (config.single_phase != "capture" && config.single_phase != "transport" &&
+                 !match.status(imuNowUs()).started_us &&
                  (!frame_sensors.pitch_stable ||
                   (std::abs(int(input.camera_pitch_cdeg) - int(tuning.far_pitch_cdeg)) >
                        tuning.pitch_tolerance_cdeg &&
@@ -540,7 +596,7 @@ int Runtime::run() {
             auto_start_requested = true;
             match.command(MatchCommand::START, input.now_us);
         }
-        const auto match_status = match.status(input.now_us);
+        auto match_status = match.status(input.now_us);
         if (config.vision_log_dir != "none") {
             // frame 8 lets auto-exposure settle; the second record is the first frame in which the
             // match is permitted
@@ -561,7 +617,36 @@ int Runtime::run() {
         input.run = match_status.permit;
         input.safety_ok = match_status.permit && preflight_reason.empty();
         navigator.update(input, previous);
+        const auto sent_motion = link ? link->stats() : MotionLinkStats{};
+        if (link) {
+            input.sent_velocity_valid = true;
+            input.sent_vx_mps = sent_motion.sent_vx_mps;
+            input.sent_wz_rps = sent_motion.sent_wz_rps;
+        }
         auto out = task.update(input);
+        if (out.single_phase_done ||
+            (!config.single_phase.empty() && (out.run_status == RunStatus::Fault ||
+                                             match_status.state == MatchState::FAULT))) {
+            const bool completed = out.single_phase_done;
+            const bool accepted = completed &&
+                (config.single_phase != "transport" ||
+                 (out.delivery_expected > 0 && out.delivery_credited == out.delivery_expected));
+            std::cout << "[PHASE_RESULT] phase=" << config.single_phase
+                      << " completed=" << completed << " accepted=" << accepted
+                      << " reason=" << out.reason << " match=" << match_status.reason
+                      << " capture_evidence=" << int(out.capture_evidence)
+                      << " expected=" << out.delivery_expected << " credited=" << out.delivery_credited << "\n";
+            demo_exit = accepted ? 0 : 2;
+            match.command(MatchCommand::FINISH, input.now_us);
+            match_status = match.status(input.now_us);
+        } else if (out.phase_waiting && !match_status.phase_waiting) {
+            match.pauseForPhase(phaseName(out.next_phase), input.now_us);
+            match_status = match.status(input.now_us);
+            std::cout << "[PHASE_STEP] completed=" << phaseName(out.phase)
+                      << " next=" << phaseName(out.next_phase) << " reason=" << out.reason
+                      << " target=" << out.target_id << " cargo=" << out.batch_size
+                      << " : python3 tools/match/match_ctl.py next\n";
+        }
         // Remember where the locked target was last seen, so an event can show which detection
         // replaced it.
         static int last_out_id = -1;
@@ -673,8 +758,8 @@ int Runtime::run() {
         if (imu) {
             motion_watch.feed(input.now_us,
                               PushTask::name(out.state),
-                              out.motion.vx_mps,
-                              out.motion.wz_rps,
+                              link ? sent_motion.sent_vx_mps : out.motion.vx_mps,
+                              link ? sent_motion.sent_wz_rps : out.motion.wz_rps,
                               bool(link) && match_status.permit,
                               imu_data.fresh && imu_data.sample.measurements_valid,
                               imu_data.sample.body_acceleration_mps2,
@@ -701,7 +786,23 @@ int Runtime::run() {
         last_submit_time = submit_time;
         if (link) {
             const auto stale_count = link->stats().stale;
-            link->submit(out.motion);
+            // Normal speed/steering changes and target reacquisition brake through the ramp.
+            // Faults, blocked paths, precise capture endpoints and actuator waits stop directly.
+            const bool zero_request = out.motion.vx_mps == 0 && out.motion.wz_rps == 0;
+            const bool normal_brake = out.reason == "pixel_target_wait" ||
+                                      out.reason == "pixel_far_target_wait";
+            const bool immediate_stop = (zero_request && !normal_brake) || !input.run ||
+                                        !input.safety_ok || !input.opponent_zone_clear;
+            // Do not retain translation/rotation from the ramp when its clearance is revoked.
+            const auto sent = link->stats();
+            const bool residual_blocked =
+                (sent.sent_vx_mps > 0 && !input.path_safe) ||
+                (sent.sent_vx_mps < 0 && !input.retreat_safe) ||
+                (input.directional_clearance_valid &&
+                 (sent.sent_wz_rps != 0 || out.motion.wz_rps != 0) &&
+                 ((!input.turn_safe && sent.sent_vx_mps == 0 && out.motion.vx_mps == 0) ||
+                  (!input.arc_safe && (sent.sent_vx_mps != 0 || out.motion.vx_mps != 0))));
+            link->submit(out.motion, immediate_stop || residual_blocked);
             if (stale_count != last_stale_count) {
                 async_log.submit(
                     "[WATCHDOG] timestamp_us=" + std::to_string(input.now_us) +
@@ -878,7 +979,9 @@ int Runtime::run() {
                     << " body_rpy_rad=" << p.body_rpy_rad[0] << "," << p.body_rpy_rad[1] << ","
                     << p.body_rpy_rad[2] << " status=" << p.status
                     << " crc_errors=" << imu_data.crc_errors << " sensor_valid=" << sensor.imu_valid
-                    << " estop=" << fusion.emergencyStop(observed_at) << "\n";
+                    << " estop=" << (observation.imu_safety_reason != "ok")
+                    << " safety_reason=" << observation.imu_safety_reason
+                    << " checked_at_us=" << observation.safety_checked_at_us << "\n";
             }
             if (link) {
                 static const char* ack_names[] = {"idle", "no_feedback", "not_done", "done"};
@@ -886,6 +989,9 @@ int Runtime::run() {
                 const auto fb = feedback->latestActuatorFeedback();
                 log << "[MCU] healthy=" << link->healthy() << " sent=" << st.sent
                     << " failed=" << st.failed << " stale_zero=" << st.stale
+                    << " requested_vx=" << st.requested_vx_mps
+                    << " requested_wz=" << st.requested_wz_rps
+                    << " sent_vx=" << st.sent_vx_mps << " sent_wz=" << st.sent_wz_rps
                     << " gripper_id=" << int(feedback->gripperActionId())
                     << " target=" << gripper_ack.target
                     << " ack=" << ack_names[int(gripper_ack.result)] << " fb_valid=" << fb.valid
@@ -941,6 +1047,9 @@ int Runtime::run() {
                               decision);
         }
 #endif
+        if ((config.step_phases || !config.single_phase.empty()) &&
+            match_status.state == MatchState::FINISHED)
+            break;
         if (config.demo_mode != "none" &&
             (out.state == PushState::SAFE_STOP || match_status.state == MatchState::FAULT ||
              match_status.state == MatchState::FINISHED)) {
@@ -963,6 +1072,19 @@ int Runtime::run() {
     }
     if (link) {
         link->stop();
+        if (!config.single_phase.empty()) {
+            const auto fb = feedback->latestActuatorFeedback();
+            const int open = feedback->confirmedFrameOpen(fb);
+            // Save only an acknowledged final target; the next launch still checks its A6 id.
+            if (fb.valid && open >= 0 && fb.gripper_action_id > 0) {
+                const auto directory = std::filesystem::temp_directory_path() /
+                    ("rescue-demo-" + std::to_string(::getuid()));
+                std::filesystem::create_directories(directory);
+                std::ofstream record(directory / "known_frame.json");
+                record << "{\"angle\":" << (open ? 0 : 20)
+                       << ",\"id\":" << int(fb.gripper_action_id) << "}\n";
+            }
+        }
         std::cout << "[MCU] stopped: final zero-velocity packet sent\n";
     }
     return demo_exit;

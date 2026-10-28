@@ -104,6 +104,8 @@ void printUsage(const char* program) {
            "port\n"
         << "  --auto-run          Request START once after live preflight; never auto-resume "
            "faults\n"
+        << "  --phase NAME        Run only startup|search|capture|transport, then exit\n"
+        << "  --step-phases       Pause at each phase boundary; match_ctl.py next continues\n"
         << "  --no-match-time-limit Disable total duration limit for debugging; phase/health gates "
            "remain\n"
         << "  --match-seconds N   Competition duration, default 180 s (1..86400)\n"
@@ -362,6 +364,13 @@ Config parseArgs(int argc, char** argv) {
             if (config.match_socket.empty() || config.match_socket[0] != '/' ||
                 config.match_socket.size() >= 108)
                 throw std::runtime_error("--match-socket must be an absolute Unix socket path");
+        } else if (arg == "--phase") {
+            config.single_phase = needValue(arg);
+            if (config.single_phase != "startup" && config.single_phase != "search" &&
+                config.single_phase != "capture" && config.single_phase != "transport")
+                throw std::runtime_error("--phase must be startup|search|capture|transport");
+        } else if (arg == "--step-phases") {
+            config.step_phases = true;
         } else if (arg == "--auto-run") {
             config.auto_run = true;
         } else if (arg == "--require-masks") {
@@ -374,6 +383,9 @@ Config parseArgs(int argc, char** argv) {
         }
     }
 
+    if (!config.single_phase.empty() &&
+        (config.step_phases || config.demo_mode != "none" || !config.push_replay.empty()))
+        throw std::runtime_error("--phase cannot combine with stepping, demo or replay");
     if (config.demo_mode != "none" && config.demo_mode != "recognize" &&
         config.demo_mode != "search" && config.demo_mode != "carry_once")
         throw std::runtime_error("Unknown demo mode");

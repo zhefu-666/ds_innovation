@@ -23,6 +23,8 @@ import threading
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools' / 'config'))
 from project import load_reference, reference_exists, reference_path, split_reference
+sys.path.insert(0, str(ROOT / 'tools'))
+from frame_semantics import state_record_path
 ACTIONS = ('recognize', 'search', 'carry', 'open', 'close', 'camera', 'frame-status',
            'move-forward', 'move-backward', 'turn-left', 'turn-right',
            'commission-open', 'commission-close', 'stop', 'status', 'web', 'replay', 'preflight')
@@ -101,18 +103,23 @@ def done_flag_config(profile):
 KNOWN_FILE = DEFAULT_RUNTIME/'known_frame.json'
 
 
-def known_frame(args):
-    """TEMP_ASSUMPTION done_flag: explicit CLI wins; else the angle/id recorded by this launcher's last open/close."""
+def known_frame(args, port=None):
+    """CLI wins; otherwise use the shared gripper target, then the legacy demo record."""
     if args.known_frame_angle is not None or args.known_frame_id is not None:
         if args.known_frame_angle not in (0, 20) or type(args.known_frame_id) is not int or not 1 <= args.known_frame_id <= 255:
             raise ValueError('--known-frame-angle 0|20 与 --known-frame-id 1..255 须同时给出')
         return args.known_frame_angle, args.known_frame_id, 'cli'
-    try:
-        data = json_file(KNOWN_FILE)
-    except (OSError, ValueError):
+    records = [state_record_path(port), KNOWN_FILE] if port is not None else [KNOWN_FILE]
+    for record in records:
+        try:
+            data = json_file(record)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            return None
+        if data.get('angle') in (0, 20) and type(data.get('id')) is int and 1 <= data['id'] <= 255:
+            return data['angle'], data['id'], 'recorded ' + str(record)
         return None
-    if data.get('angle') in (0, 20) and type(data.get('id')) is int and 1 <= data['id'] <= 255:
-        return data['angle'], data['id'], 'recorded ' + str(data.get('recorded_at'))
     return None
 
 
@@ -211,18 +218,18 @@ def make_plan(args, p):
         command = [p['binary'], '--push-replay', str(ROOT/'tests/fixtures/push_delivery.json')]
     known = None
     if command and not args.preview and action in DECISIONS | {'camera'} and done_flag_config(p):
-        known = known_frame(args)
+        known = known_frame(args, p['port'])
         if known is None:
-            issues.append('done_flag：未知方框当前角度；先用本脚本 open/close，或给 --known-frame-angle/--known-frame-id')
+            issues.append('done_flag：未知夹爪当前开闭目标/动作编号；先用 frame_ctl.py 或本脚本 open/close 建立记录，或给 --known-frame-angle 0|20 和 --known-frame-id（0=开、20=关，为内部兼容值）')
         elif action in DECISIONS:
             command += ['--known-frame-angle', str(known[0]), '--known-frame-id', str(known[1])]
             native_check = command + ['--check-config']
         else:
             command += ['--known-frame-angle', str(known[0]), '--known-frame-id', str(known[1])]
     if action in WHEELS and done_flag_config(p):
-        known = known_frame(args)
+        known = known_frame(args, p['port'])
         if known is None:
-            issues.append('done_flag：未知方框当前角度；先用本脚本 open/close，或给 --known-frame-angle/--known-frame-id')
+            issues.append('done_flag：未知夹爪当前开闭目标/动作编号；先用 frame_ctl.py 或本脚本 open/close 建立记录，或给 --known-frame-angle 0|20 和 --known-frame-id（0=开、20=关，为内部兼容值）')
     for key in required:
         if not reference_exists(p[key], ROOT):
             issues.append('缺少文件 %s: %s' % (key, p[key]))
@@ -412,7 +419,10 @@ def run(args, p, plan):
                 demo_serial.manual_motion(p['port'], p['baud'], load_mapping(p['frame_config']), vx, wz, plan['seconds'], known=known)
             return 0
         if action in ('open', 'close') or action in DECISIONS:
-            KNOWN_FILE.unlink(missing_ok=True)  # 动作期间/决策结束后方框角度未知，须重新open/close
+            KNOWN_FILE.unlink(missing_ok=True)
+        if action in DECISIONS:
+            state_record_path(p['port']).unlink(missing_ok=True)  # 决策程序可能改变夹爪目标
+        # open/close 由 frame_ctl 在发包前清理共享记录，保留重复目标沿用编号的判断。
         lines = []
         result = child_run(plan['command'], plan['seconds']+3 if action in DECISIONS | {'recognize'} else plan['seconds'], lines)
         if action in ('open', 'close') and result == 0:
@@ -423,7 +433,7 @@ def run(args, p, plan):
                     record = {'angle': int(fields['angle']), 'id': int(fields['id']), 'recorded_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
                               'note': 'TEMP_ASSUMPTION done_flag; valid only while A6 id is unchanged'}
                     KNOWN_FILE.write_text(json.dumps(record) + '\n')
-                    print('已记录方框已知状态：' + json.dumps(record, ensure_ascii=False))
+                    print('已记录夹爪开闭目标与动作编号：' + json.dumps(record, ensure_ascii=False))
         return result
 
 
@@ -440,8 +450,8 @@ def parser():
     ap.add_argument('--seconds', type=float, help='底盘点动省略时以固定速度持续运行，直到Ctrl+C或stop；显式给值须在(0,1]秒')
     ap.add_argument('--speed', type=float, default=.05)
     ap.add_argument('--wz', type=float, default=.20)
-    ap.add_argument('--known-frame-angle', type=int, choices=[0, 20], help='done_flag临时假设：方框当前已知角度（默认取本脚本上次open/close记录）')
-    ap.add_argument('--known-frame-id', type=int, help='done_flag临时假设：该角度对应的A6动作编号')
+    ap.add_argument('--known-frame-angle', type=int, choices=[0, 20], help='夹爪已知目标：0=开、20=关（内部兼容值，非夹爪物理角度）；默认读取同用户、同串口的开合记录')
+    ap.add_argument('--known-frame-id', type=int, help='夹爪已知目标对应的当前非零A6动作编号（须与实时反馈一致）')
     ap.add_argument('--assume-all-safe', action='store_true', help='TEMP_ASSUMPTION：搬运时所有安全/净空/区域/确认证据视为成立，仅跑通决策链，非验收')
     ap.add_argument('--assume-injured-trip', action='store_true', help='TEMP_ASSUMPTION：配合--assume-all-safe，视为已送达首个普通物资并优先抓伤员块（演示右半区），非验收')
     ap.add_argument('--offset-deg', type=int, default=5, help='相机内部/TX偏移角，5对应A6 RX125；范围-30..30')

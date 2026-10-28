@@ -65,4 +65,49 @@ PushObservation makePushObservation(const std::vector<SegDetection>& detections,
     }
     return in;
 }
+bool applyZoneDetectionSight(PushObservation& in,
+                             const std::vector<SegDetection>& detections,
+                             const std::string& team, cv::Size image_size,
+                             const cv::Mat& k, int16_t pitch_cdeg,
+                             bool pitch_stable, uint64_t now, float threshold) {
+    in.zone_sight_valid = in.zone_sight_enemy = in.enemy_zone_seen = false;
+    in.zone_sight_bearing = 0;
+    if ((team != "blue" && team != "red") || !pitch_stable ||
+        pitch_cdeg == kCameraPitchInvalid || image_size.width <= 0 || image_size.height <= 0 ||
+        k.type() != CV_64F || k.rows != 3 || k.cols != 3)
+        return false;
+    const double fx = k.at<double>(0,0), fy = k.at<double>(1,1),
+                 cx = k.at<double>(0,2), cy = k.at<double>(1,2);
+    if (!std::isfinite(fx) || !std::isfinite(fy) || fx <= 0 || fy <= 0 ||
+        !std::isfinite(cx) || !std::isfinite(cy))
+        return false;
+    const SegDetection* best = nullptr;
+    const std::string own = team + "_safe_zone";
+    for (const auto& d : detections) {
+        if ((d.label != "blue_safe_zone" && d.label != "red_safe_zone") ||
+            !std::isfinite(d.confidence) || d.confidence < threshold || d.confidence > 1 ||
+            !d.timestamp_us || now < d.timestamp_us || now - d.timestamp_us > 200000 ||
+            d.box.width <= 0 || d.box.height <= 0)
+            continue;
+        const cv::Point2f center(d.box.x + d.box.width * .5f, d.box.y + d.box.height * .5f);
+        if (center.x < 0 || center.y < 0 || center.x >= image_size.width || center.y >= image_size.height)
+            continue;
+        if (!best || (d.label == own && best->label != own) ||
+            (d.label == best->label && d.confidence > best->confidence))
+            best = &d;
+    }
+    if (!best)
+        return false;
+    const cv::Point2f center(best->box.x + best->box.width * .5f,
+                             best->box.y + best->box.height * .5f);
+    const double x = (center.x - cx) / fx, y = (center.y - cy) / fy;
+    const double pitch = double(pitch_cdeg) * .01 * CV_PI / 180.;
+    const double forward = std::cos(pitch) - y * std::sin(pitch);
+    if (!std::isfinite(forward) || forward <= .05)
+        return false;
+    in.zone_sight_valid = true;
+    in.zone_sight_enemy = in.enemy_zone_seen = best->label != own;
+    in.zone_sight_bearing = float(std::atan2(-x, forward));
+    return true;
+}
 } // namespace rescue

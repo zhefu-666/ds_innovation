@@ -242,7 +242,7 @@ target_compile_options(rescue_controlled_field_tests PRIVATE -UNDEBUG -Wall -Wex
 add_test(NAME rescue_controlled_field_tests COMMAND rescue_controlled_field_tests)
 
 add_test(NAME rescue_project_config_check COMMAND rescue_upper_host --config
-    ${PROJECT_SOURCE_DIR}/config/project.json --check-config)
+    ${PROJECT_SOURCE_DIR}/config/project.json --check-config --known-frame-angle 0 --known-frame-id 1)
 
 add_test(NAME rescue_controlled_config_check
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/config/controlled_config_check.py
@@ -261,7 +261,7 @@ add_test(NAME rescue_runtime_config_integration
         $<TARGET_FILE:rescue_upper_host> ${PROJECT_SOURCE_DIR})
 set_tests_properties(rescue_runtime_config_integration PROPERTIES TIMEOUT 30)
 set(RESCUE_PROTOCOL_BASELINE_ARGS --protocol-baseline
-    ${PROJECT_SOURCE_DIR}/tests/fixtures/runtime_four_phase_20261026.json)
+    ${PROJECT_SOURCE_DIR}/tests/fixtures/runtime_gripper_ack_20261027.json)
 set(RESCUE_PLATFORM_BASELINE_ARGS)
 if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     list(APPEND RESCUE_PLATFORM_BASELINE_ARGS --platform-baseline
@@ -307,6 +307,8 @@ function(rescue_add_tool_test name script labels)
         TIMEOUT 60 LABELS "${labels}")
 endfunction()
 rescue_add_tool_test(board_monitor_tests tools/board_monitor/test_monitor.py "tool;telemetry")
+rescue_add_tool_test(camera_overlap_tests tools/camera_calibration/test_overlap.py "tool;calibration")
+rescue_add_tool_test(camera_image_trigger_tests tools/camera_calibration/test_image_trigger.py "tool;calibration")
 rescue_add_tool_test(camera_calibration_tests tools/camera_calibration/test_calibrate.py "tool;calibration")
 rescue_add_tool_test(camera_guided_tests tools/camera_calibration/test_guided.py "tool;calibration")
 rescue_add_tool_test(camera_handeye_tests tools/camera_calibration/test_handeye.py "tool;calibration")

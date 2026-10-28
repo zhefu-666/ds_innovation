@@ -17,11 +17,24 @@ struct HoldingView {
         0; // object must reach this depth, even if clipped by image bottom
     std::vector<cv::Point2f> polygon;
 };
+// Original-image box-centre bounds from the supplied class boundary samples.
+struct GraspCenterRange {
+    std::string label;
+    int16_t pitch_cdeg;
+    int image_width_px, image_height_px;
+    RectArea area;
+    cv::Point2f target_center_px;
+    bool lateral_measured = true;
+};
 struct CaptureConfig {
+    bool pixel_grasp_enabled = false;
+    int16_t pixel_approach_pitch_cdeg = 0; // UI 120; image approach, no metric ranging
+    std::vector<GraspCenterRange> grasp_center_ranges;
     // No uncalibrated angle is observable by default.
     std::vector<HoldingView> holding;
     int16_t pitch_tolerance_cdeg = 100;
     float edge_margin_px = 6.f;       // a box crossing the region edge is ambiguous, not held
+    float pixel_align_tolerance_px = 12.f; // centering only; independent of held-object following
     float follow_tolerance_px = 12.f; // held objects move with the robot: near-static in image
     int follow_frames = 3;
     // A box with a measured (untruncated) ground contact this far beyond the mouth lies in front
@@ -69,7 +82,8 @@ class CaptureMonitor {
   public:
     explicit CaptureMonitor(CaptureConfig config = {}) : c_(config) {
     }
-    void update(PushObservation& in, const std::vector<SegDetection>& detections, uint64_t now_us);
+    void update(PushObservation& in, const std::vector<SegDetection>& detections, uint64_t now_us,
+                const std::string& capture_label = {});
     void reset() {
         history_.clear();
         view_ = -1;

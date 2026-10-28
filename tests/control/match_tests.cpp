@@ -12,6 +12,29 @@
 using namespace rescue;
 int main() {
     assert(Config{}.match_seconds == 180);
+    {
+        MatchConfig c;
+        c.time_limit_enabled = false;
+        c.require_measured_progress = false;
+        MatchControl m(c);
+        m.health(1000000, true, "");
+        assert(!m.command(MatchCommand::NEXT, 1000000));
+        assert(m.command(MatchCommand::START, 1000000));
+        assert(m.pauseForPhase("CAPTURE", 1000000));
+        assert(m.status(1000000).phase_waiting && !m.status(1000000).permit);
+        assert(m.status(1000000).reason == "phase_complete_next_CAPTURE");
+        assert(!m.command(MatchCommand::RESUME, 1000000));
+        m.health(301000000, false, "imu_stale");
+        assert(!m.command(MatchCommand::NEXT, 301000000));
+        m.health(301100000, true, "");
+        assert(m.command(MatchCommand::NEXT, 301100000));
+        assert(!m.status(301100000).phase_waiting && m.status(301100000).permit);
+        assert(!m.command(MatchCommand::NEXT, 301100000)); // no queued steps
+        assert(m.pauseForPhase("TRANSPORT", 301100000));
+        assert(m.command(MatchCommand::FINISH, 301100000));
+        assert(!m.command(MatchCommand::NEXT, 301100000));
+        assert(!m.status(301100000).permit);
+    }
     { // Explicit debugging override survives 180s, but STOP and health still latch.
         MatchConfig c;
         c.duration_us = 180000000;
@@ -175,6 +198,11 @@ int main() {
                                  .count();
             m.health(now, true, "");
             assert(request("start").find("OK RUNNING") != std::string::npos);
+            assert(m.pauseForPhase("SEARCH", now));
+            assert(request("status").find("phase_waiting=1") != std::string::npos);
+            assert(request("resume").find("REJECTED PAUSED") != std::string::npos);
+            assert(request("next").find("OK RUNNING") != std::string::npos);
+            assert(request("next").find("REJECTED RUNNING") != std::string::npos);
             assert(request("stop").find("OK PAUSED") != std::string::npos);
             assert(request("finish").find("OK FINISHED") != std::string::npos);
             assert(request("resume").find("REJECTED FINISHED") != std::string::npos);

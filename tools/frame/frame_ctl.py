@@ -4,7 +4,7 @@
 A6状态字节的实际含义尚待固件确认；现有配置匹配仅作协议检查，不代表机械到位。
 
 升降时车速固定为0，相机保持A6返回角度：TX=RX-120（下发偏移角，回传90..150）。
---dry-run只读反馈并预览，不发送。A6开闭语义由已验收配置提供，需匹配动作编号。
+--dry-run只读反馈并预览，不发送。A6语义由配置提供，需匹配动作编号。
 """
 import argparse
 import json
@@ -20,7 +20,7 @@ import time
 
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from frame_semantics import ANGLES, DEFAULT_CONFIG, DONE_FLAG_NOTE, done_flag, load_mapping
+from frame_semantics import ANGLES, DEFAULT_CONFIG, DONE_FLAG_NOTE, done_flag, load_mapping, state_record_path
 ALIASES = {'raise': 'open', 'lower': 'close', 'up': 'open', 'down': 'close'}
 TARGETS = {'open': (ANGLES['open'], '开'), 'close': (ANGLES['close'], '关')}
 
@@ -149,15 +149,32 @@ def run(args):
         target_state = 1 if flag_mode else mapping[action]
         if flag_mode:
             print(DONE_FLAG_NOTE + '; settle_ms=%d' % mapping['settle_ms'], flush=True)
-        action_id = old_id if state == target_state else old_id % 255 + 1  # MCU仅在偏移变化时计数。
+        state_file = None
         if flag_mode:
-            raise ValueError("当前实车为夹爪状态映射；done_flag配置已废弃")
+            state_file = Path(args.state_file) if args.state_file else state_record_path(args.port)
+            try:
+                known = json.loads(state_file.read_text())
+            except (OSError, ValueError):
+                known = {}
+            if args.known_frame_angle is not None or args.known_frame_id is not None:
+                if args.known_frame_angle not in (0, 20) or args.known_frame_id != old_id or old_id == 0 or state != 1:
+                    raise ValueError('已知目标须为0开/20关，编号须与当前非零A6编号匹配且状态为1')
+                known = {'angle': args.known_frame_angle, 'id': args.known_frame_id}
+            if known.get('id') != old_id or old_id == 0:
+                print('无匹配的目标记录：等待下一动作编号；若重复当前目标，须提供 --known-frame-angle 0|20 和 --known-frame-id。', flush=True)
+            same_target = (old_id != 0 and state == 1 and known.get('id') == old_id
+                           and known.get('angle') == offset)
+            action_id = old_id if same_target else old_id % 255 + 1
+        else:
+            action_id = old_id if old_id != 0 and state == target_state else old_id % 255 + 1
         packet = motion_packet(offset, action_id, pitch)
         print('%s: 夹爪目标=%s（TX偏移%+d°），车速=0，相机保持RX%d°（TX偏移%d°），动作编号=%d\n包: %s' %
               (label, '开' if offset == 0 else '关', 5 if offset == 0 else -5, pitch, pitch-120, action_id, packet.hex(' ').upper()), flush=True)
         if args.dry_run:
             print('预览完成：TX=0，未发送任何命令。')
             return 0
+        if state_file is not None:
+            state_file.unlink(missing_ok=True)
         deadline = time.monotonic() + args.timeout
         next_send = 0.0
         last = current
@@ -179,6 +196,8 @@ def run(args):
                 if feedback[0] == target_state and feedback[1] == action_id:
                     if flag_mode and time.monotonic() - started < mapping['settle_ms'] / 1000:
                         continue  # 新编号约10ms即回1，早于舵机转动；须等满settle
+                    if state_file is not None:
+                        state_file.write_text(json.dumps({'angle': offset, 'id': action_id}) + '\n')
                     print('%s反馈已匹配（不等于独立机械到位检测）：编号%d、状态%d。' % (label, action_id, target_state))
                     if flag_mode:
                         print('KNOWN_FRAME angle=%d id=%d（TEMP_ASSUMPTION：后续传 --known-frame-angle %d --known-frame-id %d）' %
@@ -194,6 +213,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['up', 'down', 'raise', 'lower', 'status', 'open', 'close'])
     parser.add_argument('--frame-config', default=str(DEFAULT_CONFIG))
+    parser.add_argument('--known-frame-angle', type=int, choices=[0, 20], help='操作者确认的当前目标：0开/20关，须同时提供编号')
+    parser.add_argument('--known-frame-id', type=int, help='操作者确认目标对应的当前A6非零编号')
+    parser.add_argument('--state-file', help='上次应答目标/编号记录；默认按用户和串口隔离于临时目录')
     parser.add_argument('--port', default='/dev/ttyACM0')
     parser.add_argument('--baud', type=int, choices=[9600, 115200, 230400, 460800, 921600], default=115200)
     parser.add_argument('--timeout', type=float, default=3.)

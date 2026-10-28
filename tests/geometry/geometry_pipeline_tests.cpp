@@ -389,6 +389,13 @@ int main() {
         stop.radius_m = .02f;
         pipeline.apply(in, result, stop, "red", s.frame.now_us);
         assert(in.geometry_valid && in.zone_valid && in.zone_own && in.zone_class == "supply");
+        cv::Point2f expected_center;
+        assert(s.camera.pixelToPlane({d.box.x + d.box.width * .5f,
+                                      d.box.y + d.box.height * .5f},
+                                     2000, .02f, expected_center, &s.frame.sensors.imu));
+        assert(in.target_center_valid && cv::norm(in.target_center_body - expected_center) < 1e-5f);
+        // Keep physical ground contact separate from the centre used for grasp timing.
+        assert(cv::norm(in.target_center_body - result.detections[0].body_xy_m) > .005f);
         assert(!in.path_safe && !in.safety_ok && !in.retreat_safe && !in.opponent_zone_clear &&
                !in.zone_counts_valid && !in.captured);
         result.identity_verified = false;
@@ -938,6 +945,44 @@ int main() {
         assert(read(master, &output, 1) < 0);
         uart.closePort();
         close(master);
+    }
+    { // UI 120/140 use discrete overlap maps, not arbitrary pitch interpolation.
+        Scene source;
+        const std::string path="/tmp/overlap-camera-"+std::to_string(getpid())+".yaml";
+        cv::Mat transform=cv::Mat::eye(4,4,CV_64F);
+        source.R.copyTo(transform(cv::Rect(0,0,3,3)));
+        source.t.copyTo(transform(cv::Rect(3,0,1,3)));
+        cv::Mat plane(3,3,CV_64F);
+        source.R.col(0).copyTo(plane.col(0)); source.R.col(1).copyTo(plane.col(1));
+        source.t.copyTo(plane.col(2));
+        cv::Mat h=(source.K*plane).inv();
+        {
+            cv::FileStorage f(path,cv::FileStorage::WRITE);
+            f << "camera_matrix" << source.K << "dist_coeffs" << source.D
+              << "image_width" << 1280 << "image_height" << 720
+              << "ground_pixel_domain" << "undistorted_pixels"
+              << "extrinsics_validated" << 1 << "T_camera_from_robot" << transform
+              << "pitch_model_reference_cdeg" << -3000 << "pitch_model_min_cdeg" << -3000
+              << "pitch_model_max_cdeg" << -3000 << "enable_pnp_crosscheck" << 0
+              << "overlap_ground_views" << "[";
+            for(int angle: {0,2000}) f << "{" << "pitch_cdeg" << angle << "homography" << h << "}";
+            f << "]";
+        }
+        CameraCalibration camera; assert(camera.load(path));
+        assert(camera.pitchUsable(-3000) && camera.pitchUsable(0) && camera.pitchUsable(2000));
+        assert(!camera.pitchUsable(1500) && !camera.pnpCrosscheckEnabled());
+        cv::Point2f result;
+        cv::Matx33d h0; assert(camera.groundHomographyAt(0,nullptr,h0));
+        cv::Mat projected=source.K*plane;
+        const cv::Matx33d projection(projected);
+        const cv::Vec3d pixel=projection*cv::Vec3d(.04,.7,1);
+        assert(camera.pixelToGround({float(pixel[0]/pixel[2]),float(pixel[1]/pixel[2])},0,result));
+        assert(cv::norm(result-cv::Point2f(.04,.7))<1e-5);
+        cv::Matx34d recovered;
+        assert(camera.cameraFromGround(2000,source.frame.sensors.imu,recovered));
+        assert(cv::norm(cv::Mat(recovered)-transform(cv::Rect(0,0,4,3)))<1e-5);
+        assert(!camera.cameraFromGround(1500,source.frame.sensors.imu,recovered));
+        std::remove(path.c_str());
     }
     std::cout
         << "Stage 0/1 geometry, timing, consensus, recovery, side and RX-only checks passed\n";

@@ -293,9 +293,52 @@ void poseTests() {
     halves = decodeZonePose(raw, image, bgr.size(), .25f);
     assert(halves[0].valid && std::abs(halves[0].score - .6f) < 1e-6);
 }
+void zoneDetectionSightTests() {
+    const uint64_t now = 1000000;
+    const cv::Mat k = (cv::Mat_<double>(3,3) << 800,0,640, 0,800,360, 0,0,1);
+    SegDetection blue, red, cargo;
+    blue.label="blue_safe_zone"; blue.confidence=.8f; blue.track_id=10;
+    blue.timestamp_us=now; blue.box={160,200,320,240};
+    red=blue; red.label="red_safe_zone"; red.track_id=11; red.confidence=.99f;
+    red.box={800,200,320,240};
+    cargo=blue; cargo.label="ordinary_supply"; cargo.track_id=1;
+    PushObservation in;
+    const auto sight = [&](std::vector<SegDetection> detections, const char* team="blue",
+                           bool stable=true, uint64_t at=1000000) {
+        return applyZoneDetectionSight(in,detections,team,{1280,720},k,-3000,stable,at,.5f);
+    };
+    assert(sight({blue,red,cargo}));
+    assert(in.zone_sight_valid && !in.zone_sight_enemy && !in.enemy_zone_seen &&
+           in.zone_sight_bearing > 0); // Blue team chooses lower-confidence blue at left.
+    assert(!in.geometry_valid && !in.zone_valid && !in.zone_identity_verified &&
+           !in.captured && !in.drop_plan_valid); // No pose/capture/release invented from a box.
+    assert(sight({blue,red},"red"));
+    assert(!in.zone_sight_enemy && !in.enemy_zone_seen && in.zone_sight_bearing < 0);
+    assert(sight({red}));
+    assert(in.zone_sight_enemy && in.enemy_zone_seen);
+    assert(sight({blue},"red") && in.zone_sight_enemy);
+    assert(!sight({cargo}) && !in.zone_sight_valid);
+    assert(!sight({blue,red},"blue",false) && !in.zone_sight_valid);
+    assert(!sight({blue,red},"blue",true,now+200001) && !in.zone_sight_valid);
+    assert(!sight({blue},"blue",true,now-1));
+    blue.confidence=.1f;
+    assert(!sight({blue}));
+    blue.confidence=.9f; blue.box={1400,0,100,100};
+    assert(!sight({blue}));
+    // Safe-zone labels never become cargo, even when geometry is present.
+    for (auto* zone : {&blue,&red}) {
+        zone->ground_position_valid=zone->ground_contact_valid=true;
+        zone->body_xy_m={0,1}; zone->box={100,100,500,400};
+    }
+    for (bool first : {false,true})
+        for (bool search : {false,true})
+            assert(!makePushObservation({blue,red},now,first,.5f,-1,{},search).target_valid);
+    assert(makePushObservation({cargo,blue,red},now,false,.5f).target_id==1);
+}
 } // namespace
 int main() {
     detectorTests();
+    zoneDetectionSightTests();
     poseTests();
     std::cout << "Vision tensor, RGB, class mapping, NMS, coordinates, pose decode and fail-closed "
                  "adapter passed\n";

@@ -8,7 +8,7 @@ import tempfile
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['status', 'start', 'stop', 'resume', 'finish'])
+    parser.add_argument('command', choices=['status', 'start', 'stop', 'resume', 'next', 'finish'])
     parser.add_argument('--socket', default='/tmp/rescue-match.sock')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='rescue-match-') as directory:

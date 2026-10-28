@@ -29,7 +29,12 @@ void ControlledField::update(PushObservation& in,
     // Provenance: the user's explicit controlled test-area attestation. These are
     // not inferred from empty detection output and do not apply outside this mode.
     in.opponent_zone_clear = true;
-    in.path_safe = in.retreat_safe = mapping && std::isfinite(body_radius_) && body_radius_ > 0;
+    // The existing controlled-field attestation also covers pixel-guided capture.
+    // This is a control permission, not a fabricated ground projection.
+    const bool pixel_capture = in.pixel_grasp_view && in.camera_pitch_stable &&
+        (previous.phase == TaskPhase::Search || previous.phase == TaskPhase::Capture);
+    in.path_safe = in.retreat_safe =
+        (mapping || pixel_capture) && std::isfinite(body_radius_) && body_radius_ > 0;
     in.directional_clearance_valid = envelope_[0] > 0;
     in.turn_safe = in.arc_safe = in.jaw_open_safe = in.path_safe;
     // Forward checks the full straight approach to the target, using its current bearing depth.
@@ -45,7 +50,8 @@ void ControlledField::update(PushObservation& in,
     // dangerous_object never restricts motion: driving past or pushing it is allowed; only carrying
     // it is forbidden, which the corridor/held inventory checks (checkCorridor/checkTrip) enforce.
     for (const auto& d : detections)
-        if (targetKind(d.label) == TargetKind::UNKNOWN) {
+        if (d.label != "blue_safe_zone" && d.label != "red_safe_zone" &&
+            targetKind(d.label) == TargetKind::UNKNOWN) {
             if (!d.ground_position_valid || !std::isfinite(d.body_xy_m.x) ||
                 !std::isfinite(d.body_xy_m.y) || targetKind(d.label) == TargetKind::UNKNOWN) {
                 in.path_safe = in.retreat_safe = in.arc_safe = in.jaw_open_safe = false;
@@ -114,6 +120,8 @@ void ControlledField::update(PushObservation& in,
             in.clear_push_safe = false;
         bool contact = false;
         for (const auto& d : detections) {
+            if (d.label == "blue_safe_zone" || d.label == "red_safe_zone")
+                continue; // Zone surfaces are landmarks, not pushable objects.
             if (targetKind(d.label) == TargetKind::UNKNOWN || !d.ground_position_valid ||
                 !d.ground_contact_valid || !d.timestamp_us || in.now_us < d.timestamp_us ||
                 in.now_us - d.timestamp_us > 200000) {
@@ -176,6 +184,8 @@ void ControlledField::update(PushObservation& in,
     std::vector<PlannerObstacle> objects;
     std::vector<cv::Rect> boxes;
     for (const auto& d : detections) {
+        if (d.label == "blue_safe_zone" || d.label == "red_safe_zone")
+            continue; // The containing zone box must not count as cargo or an occluder.
         bool overlaps = false;
         const cv::Rect2f box(d.box);
         std::vector<cv::Point2f> rectangle{

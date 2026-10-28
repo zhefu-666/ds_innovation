@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 
 namespace rescue {
 const char* PushTask::name(PushState s) {
@@ -154,6 +155,9 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     if (s == PushState::VERIFY_CAPTURE || state_ == PushState::VERIFY_CAPTURE)
         capture_phase_.capture_verification_.reset();
     transport_phase_.delivery_verification_.resetConfirmations();
+    if (s != PushState::APPROACH && s != PushState::MID_APPROACH &&
+        s != PushState::PREPARE && s != PushState::RUSH && s != PushState::LOWER_FRAME)
+        pixel_alignment_ = {};
     state_ = s;
     if (s == PushState::WAIT_START) {
         run_status_ =
@@ -319,7 +323,8 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     }
     // 有20°中间角时，APPROACH沿用当前相机角（远处不提前下压），由接近距离分级切换；否则保持直接用TRACK角。
     if (s == PushState::APPROACH)
-        search_phase_.approach_pitch_ = midPitch() ? pitch_cmd_ : t_.track_pitch_cdeg;
+        search_phase_.approach_pitch_ = (t_.pixel_grasp_enabled || midPitch())
+                                            ? pitch_cmd_ : t_.track_pitch_cdeg;
     if (s == PushState::SCATTER)
         search_phase_.sweep_pitch_ = pitch_cmd_;
     else
@@ -410,6 +415,7 @@ bool PushTask::neighbourInCorridor(const PushObservation& in,
     return hit;
 }
 void PushTask::clearTrip() {
+    pixel_alignment_ = {};
     capture_phase_.evidence = CaptureEvidence::None;
     transport_phase_.expected = transport_phase_.credited = 0;
     transport_phase_.visual = false;
@@ -546,6 +552,17 @@ int PushTask::frameWait(const PushObservation& in, uint8_t open, uint64_t now) c
                : 0;
 }
 bool PushTask::candidate(const PushObservation& in, uint64_t now) const {
+    const bool far_pixel_handoff = in.target_center_px_valid && in.pixel_view_handoff_ready &&
+        in.camera_pitch_cdeg != kCameraPitchInvalid &&
+        std::abs(int(in.camera_pitch_cdeg) - int(t_.far_pitch_cdeg)) <= t_.pitch_tolerance_cdeg;
+    if (t_.pixel_grasp_enabled && (in.pixel_grasp_view || far_pixel_handoff)) {
+        const auto it = rejected_.find(in.target_id);
+        return in.target_valid && in.target_id >= 0 && !in.target_is_search_cue &&
+               !in.target_in_zone && targetSelectable(in.label, first_) &&
+               in.camera_pitch_stable && (in.pixel_grasp_target_valid || far_pixel_handoff) &&
+               std::isfinite(in.pixel_grasp_steering) &&
+               (it == rejected_.end() || now >= it->second);
+    }
     if (in.target_is_search_cue || !in.target_valid || in.target_id < 0 || !in.geometry_valid ||
         !in.target_region_valid || in.target_in_zone)
         return false;
@@ -585,6 +602,9 @@ bool PushTask::sameObject(const PushObservation& in, uint64_t now) const {
     return cv::norm(p - last_target_xy_) <= t_.rebind_max_shift_m;
 }
 bool PushTask::tracking(const PushObservation& in) const {
+    if (t_.pixel_grasp_enabled && in.pixel_grasp_view)
+        return candidate(in, in.now_us) && in.target_id == trip_context_.target_id_ &&
+               in.label == trip_context_.label_;
     return in.target_valid && in.target_id == trip_context_.target_id_ &&
            in.label == trip_context_.label_ && in.geometry_valid && in.target_region_valid &&
            !in.target_in_zone && std::isfinite(in.distance_m) && in.distance_m >= 0 &&
@@ -614,6 +634,11 @@ int16_t PushTask::desiredPitch() const {
         midPitch())
         return search_phase_.disperse_turn_.needsFrameView() ? t_.track_pitch_cdeg
                                                              : t_.intermediate_pitch_cdeg;
+    if (single_phase_initializing_) {
+        if (single_phase_ == "transport" && multi_view_pitch_ != kCameraPitchInvalid)
+            return multi_view_pitch_;
+        return t_.near_pitch_cdeg;
+    }
     switch (state_) {
         case PushState::MID_REACQUIRE:
         case PushState::MID_APPROACH:
@@ -661,6 +686,8 @@ int16_t PushTask::desiredPitch() const {
         // 所以PREPARE/RUSH沿用接近阶段已经到位的角度，不再单独切NEAR/TRACK。
         case PushState::PREPARE:
         case PushState::RUSH:
+            if (t_.pixel_grasp_enabled)
+                return t_.near_pitch_cdeg;
             if (state_ == PushState::RUSH && capture_phase_.rush_stall_phase_)
                 return t_.near_pitch_cdeg;
             if ((t_.assume_all_safe || t_.demo_capture_motion) &&
@@ -910,14 +937,108 @@ PushState PushTask::resumeState() const {
     }
 }
 
+void PushTask::setSinglePhase(const std::string& phase) {
+    if (!phase.empty() && phase != "startup" && phase != "search" &&
+        phase != "capture" && phase != "transport")
+        throw std::invalid_argument("Unknown single phase");
+    single_phase_ = phase;
+}
+
+bool PushTask::initializeSinglePhase(const PushObservation& in) {
+    const uint64_t now = in.now_us;
+    if (now - actionProgress().started_us > 8000000) {
+        fail("phase_initial_evidence_timeout");
+        return false;
+    }
+    if (!in.camera_pitch_stable || pitchWait(in, now) <= 0)
+        return false;
+    if (single_phase_ == "capture") {
+        reason_ = "phase_capture_wait_target_corridor";
+        if (!in.gripper_done || in.gripper_feedback_open != 1 || !candidate(in, now) ||
+            (t_.pixel_grasp_enabled && !in.pixel_grasp_near_view) ||
+            checkCorridor(in.corridor, in.corridor_complete, in.corridor_occlusion_free,
+                          in.label, first_) != RuleVerdict::OK) {
+            actionProgress().confirmations = 0;
+            return false;
+        }
+        if (trip_context_.target_id_ != in.target_id || trip_context_.label_ != in.label ||
+            trip_context_.seen_ != in.corridor)
+            actionProgress().confirmations = 0;
+        trip_context_.target_id_ = trip_context_.capture_target_id_ = in.target_id;
+        trip_context_.label_ = in.label;
+        trip_context_.seen_ = in.corridor;
+        if (++actionProgress().confirmations < t_.corridor_confirm_frames)
+            return false;
+        trip_context_.pending_ = in.corridor;
+        const float forward = in.target_center_valid ? in.target_center_body.y
+                                                     : in.distance_m * std::cos(in.heading_error);
+        if (!t_.pixel_grasp_enabled && !std::isfinite(forward))
+            return false;
+        enter(PushState::RUSH, now, "phase_capture_ready");
+        if (rushLogic()) {
+            assume_rush_end_ = std::max(0.f, forward - t_.assume_rush_trigger_m) * t_.assume_motion_ratio;
+            actionProgress().travel_limit = assume_rush_end_ + t_.rush_extra_m * t_.assume_motion_ratio;
+        } else if (!t_.pixel_grasp_enabled)
+            actionProgress().travel_limit = std::max(0.f, forward - t_.grasp_trigger_y_m) + t_.rush_extra_m;
+    } else {
+        reason_ = "phase_transport_wait_observed_cargo";
+        if (!in.gripper_done || in.gripper_feedback_open != 0) {
+            actionProgress().confirmations = 0;
+            return false;
+        }
+        Inventory cargo;
+        if (t_.require_multi_view) {
+            if (!in.multi_view_finished || in.multi_view_verdict != 1)
+                return false;
+            cargo = in.multi_view_inventory;
+        } else {
+            if (!in.hold_observable || !in.captured || !in.held_complete) {
+                actionProgress().confirmations = 0;
+                return false;
+            }
+            cargo = in.held;
+            if (trip_context_.seen_ != cargo)
+                actionProgress().confirmations = 0;
+            trip_context_.seen_ = cargo;
+            if (++actionProgress().confirmations < t_.capture_frames)
+                return false;
+        }
+        if (checkTrip(cargo, first_) != RuleVerdict::OK)
+            return false;
+        trip_context_.trip_ = trip_context_.pending_ = cargo;
+        trip_context_.label_ = cargo.injured ? "injured_person" : cargo.ordinary ? "ordinary_supply" : "core_supply";
+        capture_phase_.evidence = CaptureEvidence::Verified;
+        enter(PushState::CARRY, now, "phase_transport_ready");
+        transport_phase_.carry_us_ = transport_phase_.hold_seen_us_ = now;
+        transport_phase_.carried_ = 0;
+    }
+    single_phase_initializing_ = false;
+    return true;
+}
+
 PushOutput PushTask::update(const PushObservation& in) {
     multi_view_pitch_ = in.multi_view_pitch;
     TaskTick tick(in);
     auto& motion = tick.motion; // zero velocity by default
     const uint64_t now = in.now_us;
+    if (!in.run || !in.safety_ok || in.reset || !in.camera_pitch_stable ||
+        !in.pixel_grasp_view || !in.target_valid || !in.pixel_grasp_target_valid ||
+        !in.pixel_grasp_sample_us || in.pixel_grasp_sample_us > now ||
+        (in.pixel_grasp_sample_us <= now && now - in.pixel_grasp_sample_us > t_.frame_timeout_us) ||
+        !std::isfinite(in.pixel_grasp_error_px) ||
+        (last_us_ && (now <= last_us_ || now - last_us_ > t_.frame_timeout_us)) ||
+        in.target_id != pixel_alignment_.target_id || in.label != pixel_alignment_.label ||
+        in.camera_pitch_cdeg != pixel_alignment_.pitch ||
+        in.pixel_grasp_sample_us < pixel_alignment_.last_sample_us) {
+        pixel_alignment_ = {};
+        pixel_alignment_.target_id = in.target_id;
+        pixel_alignment_.label = in.label;
+        pixel_alignment_.pitch = in.camera_pitch_cdeg;
+    }
 
     const auto result = [&] {
-        syncFrameOverlay(now);
+        if (!phase_waiting_)
+            syncFrameOverlay(now);
         motion.gripper_offset =
             frameAngle((frame_raised_ || sweep_open_) ? FrameAction::Open : FrameAction::Close);
         // The MCU never acknowledges an action that repeats the state it is already in, so a
@@ -931,7 +1052,7 @@ PushOutput PushTask::update(const PushObservation& in) {
             ++wire_txn_;
         }
         motion.frame_transaction = wire_txn_; // stops hold the gripper, never toggle it
-        const int16_t want = desiredPitch();  // a phase change commands its preset at once
+        const int16_t want = phase_waiting_ ? pitch_cmd_ : desiredPitch();  // a phase change commands its preset at once
         if (want != kCameraPitchInvalid && want != pitch_cmd_) {
             pitch_cmd_ = want;
             pitch_wait_us_ = now;
@@ -942,6 +1063,11 @@ PushOutput PushTask::update(const PushObservation& in) {
         PushOutput out;
         out.state = state_;
         out.phase = phase_;
+        out.phase_waiting = phase_waiting_;
+        out.single_phase_done = single_phase_done_;
+        out.next_phase = phase_outcome_ == PhaseOutcome::CaptureReady ? TaskPhase::Capture
+                         : phase_outcome_ == PhaseOutcome::TransportReady ? TaskPhase::Transport
+                         : phase_outcome_ == PhaseOutcome::SearchReady ? TaskPhase::Search : phase_;
         out.run_status = run_status_;
         out.recovering = recovering_;
         out.search_action = search_phase_.action;
@@ -998,6 +1124,20 @@ PushOutput PushTask::update(const PushObservation& in) {
                search_phase_.action == SearchAction::CueApproach ||
                search_phase_.action == SearchAction::Approach ||
                search_phase_.action == SearchAction::Prepare)));
+        if (pixel_alignment_.last_sample_us) {
+            switch (pixel_alignment_.stage) {
+                case PixelAlignment::Stage::Correct: out.pixel_align_state = "correct"; break;
+                case PixelAlignment::Stage::Brake: out.pixel_align_state = "brake"; break;
+                case PixelAlignment::Stage::Settle: out.pixel_align_state = "settle"; break;
+                case PixelAlignment::Stage::Advance: out.pixel_align_state = "advance"; break;
+            }
+        }
+        out.pixel_align_stable_frames = pixel_alignment_.stable_frames;
+        if (single_phase_initializing_ && run_status_ == RunStatus::Running) {
+            out.capture_observation_requested = single_phase_ == "transport";
+            out.corridor_observation_requested = single_phase_ == "capture";
+            out.navigation_requested = false;
+        }
         out.motion = motion;
         out.target_id = trip_context_.target_id_;
         out.target_is_search_cue = search_phase_.cue_mode_;
@@ -1019,6 +1159,10 @@ PushOutput PushTask::update(const PushObservation& in) {
         return out;
     };
     if (in.reset) {
+        single_phase_initializing_ = single_phase_done_ = false;
+        phase_waiting_ = false;
+        phase_outcome_ = PhaseOutcome::Running;
+        phase_wait_started_us_ = 0;
         phase_ = TaskPhase::Startup;
         run_status_ = RunStatus::Waiting;
         recovering_ = false;
@@ -1069,6 +1213,30 @@ PushOutput PushTask::update(const PushObservation& in) {
         last_us_ = now;
         return result();
     }
+    // Checkpoints preserve the completed phase and its pending handoff. Ordinary
+    // STOP/resume still uses the existing recovery path outside checkpoints.
+    if (single_phase_done_) {
+        last_us_ = now;
+        return result();
+    }
+    if (phase_waiting_ && !fault_) {
+        last_us_ = now;
+        if (in.run && in.safety_ok) {
+            const auto waited = now >= phase_wait_started_us_ ? now - phase_wait_started_us_ : 0;
+            if (attempt_started_)
+                attempt_started_ += waited;
+            phase_waiting_ = false;
+            applyPhaseOutcome(now);
+            if (phase_ == TaskPhase::Transport) {
+                transport_phase_.carry_us_ = now;
+                transport_phase_.carry_approach_.reset();
+                actionProgress().step = 1; // re-check the load after an inspection pause
+            }
+            pitch_wait_us_ = now;
+            reason_ = "phase_step_started";
+        }
+        return result(); // the first tick after NEXT is stationary
+    }
     if (state_ != PushState::CARRY)
         transport_phase_.carry_search_.reset();
     if (!run_yaw0_set_ && in.heading_valid && std::isfinite(in.heading_rad)) {
@@ -1085,7 +1253,10 @@ PushOutput PushTask::update(const PushObservation& in) {
             zone_enemy_yaw_ = yaw;
             if (zone_mem_ && std::abs(wrapAngle(yaw - zone_mem_yaw_)) < .5f)
                 zone_mem_ = false;
-        } else if (!(zone_enemy_ && std::abs(wrapAngle(yaw - zone_enemy_yaw_)) < .5f)) {
+        } else {
+            // Current own-color evidence supersedes an older enemy bearing in the same direction.
+            if (zone_enemy_ && std::abs(wrapAngle(yaw - zone_enemy_yaw_)) < .5f)
+                zone_enemy_ = false;
             const float d = wrapAngle(yaw - zone_mem_yaw_);
             zone_mem_yaw_ = (zone_mem_ && now - zone_mem_us_ < 3000000 && std::abs(d) < .6f)
                                 ? wrapAngle(zone_mem_yaw_ + .5f * d)
@@ -1098,6 +1269,10 @@ PushOutput PushTask::update(const PushObservation& in) {
         now > 0 && (last_us_ == 0 || (now > last_us_ && now - last_us_ <= t_.frame_timeout_us));
     const float dt = timely && last_us_ ? float(now - last_us_) * 1e-6f : 0.f;
     last_us_ = now;
+    if (in.sent_velocity_valid) {
+        last_vx_ = in.sent_vx_mps;
+        last_wz_ = in.sent_wz_rps;
+    }
     odo_ += last_vx_ * dt;
     { // TEMP_ASSUMPTION：里程系锚定的粗略区域位姿（IMU航向 +
       // 按比例缩放的指令位移），视野丢失后继续可用
@@ -1212,6 +1387,21 @@ PushOutput PushTask::update(const PushObservation& in) {
         return result();
     }
     if (state_ == PushState::WAIT_START) {
+        if (!single_phase_.empty() &&
+            (stopped_from_ == PushState::WAIT_START || single_phase_initializing_)) {
+            if (single_phase_ == "startup")
+                enter(PushState::START_ADVANCE, now, "phase_startup_direct");
+            else if (single_phase_ == "search") {
+                frame_raised_ = 1;
+                enter(PushState::SCAN, now, "phase_search_direct");
+            } else {
+                frame_raised_ = single_phase_ == "capture" ? 1 : 0;
+                enter(single_phase_ == "capture" ? PushState::RUSH : PushState::CARRY,
+                      now, "phase_initial_evidence");
+                single_phase_initializing_ = true;
+            }
+            return result();
+        }
         enter(resumeState(), now, "resume");
         if (state_ == PushState::CARRY) { // a pause is not carry time; re-check the hold
             transport_phase_.carry_us_ = now;
@@ -1219,6 +1409,12 @@ PushOutput PushTask::update(const PushObservation& in) {
             actionProgress().step = 1;
         }
         stopped_from_ = PushState::WAIT_START;
+        return result();
+    }
+    if (single_phase_initializing_) {
+        initializeSinglePhase(in);
+        if (fault_)
+            state_ = PushState::SAFE_STOP;
         return result();
     }
     for (auto it = rejected_.begin(); it != rejected_.end();)
@@ -1235,10 +1431,13 @@ PushOutput PushTask::update(const PushObservation& in) {
         in.opponent_zone_clear && (in.directional_clearance_valid ? in.turn_safe : in.path_safe);
     tick.observed_zone = zoneOk(in) && in.zone_estimate.source != ZoneEstimate::Source::PREDICTED;
     tick.elapsed = now - actionProgress().started_us;
-    // distance_m is radial; gripper planes are longitudinal robot-frame y.
-    tick.target_forward_m = in.distance_m * std::cos(in.heading_error);
+    // Grasp timing uses the detected box centre projected at block mid-height.
+    // Legacy replay observations without a centre retain their supplied range.
+    tick.target_forward_m = in.target_center_valid
+                                ? in.target_center_body.y
+                                : in.distance_m * std::cos(in.heading_error);
 
-    if (tracking(in)) {
+    if (tracking(in) && in.geometry_valid) {
         last_target_xy_ = targetBody(tick);
         last_target_valid_ = true;
     }
@@ -1374,7 +1573,15 @@ PushOutput PushTask::update(const PushObservation& in) {
                 break;
         }
 
-    if (!fault_)
+    if (!single_phase_.empty() && recovering_ && !fault_)
+        fail("single_phase_recovery_required");
+    if (!fault_ && (!single_phase_.empty() || phase_stepping_) && phase_outcome_ != PhaseOutcome::Running) {
+        single_phase_done_ = !single_phase_.empty();
+        phase_waiting_ = true;
+        phase_wait_started_us_ = now;
+        run_status_ = RunStatus::Paused;
+        motion.vx_mps = motion.wz_rps = 0;
+    } else if (!fault_)
         applyPhaseOutcome(now);
 
     if (fault_) {

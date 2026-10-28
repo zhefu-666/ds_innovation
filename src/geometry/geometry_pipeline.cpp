@@ -226,8 +226,9 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,
     if (out.zone.valid)
         out.pnp_reason = out.zone.inlier_ids.size() < 4 ? "insufficient_inliers"
                                                         : "camera_transform_unavailable";
+    if (!calibration_.pnpCrosscheckEnabled()) out.pnp_reason = "disabled_by_calibration";
     cv::Matx34d camera_from_ground;
-    if (out.zone.valid && out.zone.inlier_ids.size() >= 4 &&
+    if (calibration_.pnpCrosscheckEnabled() && out.zone.valid && out.zone.inlier_ids.size() >= 4 &&
         calibration_.cameraFromGround(
             f.sensors.actuator.camera_pitch_cdeg, f.sensors.imu, camera_from_ground)) {
         const float c = std::cos(out.zone.yaw_body_rad), s = std::sin(out.zone.yaw_body_rad);

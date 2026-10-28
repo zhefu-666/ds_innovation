@@ -79,6 +79,8 @@ struct Config {
     int telemetry_fps = 10;
     std::string telemetry_file = "/dev/shm/rescue-telemetry.bin";
     bool auto_run = false;
+    std::string single_phase; // startup/search/capture/transport; empty = full match
+    bool step_phases = false; // explicit four-phase debugging checkpoints
     bool allow_mechanical_pitch_model = false;
     // TEMP_ASSUMPTION done-flag A6: operator-supplied frame angle/action id from this session's
     // last command.

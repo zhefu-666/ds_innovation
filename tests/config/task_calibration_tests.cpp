@@ -119,6 +119,30 @@ int main() {
         c = loadTaskCalibration(file, TaskTuning{}, 1280, 720);
         assert(!c.a6_done_flag && !c.frame_view_image_polygon);
     }
+    { // Measured lateral-jaw geometry, one complete 140-degree view.
+        auto d = synthetic;
+        auto rep = [&](const std::string& a,const std::string& b) {
+            auto pos=d.find(a); assert(pos!=std::string::npos); d.replace(pos,a.size(),b);
+        };
+        rep("\"inner_width_m\":0.15", "\"inner_width_m\":0.09");
+        rep("\"entrance_width_m\":0.15", "\"entrance_width_m\":0.09");
+        rep("\"inner_depth_m\":0.08008", "\"inner_depth_m\":0.11");
+        rep("\"near_inner_m\":0.09092", "\"near_inner_m\":0.07");
+        rep("\"far_inner_m\":0.171", "\"far_inner_m\":0.18");
+        rep("\"grasp_trigger_y_m\":0.13096", "\"grasp_trigger_y_m\":0.1");
+        rep("\"stopping_margin_m\":0.005", "\"stopping_margin_m\":0.01");
+        rep("\"pitch_cdeg\":500", "\"pitch_cdeg\":2000");
+        rep(",{\"pitch_cdeg\":2000,\"calibrated\":1,\"fully_observable\":1,\"polygon\":[[50,50],[350,50],[350,350],[50,350]]}", "");
+        rep("\"schema_version\":2", "\"schema_version\":2,\"capture_verification\":\"single_view\"");
+        write2(d);
+        c=loadTaskCalibration(file,TaskTuning{},1280,720);
+        assert(!c.task.require_multi_view && c.frame_views.size()==1);
+        assert(c.task.near_pitch_cdeg==2000 && std::abs(c.task.grasp_trigger_y_m-.1f)<1e-6f);
+        assert(std::abs(c.task.hold_center_y_m-.125f)<1e-6f);
+        assert(std::abs(c.load_half_width_m-.045f)<1e-6f && std::abs(c.load_half_depth_m-.055f)<1e-6f);
+        rep("\"stopping_margin_m\":0.01", "\"stopping_margin_m\":0.015");
+        write2(d); assert(rejected()); // old stopping margin does not fit new jaw position
+    }
     // Search requires accepted body/action geometry but does not pretend capture calibration
     // exists.
     auto search_data = synthetic;

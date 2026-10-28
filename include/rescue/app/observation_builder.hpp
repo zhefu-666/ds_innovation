@@ -38,6 +38,8 @@ struct ObservationResult {
     SensorState sensor;
     uint64_t observed_at = 0;
     SensorState geometry_sensor; // Same capture-time IMU used for the geometry overlay.
+    uint64_t safety_checked_at_us = 0;
+    std::string imu_safety_reason = "imu_missing";
 };
 
 class ObservationBuilder {

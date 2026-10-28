@@ -29,6 +29,71 @@ static void packFeedback(uint8_t* out,
 }
 
 int main() {
+    {
+        MotionLinkConfig c;
+        MotionVelocityRamp ramp(c);
+        MotionCommand target;
+        target.vx_mps = .16f;
+        target.wz_rps = .2f;
+        target.gripper_offset = 20;
+        target.camera_pitch_cdeg = 1200;
+        uint64_t at = 1000000;
+        auto sent = ramp.next(target, at);
+        assert(sent.vx_mps == 0 && sent.wz_rps == 0); // start from rest
+        assert(sent.gripper_offset == 20 && sent.camera_pitch_cdeg == 1200);
+        ramp.accept(sent, at);
+        for (int i = 0; i < 30; ++i) {
+            at += 20000;
+            const auto next = ramp.next(target, at);
+            assert(next.vx_mps >= sent.vx_mps && next.vx_mps <= target.vx_mps);
+            assert(next.wz_rps >= sent.wz_rps && next.wz_rps <= target.wz_rps);
+            assert(next.vx_mps - sent.vx_mps <= c.linear_accel_mps2 * .020f + 1e-6f);
+            assert(next.wz_rps - sent.wz_rps <= c.angular_accel_rps2 * .020f + 1e-6f);
+            ramp.accept(next, at);
+            sent = next;
+        }
+        assert(std::abs(sent.vx_mps - .16f) < 1e-6f && std::abs(sent.wz_rps - .2f) < 1e-6f);
+        // Reversal must cross zero, including rapid changes of steering sign.
+        target.vx_mps = -.16f;
+        target.wz_rps = -.2f;
+        bool linear_zero = false, angular_zero = false;
+        for (int i = 0; i < 65; ++i) {
+            at += 20000;
+            auto next = ramp.next(target, at);
+            if (sent.vx_mps > 0)
+                assert(next.vx_mps >= 0);
+            if (sent.wz_rps > 0)
+                assert(next.wz_rps >= 0);
+            if (next.vx_mps < 0)
+                assert(linear_zero);
+            if (next.wz_rps < 0)
+                assert(angular_zero);
+            linear_zero = linear_zero || next.vx_mps == 0;
+            angular_zero = angular_zero || next.wz_rps == 0;
+            assert(std::abs(next.vx_mps - sent.vx_mps) <= c.linear_decel_mps2 * .02f + 1e-6f);
+            assert(std::abs(next.wz_rps - sent.wz_rps) <= c.angular_decel_rps2 * .02f + 1e-6f);
+            ramp.accept(next, at);
+            sent = next;
+        }
+        assert(linear_zero && angular_zero && std::abs(sent.vx_mps + .16f) < 1e-6f);
+        // Normal zero requests decelerate; explicit safety stops reset immediately.
+        target.vx_mps = target.wz_rps = 0;
+        at += 20000;
+        sent = ramp.next(target, at);
+        assert(sent.vx_mps < 0 && sent.wz_rps < 0);
+        ramp.accept(sent, at);
+        at += 1;
+        sent = ramp.next(target, at, true);
+        assert(sent.vx_mps == 0 && sent.wz_rps == 0);
+        ramp.accept(sent, at);
+        target.vx_mps = .16f;
+        target.wz_rps = .2f;
+        // A scheduler pause cannot accumulate an arbitrarily large acceleration step.
+        sent = ramp.next(target, at + 1000000);
+        assert(sent.vx_mps <= c.linear_accel_mps2 * .04f + 1e-6f);
+        assert(sent.wz_rps <= c.angular_accel_rps2 * .04f + 1e-6f);
+    }
+
     // 金向量由独立Python CRC计算，校验打包与CRC实现。
     using Frame = std::array<uint8_t, 8>;
     Frame frame{};
@@ -409,9 +474,13 @@ int main() {
         link.submit(drive);
         auto frames = collect(100);
         assert(frames.size() >= 2); // immediate write plus periodic resend
+        assert(vx(frames.front()) == 0 && vx(frames.back()) > 0 && vx(frames.back()) < .1f);
+        float previous_vx = 0;
         for (const auto& f : frames) {
-            assert(f[0] == 0x56 && std::abs(vx(f) - 0.1f) < 1e-6f && f[9] == 0xFB && f[10] == 8 &&
+            assert(f[0] == 0x56 && vx(f) >= previous_vx && vx(f) <= .1f &&
+                   vx(f) - previous_vx <= .30f * .040f + 1e-6f && f[9] == 0xFB && f[10] == 8 &&
                    pitch(f) == 12);
+            previous_vx = vx(f);
             const uint16_t c = UARTController::calculateCRC16(f.data(), 0, 12);
             assert(f[13] == (c & 0xFF) && f[14] == (c >> 8));
         }
@@ -429,12 +498,18 @@ int main() {
                frames.back()[10] == 8 && pitch(frames.back()) == 12);
         assert(link.stats().stale > 0 && link.stats().failed == 0);
         assert(!link.healthy()); // no fresh command within the timeout
-        // A new command resumes motion immediately; closing the gripper takes id 9.
+        // A new command ramps from rest after a stale stop; gripper changes still take id 9.
         drive.gripper_offset = 0;
         link.submit(drive);
         frames = collect(60);
-        assert(!frames.empty() && std::abs(vx(frames.front()) - 0.1f) < 1e-6f &&
-               frames.front()[9] == 5 && frames.front()[10] == 9);
+        assert(!frames.empty() && vx(frames.front()) >= 0 && vx(frames.back()) > 0 &&
+               vx(frames.back()) < .1f && frames.front()[9] == 5 && frames.front()[10] == 9);
+        link.submit(drive, true);
+        frames = collect(30);
+        assert(!frames.empty() && vx(frames.back()) == 0);
+        link.submit(drive);
+        frames = collect(35);
+        assert(!frames.empty() && vx(frames.back()) < .1f);
         link.stop();
         frames = collect(120); // a resend may precede the final stop packet
         assert(!frames.empty() && frames.size() <= 2 && vx(frames.back()) == 0.0f &&
@@ -486,7 +561,9 @@ int main() {
             const auto& last = frames.back();
             assert(vx(last) == 0 && last[9] == 0xFB &&
                    pitch(last) == 22); // freeze last authorized actuator targets
-            assert(last[15] == 0 && last[16] == 0);
+            float last_wz;
+            std::memcpy(&last_wz, last.data() + 5, 4);
+            assert(last_wz == 0);
             gated.stop();
             collect(40);
         }

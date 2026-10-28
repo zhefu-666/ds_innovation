@@ -1345,6 +1345,37 @@ void fieldCarryCases() {
                        s.out.reason != "carry_drive_to_sighted_zone");
             }
         }
+        { // New own-color detection can recover a direction previously marked enemy.
+            Sim s(t);
+            s.toCarry(); s.zone_visible=false;
+            for (int i=0;i<40 && s.out.reason!="searching_own_zone";++i) s.tick();
+            s.in.zone_sight_valid=true; s.in.zone_sight_enemy=true;
+            s.in.zone_sight_bearing=.1f;
+            s.tick();
+            assert(!s.task.zone_mem_);
+            s.in.zone_sight_enemy=false;
+            s.tick();
+            assert(s.task.zone_mem_ && !s.task.zone_enemy_);
+            assert(s.out.state==PushState::CARRY &&
+                   s.out.reason=="carry_drive_to_sighted_zone");
+        }
+        { // Strict transport also turns toward a detected own zone while awaiting a metric plan.
+            Sim s;
+            s.toCarry(); s.zone_visible=false;
+            s.in.zone_sight_valid=true; s.in.zone_sight_enemy=false;
+            s.in.zone_sight_bearing=.5f;
+            bool aligned=false;
+            for (int i=0;i<20;++i) {
+                s.tick();
+                if (s.out.reason=="aligning_to_detected_own_zone") {
+                    aligned=true;
+                    assert(s.out.state==PushState::CARRY && s.out.motion.vx_mps==0 &&
+                           s.out.motion.wz_rps>0);
+                    break;
+                }
+            }
+            assert(aligned);
+        }
         { // Strict capture is untouched: without multi-view evidence the capture is not credited.
             Sim s(t);
             s.tune.require_multi_view = true;
@@ -1352,6 +1383,8 @@ void fieldCarryCases() {
             s.multi_evidence = false;
             s.toRush();
             s.hold(inv(1));
+            s.in.zone_sight_valid=true; s.in.zone_sight_enemy=false;
+            s.in.zone_sight_bearing=.2f; // A visible zone never bypasses capture verification.
             for (int i = 0; i < 200; ++i) {
                 s.tick();
                 assert(s.out.state != PushState::CARRY);

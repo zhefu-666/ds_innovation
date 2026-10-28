@@ -21,6 +21,7 @@ class SensorFusion {
     }
     bool fresh(uint64_t now_us) const;
     bool emergencyStop(uint64_t now_us) const;
+    const char* emergencyStopReason(uint64_t now_us) const;
     bool tiltUnsafe() const;
     MotionCommand protect(const MotionCommand& requested, uint64_t now_us);
 

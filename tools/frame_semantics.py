@@ -1,20 +1,28 @@
 """Keep the historical task values Open=0 and Close=20 internally.
 
-TX uses signed gripper_offset (+5=open, -5=closed); A6 uses binary state (1/0).
+TX uses signed gripper_offset (+5=open, -5=closed); A6 semantics come from configuration.
 The feedback mapping is explicit configuration and cannot be inferred from TX.
 
 A6 state mapping is a configured protocol assumption, not measured physical position.
-The existing mapping checks remain in force pending firmware confirmation. Legacy done_flag
-profiles remain rejected by the hardware launcher.
+Done-flag profiles check protocol acknowledgement, not physical position.
 """
 import json
+import hashlib
+import os
+import tempfile
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'config'))
 from project import load_reference
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / 'config/project.json#/frame/pending'
 ANGLES = {'open': 0, 'close': 20}
-DONE_FLAG_NOTE = 'Legacy a6_semantics=done_flag is unsupported for the physical gripper'
+DONE_FLAG_NOTE = 'A6状态1按动作应答解释，不区分开关；等待时间取配置，不是机械到位检测'
+
+
+def state_record_path(port):
+    """Share acknowledged gripper targets across tools for this user and serial port."""
+    key = hashlib.sha256(os.path.realpath(port).encode()).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / ('ds-frame-%d-%s.json' % (os.getuid(), key))
 
 
 def load_mapping(path):

@@ -72,6 +72,11 @@ enum class PushState {
 struct PushObservation {
     uint64_t now_us = 0;
     bool run = false, reset = false, safety_ok = false;
+    // Last successful UART velocity command after ramping, not measured wheel velocity.
+    // Live runtime supplies it so command-based travel estimates do not integrate target steps.
+    // Replays without this feedback retain the previous task request.
+    bool sent_velocity_valid = false;
+    float sent_vx_mps = 0, sent_wz_rps = 0;
     // Primary candidate chosen by the perception adapter.
     bool target_valid = false, geometry_valid = false;
     bool multi_view_finished = false;
@@ -161,6 +166,20 @@ struct PushObservation {
     // frame.
     std::vector<cv::Point2f> upright_body;
     uint64_t upright_ts_us = 0;
+    // Class-specific centre range at the calibrated near image view.
+    // Explicit image control; never makes geometry_valid or a metric distance valid.
+    bool pixel_grasp_view = false, pixel_grasp_near_view = false;
+    bool pixel_grasp_target_valid = false, pixel_grasp_ready = false;
+    bool pixel_grasp_aligned = false;
+    float pixel_grasp_steering = 0; // normalized horizontal pixel error; positive left
+    float pixel_grasp_error_px = 0; // original-image error, positive left
+    uint64_t pixel_grasp_sample_us = 0; // selected fresh detection, never loop time
+    // Fresh box centre is also available in FAR solely for the stationary view handoff.
+    bool target_center_px_valid = false, pixel_view_handoff_ready = false;
+    cv::Point2f target_center_px;
+    bool target_grasp_range_applicable = false;
+    bool target_grasp_range_valid = false, target_grasp_range_inside = false;
+    bool target_grasp_range_lateral = false, target_grasp_range_past_rear = false;
     cv::Point2f target_center_body;
     bool target_center_valid = false; // filled by geometry_pipeline.cpp for the locked target
     // Every other confident, ground-located detection (any class) except the locked target; only
@@ -191,6 +210,9 @@ struct PushObservation {
 };
 struct PushOutput {
     TaskPhase phase = TaskPhase::Startup;
+    bool phase_waiting = false;
+    bool single_phase_done = false;
+    TaskPhase next_phase = TaskPhase::Startup;
     RunStatus run_status = RunStatus::Waiting;
     SearchAction search_action = SearchAction::Scan;
     CaptureAction capture_action = CaptureAction::Advance;
@@ -209,6 +231,8 @@ struct PushOutput {
     bool stationary_pitch_work = false;
     bool scan_pitch_return = false;
     bool target_reselecting = false;
+    std::string pixel_align_state = "idle";
+    int pixel_align_stable_frames = 0;
     // Compatibility diagnostic action, not the business-phase dispatcher.
     PushState state = PushState::WAIT_START;
     MotionCommand motion; // includes gripper_offset and camera_pitch_cdeg
@@ -231,6 +255,17 @@ struct PushOutput {
 // Body geometry, speeds and budgets. Lengths marked "measure" are placeholders
 // until the gripper is measured on the robot.
 struct TaskTuning {
+    bool pixel_grasp_enabled = false;
+    // Initial tuning approved 2026-10-28; low-speed chassis response needs field testing.
+    float pixel_align_gain_rps_per_px = .004f, pixel_align_max_wz = .20f;
+    float pixel_align_tolerance_px = 12.f, pixel_align_restart_px = 24.f;
+    // UI120 approach uses coarse hysteresis; UI140 retains the fine limits above.
+    float pixel_align_approach_tolerance_px = 24.f, pixel_align_approach_restart_px = 40.f;
+    uint64_t pixel_align_brake_us = 150000;
+    float pixel_align_brake_motion_px = 4.f;
+    float pixel_align_stopped_wz = .02f, pixel_align_stopped_vx = .01f;
+    uint64_t pixel_align_stable_us = 200000;
+    int pixel_align_stable_frames = 3;
     bool require_multi_view = true;
     bool demo_search_only = false, demo_carry_once = false;
     // TEMP_ASSUMPTION（2026-10-08用户要求）：缺失的抓取/区域/投放证据视为成立，用有界盲动作跑通决策链。
@@ -475,7 +510,7 @@ struct TaskTuning {
     bool precise_rush = false, sweep_observation_guard = false;
     bool demo_capture_motion =
         false; // demo opening/pitch/rush sequence, independent of assume_all_safe
-    float rush_align_deadband_rad = .04f, rush_align_wz = .25f, rush_near_speed = .16f,
+    float rush_align_deadband_rad = .04f, rush_align_wz = .25f, rush_near_speed = .08f,
           rush_slow_range_m = .24f;
     uint64_t sweep_reobserve_us = 600000;
     bool frame_open_default =
@@ -787,6 +822,12 @@ class PushTask {
         first_ = t_.assume_injured_trip;
     }
     PushOutput update(const PushObservation& in);
+    void setPhaseStepping(bool enabled) { phase_stepping_ = enabled; }
+    void setSinglePhase(const std::string& phase);
+    void setInitialFrameOpen(bool open) { frame_raised_ = open ? 1 : 0; }
+    const std::string& targetLabel() const {
+        return trip_context_.label_;
+    }
     const std::string& anchorDebug() const {
         return anchor_dbg_;
     }
@@ -817,6 +858,11 @@ class PushTask {
 
   private:
     TaskTuning t_;
+    std::string single_phase_;
+    bool single_phase_initializing_ = false, single_phase_done_ = false;
+    bool initializeSinglePhase(const PushObservation& in);
+    bool phase_stepping_ = false, phase_waiting_ = false;
+    uint64_t phase_wait_started_us_ = 0;
     TripContext trip_context_;
     TaskPhase phase_ = TaskPhase::Startup;
     RunStatus run_status_ = RunStatus::Waiting;
@@ -863,7 +909,18 @@ class PushTask {
     void failStop(TaskTick& tick, const char* why);
     void scanAfterClear(TaskTick& tick, const char* why);
     cv::Point2f targetBody(TaskTick& tick);
-    void drive(TaskTick& tick, float vx, float wz);
+    void drive(TaskTick& tick, float vx, float wz, bool pixel_align = false);
+    bool pixelAlign(TaskTick& tick, bool strict = false);
+    struct PixelAlignment {
+        enum class Stage { Correct, Brake, Settle, Advance };
+        Stage stage = Stage::Correct;
+        int target_id = -1, direction = 0, stable_frames = 0;
+        std::string label;
+        int16_t pitch = kCameraPitchInvalid;
+        uint64_t last_sample_us = 0, stable_since_us = 0, stopped_since_us = 0;
+        float brake_min_px = 0, brake_max_px = 0;
+        bool within_tolerance = false;
+    } pixel_alignment_;
     void scanSpin(TaskTick& tick);
     CarrySearchContext carrySearchContext(TaskTick& tick);
     bool evadeEnemy(TaskTick& tick);

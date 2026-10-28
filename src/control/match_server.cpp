@@ -74,6 +74,8 @@ void MatchServer::run() {
             accepted = control_.command(MatchCommand::STOP, clockUs());
         else if (command == "resume")
             accepted = control_.command(MatchCommand::RESUME, clockUs());
+        else if (command == "next")
+            accepted = control_.command(MatchCommand::NEXT, clockUs());
         else if (command == "finish")
             accepted = control_.command(MatchCommand::FINISH, clockUs());
         else if (command == "status")
@@ -83,7 +85,8 @@ void MatchServer::run() {
                                      MatchControl::name(s.state) + " reason=" + s.reason +
                                      " elapsed_ms=" + std::to_string(s.elapsed_us / 1000) +
                                      " remaining_ms=" + std::to_string(s.remaining_us / 1000) +
-                                     " permit=" + (s.permit ? "1" : "0");
+                                     " permit=" + (s.permit ? "1" : "0") +
+                                     " phase_waiting=" + (s.phase_waiting ? "1" : "0");
         ::sendto(fd_,
                  response.data(),
                  response.size(),

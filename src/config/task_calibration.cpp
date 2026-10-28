@@ -24,7 +24,14 @@ TaskCalibration loadTaskCalibration(
         }
         TaskCalibration r;
         r.task = tuning;
-        r.task.require_multi_view = true;
+        std::string verification;
+        if (!root["capture_verification"].empty())
+            root["capture_verification"] >> verification;
+        if (!verification.empty() && verification != "multi_view" && verification != "single_view")
+            throw std::runtime_error("Unknown capture_verification");
+        // A full jaw view can verify inventory over consecutive frames. A partial
+        // middle view must not be counted as a second complete inventory view.
+        r.task.require_multi_view = verification != "single_view";
         root["version"] >> r.version;
         if (r.version.empty())
             throw std::runtime_error("Missing mechanical configuration version");
@@ -83,8 +90,8 @@ TaskCalibration loadTaskCalibration(
                 block_width + 2 * margin >= n("entrance_width_m"))
                 throw std::runtime_error("Block width does not fit entrance");
             if (block_depth <= 0 || margin <= 0 ||
-                r.task.grasp_trigger_y_m - block_depth / 2 - margin < near ||
-                r.task.grasp_trigger_y_m + block_depth / 2 + margin > far)
+                r.task.grasp_trigger_y_m - block_depth / 2 - margin < near - 1e-6f ||
+                r.task.grasp_trigger_y_m + block_depth / 2 + margin > far + 1e-6f)
                 throw std::runtime_error("Capture stopping footprint does not fit frame");
         }
         r.load_half_width_m = inner_width / 2;
@@ -122,8 +129,10 @@ TaskCalibration loadTaskCalibration(
         else if (!matching.empty() && matching != "body_ground")
             throw std::runtime_error("Unknown frame_view_matching");
         const auto views = root["frame_views"];
-        if (!views.isSeq() || views.size() < 2 || views.size() > 3)
-            throw std::runtime_error("Need two or three independent frame views");
+        if (!views.isSeq() || (r.task.require_multi_view
+                                  ? views.size() < 2 || views.size() > 3
+                                  : views.size() != 1))
+            throw std::runtime_error("Need 2-3 multi-view regions or one complete single-view region");
         for (const auto& v : views) {
             FrameView view;
             const int pitch = int(v["pitch_cdeg"]);
