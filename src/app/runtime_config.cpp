@@ -203,28 +203,16 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
     F(occlusion_hold_us);
     F(occlusion_near_m);
     F(pile_clear);
-    F(pile_corridor_min);
-    F(pile_confirm);
     F(pile_max_runs);
-    F(pile_trigger_max_m);
     F(pile_budget_us);
     F(pile_cool_us);
-    F(pile_advance_m);
-    F(pile_advance_speed);
     F(pile_turn_wz);
     F(pile_align_tol_rad);
-    F(pile_block_half_m);
     F(pile_advance_budget_us);
     F(pile_back_budget_us);
     F(pile_cluster_radius_m);
     F(pile_cluster_half_x_m);
-    F(pile_view_back_m);
-    F(pile_frame_half_m);
-    F(pile_cut_depth_m);
-    F(pile_cut_speed);
     F(pile_measure_us);
-    F(pile_cut_budget_us);
-    F(pile_cut_max_steps);
     F(pile_chain);
     F(pile_chain_max);
     F(pile_layer_depth_m);
@@ -1011,7 +999,7 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
               "task.demo_carry_once"});
     if (config.push_replay.empty()) {
         tuning.max_speed = .40f;
-        tuning.approach_speed = .40f;
+        tuning.approach_speed = .07f;
         tuning.carry_speed = .05f; // 2026-10-28: operator-requested transport speed
         tuning.rush_speed = .32f;
         tuning.rush_budget_us = 12000000;
@@ -1063,7 +1051,6 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
         tuning.lock_multi_radius_m = .60f;
         tuning.dense_multi_ignore_gap = true;
         tuning.pile_clear = true;
-        tuning.pile_cut_max_steps = 3;
         tuning.pile_chain = true;
         tuning.occlusion_hold_us = 2500000;
         tuning.occlusion_near_m = .8f;
@@ -1148,7 +1135,6 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
               "task.lock_multi_radius_m",
               "task.dense_multi_ignore_gap",
               "task.pile_clear",
-              "task.pile_cut_max_steps",
               "task.pile_chain",
               "task.occlusion_hold_us",
               "task.occlusion_near_m",
@@ -1291,11 +1277,6 @@ void printRuntimeTuning(const ResolvedRuntimeConfig& r, std::ostream& diagnostic
                 << " relock_window_us=" << tuning.relock_window_us
                 << " relock_gate_frac=" << tuning.relock_gate_frac
                 << " pile_clear=" << tuning.pile_clear
-                << " pile_corridor_min=" << tuning.pile_corridor_min
-                << " pile_trigger_max_m=" << tuning.pile_trigger_max_m
-                << " pile_advance_m=" << tuning.pile_advance_m
-                << " pile_block_half_m=" << tuning.pile_block_half_m
-                << " pile_view_back_m=" << tuning.pile_view_back_m
                 << " rush_align_deadband_rad=" << tuning.rush_align_deadband_rad
                 << " rush_align_wz=" << tuning.rush_align_wz
                 << " rush_near_speed=" << tuning.rush_near_speed

@@ -78,7 +78,6 @@ struct SearchServices {
     std::function<bool()> sweep_frame_ready;
     std::function<bool()> disperse_step;
     std::function<bool(const char*)> begin_pile_from_sweep;
-    std::function<void(const char*)> begin_pile;
     std::function<bool()> lost_target;
     std::function<bool(const PushObservation&)> tracking;
     std::function<const char*()> tracking_reason;

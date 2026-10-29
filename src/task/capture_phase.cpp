@@ -18,20 +18,30 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                     reason_ = "pixel_target_wait";
                     break;
                 }
-                if (!tick.in.target_grasp_range_lateral || tick.in.target_grasp_range_past_rear) {
+                if (tick.in.target_grasp_range_past_rear) {
                     enter(PushState::CAPTURE_FAIL, tick.now, "target_outside_grasp_center_range");
                     break;
                 }
-                trip_context_.verdict_ = checkCorridor(tick.in.corridor, tick.in.corridor_complete,
-                    tick.in.corridor_occlusion_free, trip_context_.label_, first_);
+                trip_context_.verdict_ = checkCorridor(tick.in.corridor,
+                                                       tick.in.corridor_complete,
+                                                       tick.in.corridor_occlusion_free,
+                                                       trip_context_.label_,
+                                                       first_);
                 if (trip_context_.verdict_ != RuleVerdict::OK) {
                     enter(PushState::CAPTURE_FAIL, tick.now, "pixel_corridor_rejected");
                     break;
                 }
-                if (!pixelAlign(tick, tick.in.pixel_grasp_ready))
+                const bool accepted_lateral = pixelLateralAccepted(tick.in);
+                const bool capture_ready = pixelCaptureReady(tick.in);
+                if (!pixelAlign(tick,
+                                capture_ready,
+                                accepted_lateral && (tick.in.target_grasp_range_lateral_measured ||
+                                                     capture_ready)))
                     break;
-                if (tick.in.pixel_grasp_ready) {
-                    enter(PushState::LOWER_FRAME, tick.now, "pixel_center_enclosure_position");
+                if (capture_ready && pixelLateralAccepted(tick.in)) {
+                    enter(PushState::LOWER_FRAME, tick.now,
+                          tick.in.pixel_grasp_ready ? "pixel_center_enclosure_position"
+                                                   : "first_trip_split_enclosure_position");
                     break;
                 }
                 reason_ = "pixel_center_approach";
@@ -81,8 +91,8 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                 const bool in_frame = seen && tick.in.captured && tick.in.held_complete &&
                                       tick.in.held.count(targetKind(trip_context_.label_)) >= 1 &&
                                       checkTrip(tick.in.held, first_) == RuleVerdict::OK;
-                if (in_frame && (!tick.in.target_grasp_range_applicable ||
-                                 tick.in.target_grasp_range_inside)) {
+                if (in_frame &&
+                    (!tick.in.target_grasp_range_applicable || tick.in.target_grasp_range_inside)) {
                     preLower(tick, "rush_stall_in_frame_evidence");
                     break;
                 }
@@ -228,10 +238,13 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
         }
         case CaptureAction::LowerFrame: {
             if (t_.pixel_grasp_enabled && frame_raised_ != 0 &&
-                (!tick.in.pixel_grasp_near_view || !tracking(tick.in) || !tick.in.pixel_grasp_ready ||
-                 !tick.in.pixel_grasp_aligned ||
-                 checkCorridor(tick.in.corridor, tick.in.corridor_complete,
-                    tick.in.corridor_occlusion_free, trip_context_.label_, first_) != RuleVerdict::OK)) {
+                (!tick.in.pixel_grasp_near_view || !tracking(tick.in) ||
+                 !pixelCaptureReady(tick.in) || !pixelLateralAccepted(tick.in) ||
+                 checkCorridor(tick.in.corridor,
+                               tick.in.corridor_complete,
+                               tick.in.corridor_occlusion_free,
+                               trip_context_.label_,
+                               first_) != RuleVerdict::OK)) {
                 enter(PushState::CAPTURE_FAIL, tick.now, "pixel_preclose_recheck_failed");
                 break;
             }
@@ -240,6 +253,8 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                 enter(PushState::CAPTURE_FAIL, tick.now, "target_outside_grasp_center_range");
                 break;
             }
+            if (t_.pixel_grasp_enabled && frame_raised_ != 0 && !pixelAlign(tick, true, true))
+                break;
             commandFrame(0, tick.now);
             const int g = frameWait(tick.in, 0, tick.now);
             if (g < 0) {
@@ -249,23 +264,65 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
             break;
         }
         case CaptureAction::Verify: {
-            const auto verification = capture_phase_.capture_verification_.update(
+            capture_scene_.stage = "postclose";
+            final_validation_ = "running";
+            const bool first_pixel_ordinary = t_.pixel_grasp_enabled && !first_ &&
+                targetKind(trip_context_.label_) == TargetKind::ORDINARY;
+            auto scene_verdict = CaptureSceneVerdict::Clear;
+            if (first_pixel_ordinary) {
+                scene_verdict = evaluateCaptureScene(tick.in);
+                const bool new_image = tick.in.capture_scene_us > capture_scene_.confirm_us;
+                if (scene_verdict == CaptureSceneVerdict::Incomplete || !new_image) {
+                    reason_ = "first_trip_postclose_review_" + capture_scene_.detail;
+                    if (tick.elapsed > t_.verify_budget_us) {
+                        final_validation_ = "failed";
+                        enter(PushState::CAPTURE_FAIL, tick.now, reason_.c_str());
+                    }
+                    break;
+                }
+                capture_scene_.confirm_us = tick.in.capture_scene_us;
+            }
+            auto verification = capture_phase_.capture_verification_.update(
                 tick.in, t_, {tick.elapsed, trip_context_.label_, trip_context_.pending_, first_});
             if (verification.verdict)
                 trip_context_.verdict_ = *verification.verdict;
             if (!verification.reason.empty())
                 reason_ = verification.reason;
+            auto& split = search_phase_.first_trip_split_;
+            // Post-close counts never grant pixel reverse permission. They report a failed
+            // capture; any retry must return through stationary scene review.
+            if (t_.pixel_grasp_enabled && !first_ &&
+                targetKind(trip_context_.label_) == TargetKind::ORDINARY &&
+                verification.outcome == CaptureVerificationOutcome::Assumed) {
+                verification.outcome = tick.elapsed > t_.verify_budget_us
+                    ? CaptureVerificationOutcome::CaptureFail : CaptureVerificationOutcome::Continue;
+                verification.reason = "first_trip_actual_count_unverified";
+                reason_ = verification.reason;
+            }
+            if (first_pixel_ordinary && scene_verdict != CaptureSceneVerdict::Clear &&
+                verification.outcome == CaptureVerificationOutcome::Verified) {
+                verification.outcome = CaptureVerificationOutcome::CaptureFail;
+                verification.reason = "first_trip_postclose_neighbor_in_capture_path";
+                reason_ = verification.reason;
+            }
+            if (verification.outcome == CaptureVerificationOutcome::Verified)
+                final_validation_ = "passed";
+            else if (verification.outcome != CaptureVerificationOutcome::Continue)
+                final_validation_ = "failed";
             if (verification.blacklist_target)
                 blacklist(tick.now);
             switch (verification.outcome) {
                 case CaptureVerificationOutcome::Continue:
                     break;
                 case CaptureVerificationOutcome::Verified:
-                case CaptureVerificationOutcome::Assumed:
+                case CaptureVerificationOutcome::Assumed: {
                     capture_phase_.evidence =
                         verification.outcome == CaptureVerificationOutcome::Verified
                             ? CaptureEvidence::Verified
                             : CaptureEvidence::Assumed;
+                    const int split_runs = split.runs;
+                    split = {}; // capture never credits first ordinary delivery
+                    split.runs = split_runs;
                     trip_context_.trip_ = verification.inventory;
                     transport_phase_.carry_us_ = tick.now;
                     transport_phase_.zone_search_started_us_ = 0;
@@ -275,6 +332,7 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                     transport_phase_.hold_seen_us_ = tick.now;
                     transport_phase_.carried_ = 0;
                     break;
+                }
                 case CaptureVerificationOutcome::CaptureFail:
                     enter(PushState::CAPTURE_FAIL, tick.now, "");
                     break;

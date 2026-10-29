@@ -205,7 +205,6 @@ int main() {
     assert(double(decoded["startup"]["effective_advance_us"]) == 1250000);
     assert(int(decoded["startup"]["requested_advance_ms"]) == 5000);
     assert(close(float(decoded["task"]["turn_wz"]), .55f));
-    assert(decoded["field_sources"].size() > 400 && decoded["task"].size() > 350);
     assert(json.str().find(".Inf") == std::string::npos &&
            json.str().find(".Nan") == std::string::npos);
     std::ostringstream tuning_log;
@@ -245,7 +244,7 @@ int main() {
         assert(close(jaw.task.pixel_align_tolerance_px, 12.f));
         assert(close(jaw.capture.pixel_align_tolerance_px, 12.f));
         assert(close(jaw.task.pixel_align_restart_px, 24.f));
-        assert(close(jaw.task.pixel_align_approach_tolerance_px, 24.f));
+        assert(close(jaw.task.pixel_align_approach_tolerance_px, 30.f));
         assert(close(jaw.task.pixel_align_approach_restart_px, 40.f));
         assert(jaw.task.pixel_align_brake_us == 150000);
         assert(close(jaw.task.pixel_align_brake_motion_px, 4.f));

@@ -22,6 +22,7 @@ struct PushObservation;
 struct SweepBest {
     int n = 0;
     float d = 0;
+    cv::Point2f centre{0.f, 0.f};
 };
 
 // References are scoped to the owning search phase and the current tick.
@@ -80,6 +81,9 @@ struct SweepServices {
 
 class SweepStage {
   public:
+    void resetScatterApproach() {
+        scatter_alignment_ = {};
+    }
     // SCATTER, PILE, CUE_APPROACH, CUE_PREPARE, CLEAR_PILE and CLEAR_PAUSE.
     void update(SearchAction state,
                 const TaskTuning&,
@@ -106,11 +110,16 @@ class SweepStage {
                     const SweepContext&,
                     const SweepServices&);
 
+    struct ScatterAlignment {
+        bool ready = false, braking = true;
+        uint64_t started_us = 0, stable_since_us = 0, visual_us = 0, heading_us = 0;
+        float heading = 0;
+        int stable_frames = 0;
+    } scatter_alignment_;
     float clear_heading_rad_ = 0;
     float pile_chain_in_m_ = 0;
     int pile_chain_look_ = 0;
     float pile_chain_yaw_mid_ = 0, pile_chain_yaw_pre_ = 0;
-    float pile_cut_m_ = 0, pile_cut_yaw_ = 0;
     float pile_travel0_ = 0;
     float scatter_back_ = 0;
 };

@@ -185,7 +185,8 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
             cv::drawMarker(preview, centre, color, cv::MARKER_CROSS, 18, 2);
             tracking = std::string(cue ? "TRACK CUE #" : "TRACK CARGO #") + std::to_string(locked) +
                        " " + d.label;
-            if (s.output.phase == TaskPhase::Search && s.output.search_action == SearchAction::Scan)
+            if (s.output.phase == TaskPhase::Search &&
+                s.output.search_action == SearchStatusAction::Scan)
                 tracking = "SELECTING CUE #" + std::to_string(locked) + " " + d.label;
             seen = true;
             break;
@@ -229,6 +230,14 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
           << "}" << "}";
     }
     const auto& in = s.observation;
+    const bool search_visual_state =
+        s.output.state == PushState::SCAN || s.output.state == PushState::LOST_SEARCH ||
+        s.output.state == PushState::MID_REACQUIRE ||
+        s.output.state == PushState::NEAR_REACQUIRE ||
+        s.output.state == PushState::SELECT_CARGO || s.output.state == PushState::SCATTER;
+    const char* range_source = search_visual_state
+                                   ? "visual_only"
+                                   : std::isfinite(in.distance_m) ? "geometry" : "unavailable";
     f << "]" << "state" << "{" << "name" << PushTask::name(s.output.state) << "phase"
       << phaseName(s.output.phase) << "phase_waiting" << int(s.output.phase_waiting)
       << "next_phase" << phaseName(s.output.next_phase) << "run_status" << runStatusName(s.output.run_status) << "action"
@@ -298,12 +307,14 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
       << "pixel_view_handoff_ready" << int(in.pixel_view_handoff_ready)
       << "pixel_grasp_ready" << int(in.pixel_grasp_ready)
       << "pixel_grasp_aligned" << int(in.pixel_grasp_aligned)
+      << "grasp_lateral_measured" << int(in.target_grasp_range_lateral_measured)
+      << "immediate_motion_stop" << int(s.output.immediate_motion_stop)
       << "pixel_grasp_error_px" << finite(in.pixel_grasp_error_px)
       << "pixel_grasp_sample_us" << double(in.pixel_grasp_sample_us)
       << "pixel_align_state" << s.output.pixel_align_state
       << "pixel_align_stable_frames" << s.output.pixel_align_stable_frames
       << "target_center_px" << "[" << finite(in.target_center_px.x) << finite(in.target_center_px.y) << "]"
-      << "target_grasp_range_inside" << int(in.target_grasp_range_inside)
+      << "target_grasp_range_inside" << int(in.target_grasp_range_inside) << "range_source" << range_source
       << "target_geometry_valid" << int(in.geometry_valid) << "target_region_known"
       << int(in.target_region_valid) << "target_in_own_zone" << int(in.target_in_zone)
       << "target_distance_m" << finite(in.distance_m) << "target_heading_error_rad"

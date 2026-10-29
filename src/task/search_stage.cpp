@@ -2,8 +2,37 @@
 #include "rescue/task/push_task.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace rescue {
+namespace {
+// Only overlap connected to the selected target can divert its approach.
+// The target occupies the final point/box; unrelated groups are ignored.
+std::vector<cv::Point2f> targetOverlappingComponent(const std::vector<cv::Point2f>& points,
+                                                  const std::vector<cv::Rect>& boxes) {
+    if (points.empty() || points.size() != boxes.size())
+        return {};
+    const size_t target = points.size() - 1;
+    if (boxes[target].empty())
+        return {};
+    std::vector<char> seen(points.size(), 0);
+    std::vector<size_t> pending{target};
+    std::vector<cv::Point2f> group;
+    seen[target] = 1;
+    while (!pending.empty()) {
+        const size_t i = pending.back();
+        pending.pop_back();
+        group.push_back(points[i]);
+        for (size_t j = 0; j < points.size(); ++j)
+            if (!seen[j] && !boxes[j].empty() && (boxes[i] & boxes[j]).area() > 0) {
+                seen[j] = 1;
+                pending.push_back(j);
+            }
+    }
+    return group.size() >= 2 ? group : std::vector<cv::Point2f>{};
+}
+} // namespace
+
 void SearchStage::resetScanTracking() {
     confirm_since_us_ = 0;
     vis_hits_ = vis_miss_ = 0;
@@ -91,8 +120,17 @@ void SearchStage::scan(const TaskTuning& t,
     // A lock this far out is not trusted (class / position are off at this range): a group
     // of several objects is enough to drive toward; once it is within
     // blind_scatter_far_chase_m the normal decision takes over.
-    if (cand && !cue && !weak_hold && c.scatter_ok && c.approach_ok &&
-        std::isfinite(in.distance_m) && in.distance_m > t.blind_scatter_far_chase_m) {
+    const bool metric_target = std::isfinite(in.distance_m) &&
+                                in.distance_m > 0 && std::isfinite(in.heading_error);
+    const bool ordinary_candidate = cand && !cue && targetKind(in.label) == TargetKind::ORDINARY;
+    const auto corridor_verdict = checkCorridor(in.corridor, in.corridor_complete,
+                                               in.corridor_occlusion_free, in.label,
+                                               c.first_ordinary);
+    const bool corridor_blocked = metric_target && in.corridor_complete &&
+                                  corridor_verdict != RuleVerdict::OK &&
+                                  corridor_verdict != RuleVerdict::INCOMPLETE;
+    if (cand && !cue && !weak_hold && !ordinary_candidate && c.scatter_ok && c.approach_ok &&
+        metric_target && in.distance_m > t.blind_scatter_far_chase_m) {
         std::vector<cv::Point2f> pts = in.clutter_body;
         pts.emplace_back(s.target_body());
         s.add_ordinary_extra(pts.back());
@@ -128,31 +166,44 @@ void SearchStage::scan(const TaskTuning& t,
             far_seen_ = 0;
             confirm_since_us_ = 0;
         }
-    } else if (t.dense_no_lock && cand && !cue && !weak_hold &&
-               (c.scatter_ok || c.scatter_multi_ok) && c.clutter_fresh &&
-               std::isfinite(in.distance_m)) {
-        // Several objects together: do not lock one of them, push on and split the group
-        // (the committed sweep ignores the lock).
+    } else if (t.dense_no_lock && cand && !cue && !weak_hold && corridor_blocked &&
+               (c.scatter_ok || c.scatter_multi_ok) && c.clutter_fresh) {
+        // A clean or unobserved corridor is not evidence for scattering. For an
+        // actually blocked target, consider only its neighbours and approach lane.
         far_seen_ = 0;
         confirm_since_us_ = 0;
-        std::vector<cv::Point2f> pts = in.clutter_body;
-        pts.emplace_back(s.target_body());
-        s.add_ordinary_extra(pts.back());
-        // Lock only while few targets are in view: beyond lock_max_visible any pair that
-        // sits together is swept open-frame instead.
-        int visible_n = 0;
-        for (const auto& q : pts)
-            if (std::isfinite(q.x) && std::isfinite(q.y) && q.y >= t.blind_scatter_min_y_m &&
-                q.y <= c.far_y)
-                ++visible_n;
-        const bool multi =
-            t.lock_max_visible > 0 && visible_n > t.lock_max_visible && c.scatter_multi_ok;
+        const cv::Point2f target = s.target_body();
+        const float distance = cv::norm(target);
+        std::vector<cv::Point2f> pts;
+        std::vector<cv::Rect> boxes;
+        for (size_t i = 0; i < in.clutter_body.size(); ++i) {
+            const auto& q = in.clutter_body[i];
+            if (!std::isfinite(q.x) || !std::isfinite(q.y) || distance <= 0.f)
+                continue;
+            const float along = q.dot(target) / distance;
+            const float across = std::abs(q.x * target.y - q.y * target.x) / distance;
+            const bool neighbour = cv::norm(q - target) <= t.disperse_radius_m;
+            const bool in_lane = along >= 0.f && along <= distance + t.sweep_extra_m &&
+                                 across <= t.sweep_corridor_half_m;
+            if (!neighbour && !in_lane)
+                continue;
+            pts.push_back(q);
+            boxes.push_back(i < in.clutter_boxes.size() ? in.clutter_boxes[i] : cv::Rect{});
+        }
+        pts.push_back(target);
+        boxes.push_back(in.target_box);
+        s.add_ordinary_extra(target);
         int g = 0;
-        if (multi)
-            g = s.eval_group(
-                pts, t.lock_multi_group_min, t.lock_multi_group_min, t.lock_multi_radius_m);
+        if (t.lock_max_visible > 0 && int(pts.size()) > t.lock_max_visible && c.scatter_multi_ok) {
+            const auto overlap_group = targetOverlappingComponent(pts, boxes);
+            if (!overlap_group.empty())
+                g = s.eval_group(overlap_group,
+                                 t.lock_multi_group_min,
+                                 t.lock_multi_group_min,
+                                 t.lock_multi_radius_m);
+        }
         const bool multi_hit = g != 0;
-        if (!g && c.scatter_ok)
+        if (!g && c.scatter_ok && pts.size() > 1)
             g = s.eval_group(pts, t.blind_scatter_min, t.blind_scatter_far_min, -1.f);
         if (g) {
             if (++dense_seen_ < t.sweep_confirm) {
@@ -221,9 +272,8 @@ void SearchStage::scan(const TaskTuning& t,
                 }
             }
         }
-        // Nothing pickable in view but other objects are: they may be wrapping the ordinary
-        // supplies. Plough through the densest group. A far / few-pixel ordinary sighting
-        // is not worth chasing either: it joins the group and is ploughed through.
+        // No selectable cargo: a fresh group can still guide scattering. Small ordinary
+        // targets use normal confirmation/approach; only other weak classes join this fallback.
         if (c.scatter_ok) {
             if (!scatter_idle_since_us)
                 scatter_idle_since_us = now;
@@ -846,7 +896,6 @@ void SearchStage::approach(const TaskTuning& t,
     const uint64_t now = c.now_us;
     const uint64_t elapsed = c.elapsed_us;
     const TaskTuning& t_ = t;
-    const bool scan_ok = c.scan_ok;
     const bool clutter_fresh = c.clutter_fresh;
     const bool sweepOver = c.sweep_over;
     const bool sweepTimeOk = c.sweep_time_ok;
@@ -854,11 +903,9 @@ void SearchStage::approach(const TaskTuning& t,
     const bool sweep_open_disabled_ = c.sweep_open_disabled;
     const int sweep_esc = c.sweep_esc;
     const float target_forward_m = c.target_forward_m;
-    const int frame_raised_ = c.frame_raised;
     const bool first_ = c.first_ordinary;
     const int16_t pitch_cmd_ = c.pitch_cmd;
     float& motion_wz = c.motion.wz_rps;
-    auto& trip_ = c.trip_data.trip_;
     auto& misses_ = c.progress.misses;
     auto& track_close_ = c.progress.track_close;
     auto& travel_ = c.progress.travel;
@@ -873,8 +920,6 @@ void SearchStage::approach(const TaskTuning& t,
     auto& sweep_phase_ = c.search.sweep_phase_;
     auto& sweep_attempts_ = c.search.sweep_attempts_;
     auto& sweep_seen_ = c.search.sweep_seen_;
-    auto& pile_runs_ = c.search.pile_runs_;
-    auto& pile_seen_ = c.search.pile_seen_;
     auto& approach_last_id_ = c.search.approach_last_id_;
     auto& rush_pulse_phase_ = c.search.rush_pulse_phase_;
     auto& rush_pulse_count_ = c.search.rush_pulse_count_;
@@ -890,7 +935,6 @@ void SearchStage::approach(const TaskTuning& t,
     auto& scan_mid_limit_ = c.search.scan_mid_limit_;
     auto& sweep_start_us_ = c.search.sweep_start_us_;
     auto& sweep_t0_us_ = c.search.sweep_t0_us_;
-    auto& pile_cool_until_us_ = c.search.pile_cool_until_us_;
     auto& disperse_cool_until_us_ = c.search.disperse_cool_until_us_;
     auto& sweep_non_supply_active_ = c.search.sweep_non_supply_active_;
     auto& post_disperse_mid_ = c.search.post_disperse_mid_;
@@ -939,9 +983,6 @@ void SearchStage::approach(const TaskTuning& t,
     };
     const auto beginPileFromSweep = [&](const char* why) {
         return s.begin_pile_from_sweep(why);
-    };
-    const auto beginPile = [&](const char* why) {
-        s.begin_pile(why);
     };
     const auto lostTarget = [&] {
         return s.lost_target();
@@ -1213,21 +1254,6 @@ void SearchStage::approach(const TaskTuning& t,
             break;
         }
         reason_ = "approach_target";
-        // Many blocks in the corridor ahead of the frame mouth: carry the pile away and split
-        // the last layer instead of poking at it.
-        if (t_.pile_clear && trip_.total() == 0 && frame_raised_ == 0 &&
-            now >= pile_cool_until_us_ && pile_runs_ < t_.pile_max_runs && scan_ok &&
-            in.heading_valid && std::isfinite(in.heading_rad) && in.corridor_complete &&
-            in.corridor.total() >= t_.pile_corridor_min && in.distance_m <= t_.pile_trigger_max_m) {
-            if (++pile_seen_ < t_.pile_confirm) {
-                reason_ = "pile_confirm";
-                break;
-            }
-            pile_seen_ = 0;
-            beginPile("pile_many_in_frame");
-            break;
-        }
-        pile_seen_ = 0;
         if (in.distance_m <= t_.rush_start_m) {
             if (std::abs(in.heading_error) <= t_.rush_heading_rad) {
                 const bool non_supply = t_.sweep_non_supply && t_.disperse &&

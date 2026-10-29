@@ -62,7 +62,7 @@
     "pixel_align_max_wz": 0.2,
     "pixel_align_tolerance_px": 12.0,
     "pixel_align_restart_px": 24.0,
-    "pixel_align_approach_tolerance_px": 24.0,
+    "pixel_align_approach_tolerance_px": 30.0,
     "pixel_align_approach_restart_px": 40.0,
     "pixel_align_brake_us": 150000,
     "pixel_align_brake_motion_px": 30.0,

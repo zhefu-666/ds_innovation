@@ -133,6 +133,9 @@ struct Rig {
         input.label = task.trip_context_.label_ = label;
         input.distance_m = distance;
         input.heading_error = 0;
+        input.corridor = {};
+        input.corridor.add(input.label);
+        input.corridor_complete = input.corridor_occlusion_free = true;
     }
 
     void noTarget() {

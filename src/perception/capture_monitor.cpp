@@ -38,6 +38,14 @@ void CaptureMonitor::update(PushObservation& in,
                             const std::vector<SegDetection>& detections,
                             uint64_t now,
                             const std::string& capture_label) {
+    in.split_layout_valid = in.image_layout_vertical_dominant = false;
+    in.split_vertical_pairs = in.split_ordinary_count = in.split_ordinary_visible_count = 0;
+    in.split_layout_us = 0;
+    in.capture_scene_valid = in.capture_path_valid = false;
+    in.capture_path_lateral_measured = false;
+    in.capture_scene_us = 0;
+    in.capture_area_px = in.capture_path_px = in.layout_count_region_px = {};
+    in.capture_image_objects.clear();
     in.pixel_grasp_view = in.pixel_grasp_near_view = false;
     in.pixel_grasp_target_valid = in.pixel_grasp_ready = in.pixel_grasp_aligned = false;
     in.pixel_grasp_steering = in.pixel_grasp_error_px = 0;
@@ -55,6 +63,7 @@ void CaptureMonitor::update(PushObservation& in,
     in.target_grasp_range_applicable = false;
     in.target_grasp_range_valid = in.target_grasp_range_inside = false;
     in.target_grasp_range_lateral = in.target_grasp_range_past_rear = false;
+    in.target_grasp_range_lateral_measured = false;
     in.held = {};
     in.held_objects.clear();
     in.captured = false;
@@ -103,15 +112,15 @@ void CaptureMonitor::update(PushObservation& in,
             // At 1280x720 this is Y540 for both FAR->UI120 and UI120->UI140.
             in.pixel_view_handoff_ready = in.target_center_px.y >= .75f * r->image_height_px;
             in.pixel_grasp_target_valid = in.pixel_grasp_view;
-            if (in.pixel_grasp_view) {
-                const float target_x = in.pixel_grasp_near_view ? r->target_center_px.x
-                                                                : r->image_width_px * .5f;
-                const float error = target_x - in.target_center_px.x;
-                in.pixel_grasp_error_px = error;
-                in.pixel_grasp_sample_us = d->timestamp_us;
-                in.pixel_grasp_aligned = std::abs(error) <= c_.pixel_align_tolerance_px;
-                in.pixel_grasp_steering = error / (r->image_width_px * .5f);
-            }
+            // FAR also needs fresh horizontal error before changing to UI120.
+            const float target_x = in.pixel_grasp_near_view ? r->target_center_px.x
+                                                           : r->image_width_px * .5f;
+            const float error = target_x - in.target_center_px.x;
+            in.pixel_grasp_error_px = error;
+            in.pixel_grasp_sample_us = d->timestamp_us;
+            in.pixel_grasp_steering = error / (r->image_width_px * .5f);
+            in.pixel_grasp_aligned = in.pixel_grasp_view &&
+                                    std::abs(error) <= c_.pixel_align_tolerance_px;
             break;
         }
     // These samples describe a 140-degree view, not a ground-contact estimate.
@@ -127,12 +136,17 @@ void CaptureMonitor::update(PushObservation& in,
                 continue;
             const auto center = d->center();
             in.target_grasp_range_valid = true;
+            in.target_grasp_range_lateral_measured = range.lateral_measured;
             in.target_grasp_range_lateral = center.x >= range.area.x1 && center.x <= range.area.x2;
             in.target_grasp_range_past_rear = center.y > range.area.y2;
             in.target_grasp_range_inside = in.target_grasp_range_lateral &&
                                            center.y >= range.area.y1 && center.y <= range.area.y2;
+            // Unmeasured lateral bounds span the image only for inventory bookkeeping;
+            // they must never authorize off-centre closure.
             in.pixel_grasp_ready = in.pixel_grasp_near_view &&
-                                    in.target_grasp_range_inside && center.y >= range.target_center_px.y;
+                                    in.target_grasp_range_inside &&
+                                    (range.lateral_measured || in.pixel_grasp_aligned) &&
+                                    center.y >= range.target_center_px.y;
             break;
         }
         break;
@@ -140,6 +154,33 @@ void CaptureMonitor::update(PushObservation& in,
     const auto labelOf = [&](const SegDetection& d) {
         return d.confidence >= c_.min_confidence ? d.label : std::string("unknown");
     };
+    if (c_.pixel_grasp_enabled && !c_.grasp_center_ranges.empty()) {
+        const auto& ref = c_.grasp_center_ranges.front();
+        in.capture_scene_valid = true;
+        in.capture_scene_us = now; // observation_builder replaces this with source image time
+        for (const auto* d : fresh)
+            in.capture_image_objects.push_back({
+                d->track_id, labelOf(*d), d->box,
+                d->track_id >= 0 && d->confidence >= c_.min_confidence &&
+                d->box.x > 0 && d->box.y > 0 &&
+                d->box.br().x < ref.image_width_px && d->box.br().y < ref.image_height_px});
+        if (in.pixel_grasp_near_view && in.target_grasp_range_valid)
+            for (const auto& range : c_.grasp_center_ranges) {
+                if (range.label != range_label)
+                    continue;
+                // Unmeasured lateral bounds remain conservative full-image bounds.
+                in.capture_area_px = {range.area.x1, range.area.y1,
+                                      range.area.x2 - range.area.x1,
+                                      range.area.y2 - range.area.y1};
+                // Capture-path review starts at Y205; ordinary neighbours use box overlap.
+                // Keep the calibrated closure area and its rear/lateral bounds separate.
+                in.capture_path_px = {range.area.x1, 205.f,
+                                      range.area.x2 - range.area.x1, range.area.y2 - 205.f};
+                in.capture_path_valid = true;
+                in.capture_path_lateral_measured = range.lateral_measured;
+                break;
+            }
+    }
     // At UI140 the supplied box-centre limits replace ground projection for both
     // the capture inventory and post-close image evidence. UI120 never borrows them.
     if (in.pixel_grasp_near_view) {
@@ -152,17 +193,46 @@ void CaptureMonitor::update(PushObservation& in,
             }
             front = std::min(front, range.area.y1);
         }
+        for (const auto& range : c_.grasp_center_ranges)
+            if (range.label == "ordinary_supply") {
+                const float ordinary_left = range.lateral_measured ? range.area.x1 : left;
+                const float ordinary_right = range.lateral_measured ? range.area.x2 : right;
+                in.layout_count_region_px =
+                    {ordinary_left, 180.f, ordinary_right - ordinary_left, range.area.y2 - 180.f};
+            }
         const float corridor_front = in.pixel_grasp_target_valid
                                          ? std::min(front, in.target_center_px.y) : front;
         bool complete = in.pixel_grasp_target_valid, occlusion_free = true, followed = true;
         bool ambiguous = false;
+        std::vector<const SegDetection*> frame_members;
         std::vector<const SegDetection*> members;
         std::map<int, std::vector<cv::Point2f>> next;
         if (view_ != -2 || !in.gripper_closed_observed)
             history_.clear();
         view_ = -2;
+        bool layout_complete = true;
         for (const auto* d : fresh) {
             const auto center = d->center();
+            // Open-frame review, splitting and held counts use full ordinary boxes.
+            // A partly overlapping neighbour remains a conservative inventory candidate.
+            const bool split_ordinary = labelOf(*d) == "ordinary_supply";
+            if (split_ordinary)
+                ++in.split_ordinary_visible_count;
+            const auto range = std::find_if(c_.grasp_center_ranges.begin(), c_.grasp_center_ranges.end(),
+                [&](const GraspCenterRange& r) { return r.label == labelOf(*d); });
+            const bool layout_member = split_ordinary
+                ? in.ordinaryInventoryOverlaps(d->box)
+                : center.x >= left && center.x <= right && center.y >= front &&
+                      (range == c_.grasp_center_ranges.end() ||
+                       (center.y >= range->area.y1 && center.y <= range->area.y2));
+            if (layout_member) {
+                frame_members.push_back(d);
+                if (split_ordinary)
+                    ++in.split_ordinary_count;
+                if (d->confidence < c_.min_confidence || d->box.x < 0 || d->box.y < 0 ||
+                    d->box.br().x >= ref.image_width_px || d->box.br().y >= ref.image_height_px)
+                    layout_complete = false;
+            }
             const bool primary = d->track_id == in.target_id && d->label == in.label;
             const bool swept = primary || (center.x >= left && center.x <= right &&
                                            center.y >= corridor_front);
@@ -179,10 +249,10 @@ void CaptureMonitor::update(PushObservation& in,
             }
             if (!in.gripper_closed_observed)
                 continue;
-            const auto range = std::find_if(c_.grasp_center_ranges.begin(), c_.grasp_center_ranges.end(),
-                [&](const GraspCenterRange& r) { return r.label == labelOf(*d); });
             bool held = false;
-            if (range != c_.grasp_center_ranges.end()) {
+            if (split_ordinary) {
+                held = in.ordinaryInventoryOverlaps(d->box);
+            } else if (range != c_.grasp_center_ranges.end()) {
                 held = center.y >= range->area.y1 && center.y <= range->area.y2 &&
                        (range->lateral_measured
                             ? center.x >= range->area.x1 && center.x <= range->area.x2
@@ -213,6 +283,22 @@ void CaptureMonitor::update(PushObservation& in,
                 if (iou(members[i]->box, members[j]->box) > c_.occlusion_iou &&
                     !(labelOf(*members[i]) == "ordinary_supply" && labelOf(*members[j]) == "ordinary_supply"))
                     occlusion_free = false;
+        int horizontal_pairs = 0;
+        for (size_t i = 0; i < frame_members.size(); ++i)
+            for (size_t j = i + 1; j < frame_members.size(); ++j) {
+                const auto& a = *frame_members[i];
+                const auto& b = *frame_members[j];
+                if (labelOf(a) != "ordinary_supply" && labelOf(b) != "ordinary_supply")
+                    continue;
+                const auto delta = a.center() - b.center();
+                if (std::abs(delta.y) > std::abs(delta.x))
+                    ++in.split_vertical_pairs;
+                else
+                    ++horizontal_pairs;
+            }
+        in.split_layout_valid = layout_complete;
+        in.split_layout_us = now;
+        in.image_layout_vertical_dominant = in.split_vertical_pairs > horizontal_pairs;
         history_ = std::move(next);
         in.hold_observable = in.gripper_closed_observed;
         in.captured = in.hold_observable && in.held.total() > 0 && followed;

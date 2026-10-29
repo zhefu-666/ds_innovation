@@ -22,7 +22,7 @@
     "confidence": 0.5,
     "injured_confidence": 0.25,
     "nms": 0.45,
-    "pose_confidence": 0.25,
+    "pose_confidence": 0.5,
     "pose_keypoint_confidence": 0.5,
     "detect_core_mask": 4,
     "pose_core_mask": 3,

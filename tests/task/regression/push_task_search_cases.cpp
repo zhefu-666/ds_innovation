@@ -1,5 +1,7 @@
 #include "../../support/push_task_sim.hpp"
 #include "push_task_cases.hpp"
+#include "rescue/perception/pixel_selector.hpp"
+#include "rescue/hardware/motion_link.hpp"
 
 void precisionMotionTests() {
     const auto tune = [] {
@@ -1357,5 +1359,239 @@ void approachCases() {
             }
             assert(rejected);
         }
+    }
+}
+
+// Recorded-run regression: a 26px ordinary block at 1280x720 must survive both
+// area ranking and task-level scatter arbitration, including reselecting in SCATTER.
+void ordinarySelectionRegressionTests() {
+    for (bool scatter : {false, true}) {
+        TaskTuning t;
+        t.enable_search_cues = false;
+        t.dense_no_lock = true;
+        t.lock_max_visible = 2;
+        t.weak_target_scatter = true;
+        t.first_burst = true;
+        t.far_pitch_cdeg = t.track_pitch_cdeg = t.intermediate_pitch_cdeg = 500;
+        Sim s(t);
+        s.in.target_valid = false;
+        assert(s.until(PushState::SCAN, 100));
+        if (scatter) {
+            s.task.enter(PushState::SCATTER, s.in.now_us, "test");
+            s.task.search_phase_.scatter_far_ = s.task.search_phase_.scatter_commit_ = true;
+            s.task.search_phase_.sweep_phase_ = 7;
+            s.task.search_phase_.sweep_pitch_ = 500;
+            s.task.search_phase_.sweep_start_us_ = s.in.now_us;
+            s.task.search_phase_.scatter_approach_m_ = 2.f;
+            s.task.search_phase_.scatter_range_ = 2.f;
+        }
+        PixelSelector selector;
+        bool acquired = false, stopped_for_target = false, approach = false;
+        for (int i = 0; i < 100; ++i) {
+            SegDetection d;
+            d.track_id = 13;
+            d.label = "ordinary_supply";
+            d.confidence = .83f;
+            d.box = {600, 280, 26, 26};
+            d.ground_position_valid = d.ground_contact_valid = true;
+            d.body_xy_m = {0.f, 1.73f};
+            d.timestamp_us = s.in.now_us + 50000;
+            selector.syncTaskState(s.task.state_, s.task.trip_context_.target_id_, s.task.targetLabel());
+            const auto chosen = selector.update({d}, {1280, 720}, 500, true,
+                                                d.timestamp_us, false, .5f);
+            acquired = acquired || chosen.locked;
+            s.in.target_valid = chosen.locked;
+            s.in.target_id = chosen.id;
+            s.in.label = d.label;
+            s.in.target_box = d.box;
+            s.in.distance_m = 1.73f;
+            s.in.pixel_mode = chosen.mode;
+            s.in.pixel_locked = chosen.locked;
+            s.in.pixel_ratio_smoothed = chosen.smoothed;
+            s.in.pixel_reason = chosen.reason;
+            s.in.clutter_body = {{1.2f, 1.8f}, {1.22f, 1.82f}, {-.8f, 1.5f}};
+            s.in.clutter_boxes = {{900, 280, 30, 30}, {910, 280, 30, 30}, {200, 280, 30, 30}};
+            s.in.clutter_ts_us = d.timestamp_us;
+            assert(!s.task.weakCandidate(s.in));
+            s.tick();
+            if (s.out.reason == "blind_scatter_target_seen") {
+                stopped_for_target = true;
+                assert(stopped(s.out.motion) && s.out.immediate_motion_stop);
+            }
+            if (s.out.state == PushState::APPROACH) {
+                approach = true;
+                break;
+            }
+            if (!scatter)
+                assert(s.out.state != PushState::SCATTER);
+        }
+        assert(acquired && approach);
+        if (scatter)
+            assert(stopped_for_target);
+    }
+}
+
+void farTargetSmoothingTests() {
+    struct FarRun {
+        static TaskTuning tuning() {
+            TaskTuning t;
+            t.pixel_grasp_enabled = t.frame_open_default = true;
+            t.startup_advance_us = 0;
+            t.far_pitch_cdeg = -3000;
+            t.track_pitch_cdeg = t.intermediate_pitch_cdeg = 0;
+            t.near_pitch_cdeg = 2000;
+            t.approach_speed = .07f;
+            t.min_turn_wz = 0;
+            t.max_wz = .25f;
+            return t;
+        }
+        TaskTuning t = tuning();
+        PushTask task{t};
+        PushObservation in;
+        PushOutput out;
+        MotionVelocityRamp ramp{MotionLinkConfig{}};
+        MotionCommand sent;
+        FarRun() {
+            in.now_us = 1000000;
+            in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+            in.directional_clearance_valid = in.turn_safe = in.arc_safe = true;
+            in.camera_pitch_stable = in.pixel_selection_managed = true;
+            in.camera_pitch_cdeg = t.far_pitch_cdeg;
+            in.target_valid = in.geometry_valid = in.target_region_valid = true;
+            in.target_center_px_valid = in.heading_valid = true;
+            in.target_id = 7;
+            in.label = "ordinary_supply";
+            in.target_center_px = {600, 280};
+            in.distance_m = 1.5f;
+            in.heading_error = .1f;
+            in.pixel_grasp_sample_us = in.now_us;
+            in.gripper_done = true;
+            in.gripper_feedback_open = 1;
+            in.sent_velocity_valid = true;
+            task.update(in);
+            task.enter(PushState::APPROACH, in.now_us, "far_smoothing_regression");
+            task.trip_context_.target_id_ = task.trip_context_.capture_target_id_ = 7;
+            task.trip_context_.label_ = in.label;
+            task.search_phase_.approach_pitch_ = t.far_pitch_cdeg;
+            ramp.accept(sent, in.now_us);
+            for (int i = 0; i < 12; ++i) step();
+            assert(out.reason == "pixel_far_approach" && !out.immediate_motion_stop);
+            assert(std::abs(sent.vx_mps - .07f) < 1e-6f && sent.wz_rps > 0);
+        }
+        void step(bool new_frame = true, uint64_t dt = 25000) {
+            in.now_us += dt;
+            if (new_frame) in.pixel_grasp_sample_us = in.now_us;
+            in.sent_vx_mps = sent.vx_mps;
+            in.sent_wz_rps = sent.wz_rps;
+            out = task.update(in);
+            sent = ramp.next(out.motion, in.now_us, out.immediate_motion_stop ||
+                !in.run || !in.safety_ok || !in.opponent_zone_clear ||
+                out.state == PushState::SAFE_STOP || out.run_status == RunStatus::Fault);
+            ramp.accept(sent, in.now_us);
+        }
+        void missing() {
+            in.target_valid = in.target_center_px_valid = false;
+            in.pixel_grasp_sample_us = 0;
+            in.pixel_reason = "lock_grace_waiting";
+        }
+        void visible() {
+            in.target_valid = in.target_center_px_valid = true;
+            in.pixel_reason = "pixel_ratio_locked";
+        }
+    };
+    for (int missing_frames : {1, 2}) {
+        FarRun s;
+        s.missing();
+        for (int i = 0; i < missing_frames; ++i) {
+            const auto before = s.sent;
+            s.step();
+            assert(stopped(s.out.motion) && !s.out.immediate_motion_stop);
+            assert(s.out.reason == "pixel_far_target_decelerate");
+            assert(s.sent.vx_mps > 0 && s.sent.vx_mps < before.vx_mps);
+            assert(std::abs(before.vx_mps - s.sent.vx_mps - .01f) < 1e-6f);
+            assert(s.sent.wz_rps >= 0 && s.sent.wz_rps < before.wz_rps);
+        }
+        s.visible(); s.step();
+        assert(s.out.reason == "pixel_far_target_reconfirm" && stopped(s.out.motion));
+        const auto before = s.sent;
+        s.step();
+        assert(s.out.reason == "pixel_far_approach" && s.sent.vx_mps > before.vx_mps);
+        assert(std::abs(s.sent.vx_mps - before.vx_mps - .0075f) < 1e-6f);
+    }
+    { // Duplicate images cannot provide the second recovery confirmation.
+        FarRun s; s.missing(); s.step(); s.visible(); s.step();
+        const auto stamp = s.in.pixel_grasp_sample_us;
+        for (int i = 0; i < 3; ++i) {
+            s.step(false);
+            assert(s.in.pixel_grasp_sample_us == stamp && stopped(s.out.motion));
+            assert(s.out.reason == "pixel_far_target_reconfirm");
+        }
+        s.step(); assert(s.out.reason == "pixel_far_approach");
+    }
+    { // A one-frame flash followed by another miss resets the confirmation count.
+        FarRun s; s.missing(); s.step(); s.visible(); s.step();
+        s.missing(); s.step(); s.visible(); s.step();
+        assert(stopped(s.out.motion) && s.out.reason == "pixel_far_target_reconfirm");
+        s.step(); assert(s.out.reason == "pixel_far_approach");
+    }
+    { // Stale or future detection timestamps never count as fresh recovery images.
+        FarRun s; s.missing(); s.step(); s.visible();
+        s.in.pixel_grasp_sample_us = s.in.now_us - 300000;
+        s.step(false); assert(stopped(s.out.motion));
+        s.in.pixel_grasp_sample_us = s.in.now_us + 100000;
+        s.step(false); assert(stopped(s.out.motion));
+        s.step(); assert(stopped(s.out.motion));
+        s.step(); assert(s.out.reason == "pixel_far_approach");
+    }
+    { // Sustained absence decelerates to rest; selector release remains immediate.
+        FarRun s; s.missing();
+        for (int i = 0; i < 12; ++i) {
+            s.step(); assert(stopped(s.out.motion) && !s.out.immediate_motion_stop);
+        }
+        assert(stopped(s.sent));
+        s.in.pixel_released_id = 7; s.step();
+        assert(s.out.target_id == -1 && s.out.immediate_motion_stop && stopped(s.sent));
+        assert(s.task.search_phase_.far_target_recovery_.target_id == -1);
+    }
+    { // A selector-approved re-ID keeps its existing stop and does not inherit confirmations.
+        FarRun s; s.missing(); s.step(); s.visible(); s.step();
+        s.in.target_id = 8; s.in.pixel_rebound_from = 7; s.step();
+        assert(s.out.reason == "pixel_target_rebound" && s.out.target_id == 8);
+        assert(s.out.immediate_motion_stop && stopped(s.sent));
+        assert(!s.task.search_phase_.far_target_recovery_.waiting);
+        s.in.pixel_rebound_from = -1; s.step();
+        assert(s.out.reason == "pixel_far_approach");
+    }
+    for (int mode = 0; mode < 7; ++mode) {
+        FarRun s; s.missing(); s.step();
+        if (mode == 0) s.in.path_safe = false;
+        if (mode == 1) s.in.arc_safe = false;
+        if (mode == 2) s.in.turn_safe = false;
+        if (mode == 3) s.in.opponent_zone_clear = false;
+        if (mode == 4) s.in.run = false;
+        if (mode == 5) s.in.safety_ok = false;
+        if (mode == 6) s.in.pixel_reason = "mixed_pixel_modes";
+        s.step();
+        assert(stopped(s.out.motion) && stopped(s.sent));
+    }
+    for (int mode = 0; mode < 4; ++mode) {
+        FarRun s; s.missing(); s.step();
+        if (mode == 0) s.in.camera_pitch_stable = false;
+        if (mode == 1) { s.in.camera_pitch_cdeg = 0; s.in.pixel_grasp_view = true; }
+        if (mode == 2) {
+            s.in.camera_pitch_cdeg = 2000;
+            s.in.pixel_grasp_view = s.in.pixel_grasp_near_view = true;
+        }
+        if (mode == 3) s.in.pixel_view_handoff_ready = true;
+        s.step(); assert(s.out.immediate_motion_stop && stopped(s.sent));
+    }
+    { // Existing deadline remains an immediate stop even during ordinary deceleration.
+        FarRun s; s.missing(); s.step();
+        s.task.search_phase_.pixel_approach_started_us_ = 1;
+        s.in.now_us = s.t.approach_budget_us;
+        s.task.last_us_ = s.in.now_us;
+        s.step();
+        assert(s.out.reason == "pixel_approach_timeout" && s.out.immediate_motion_stop);
+        assert(stopped(s.sent));
     }
 }

@@ -31,6 +31,51 @@ enum class SearchAction {
     Pile,
     Recover
 };
+// Public search status. Detailed motion phases remain internal implementation steps.
+enum class SearchStatusAction {
+    Scan,
+    LostSearch,
+    Reacquire,
+    Approach,
+    Prepare,
+    ClearPush,
+    TurnAway,
+    Scatter,
+    Pile,
+    Recover
+};
+
+inline SearchStatusAction searchStatusAction(SearchAction action) {
+    switch (action) {
+        case SearchAction::MidReacquire:
+        case SearchAction::NearReacquire:
+            return SearchStatusAction::Reacquire;
+        case SearchAction::MidApproach:
+        case SearchAction::SelectCargo:
+        case SearchAction::CueApproach:
+        case SearchAction::Approach:
+            return SearchStatusAction::Approach;
+        case SearchAction::CuePrepare:
+        case SearchAction::ClearPile:
+        case SearchAction::ClearPause:
+            return SearchStatusAction::ClearPush;
+        case SearchAction::Scan:
+            return SearchStatusAction::Scan;
+        case SearchAction::LostSearch:
+            return SearchStatusAction::LostSearch;
+        case SearchAction::Prepare:
+            return SearchStatusAction::Prepare;
+        case SearchAction::TurnAway:
+            return SearchStatusAction::TurnAway;
+        case SearchAction::Scatter:
+            return SearchStatusAction::Scatter;
+        case SearchAction::Pile:
+            return SearchStatusAction::Pile;
+        case SearchAction::Recover:
+            return SearchStatusAction::Recover;
+    }
+    return SearchStatusAction::Scan;
+}
 enum class CaptureAction {
     Advance,
     LowerFrame,

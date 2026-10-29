@@ -26,8 +26,12 @@ cv::Point2f PushTask::targetBody(TaskTick& tick) {
 }
 
 void PushTask::drive(TaskTick& tick, float vx, float wz, bool pixel_align) {
+    const bool split_reverse = state_ == PushState::ABORT_DROP &&
+                               search_phase_.first_trip_split_.pending &&
+                               t_.pixel_grasp_enabled && vx < 0;
     const bool turn_blocked = tick.in.directional_clearance_valid && wz != 0 &&
-                              !(vx == 0 ? tick.in.turn_safe : (vx > 0 && tick.in.arc_safe));
+                              !(vx == 0 ? tick.in.turn_safe
+                                        : ((vx > 0 || split_reverse) && tick.in.arc_safe));
     if (turn_blocked) {
         // A blocked arc keeps going straight when the straight corridor is verified clear.
         if (!(vx > 0 && tick.forward_ok)) {
@@ -83,10 +87,27 @@ void PushTask::drive(TaskTick& tick, float vx, float wz, bool pixel_align) {
         tick.motion.wz_rps *= t_.inplace_turn_boost;
 }
 
-bool PushTask::pixelAlign(TaskTick& tick, bool strict) {
+bool PushTask::pixelLateralAccepted(const PushObservation& in) const {
+    return in.target_grasp_range_valid && in.target_grasp_range_lateral &&
+           (in.target_grasp_range_lateral_measured || in.pixel_grasp_aligned);
+}
+
+bool PushTask::pixelAlign(TaskTick& tick,
+                          bool strict,
+                          bool hold_position,
+                          float tolerance_override_px) {
     auto& a = pixel_alignment_;
     const auto& in = tick.in;
-    if (!in.pixel_grasp_target_valid || !in.pixel_grasp_sample_us ||
+    tick.immediate_motion_stop = true;
+    // A handoff or accepted position needs rest, not another turn.
+    if (a.holding_position != hold_position) {
+        a.stage = PixelAlignment::Stage::Correct;
+        a.direction = 0;
+        a.holding_position = hold_position;
+    }
+    const bool far_handoff = !in.pixel_grasp_view && in.target_center_px_valid &&
+                             in.pixel_view_handoff_ready;
+    if ((!in.pixel_grasp_target_valid && !far_handoff) || !in.pixel_grasp_sample_us ||
         in.pixel_grasp_sample_us > tick.now ||
         tick.now - in.pixel_grasp_sample_us > t_.frame_timeout_us ||
         !std::isfinite(in.pixel_grasp_error_px)) {
@@ -97,10 +118,14 @@ bool PushTask::pixelAlign(TaskTick& tick, bool strict) {
     const float error = in.pixel_grasp_error_px;
     const float magnitude = std::abs(error);
     const bool approach = !in.pixel_grasp_near_view;
-    const float tolerance = approach ? t_.pixel_align_approach_tolerance_px
-                                     : t_.pixel_align_tolerance_px;
-    const float restart = approach ? t_.pixel_align_approach_restart_px
-                                   : t_.pixel_align_restart_px;
+    const float tolerance = tolerance_override_px > 0 ? tolerance_override_px
+                            : far_handoff             ? 40.f
+                            : approach                ? t_.pixel_align_approach_tolerance_px
+                                                      : t_.pixel_align_tolerance_px;
+    const float restart = tolerance_override_px > 0 ? 2.f * tolerance_override_px
+                          : far_handoff             ? 40.f
+                          : approach                ? t_.pixel_align_approach_restart_px
+                                                    : t_.pixel_align_restart_px;
     const float hold_limit = approach ? restart : tolerance;
     const float sent_vx = in.sent_velocity_valid ? in.sent_vx_mps : last_vx_;
     const float sent_wz = in.sent_velocity_valid ? in.sent_wz_rps : last_wz_;
@@ -116,20 +141,20 @@ bool PushTask::pixelAlign(TaskTick& tick, bool strict) {
     const auto brake = [&] {
         a.stage = PixelAlignment::Stage::Brake;
         a.stopped_since_us = 0;
-        a.within_tolerance = magnitude <= tolerance;
+        a.within_tolerance = hold_position || magnitude <= tolerance;
         a.stable_frames = 0;
         a.stable_since_us = 0;
         reason_ = "pixel_align_brake";
     };
     if (a.stage == PixelAlignment::Stage::Advance) {
-        if (magnitude <= (strict ? tolerance : restart) &&
+        if ((hold_position || magnitude <= (strict ? tolerance : restart)) &&
             (!strict || stopped))
             return true;
         brake();
         return false;
     }
     if (a.stage == PixelAlignment::Stage::Correct) {
-        if (magnitude <= tolerance ||
+        if (hold_position || magnitude <= tolerance ||
             (a.direction && direction != a.direction) ||
             !std::isfinite(sent_vx) || !std::isfinite(sent_wz) ||
             std::abs(sent_vx) > t_.pixel_align_stopped_vx ||
@@ -157,18 +182,23 @@ bool PushTask::pixelAlign(TaskTick& tick, bool strict) {
         // require a fresh, low-drift image window before permitting either direction.
         if (!fresh || in.pixel_grasp_sample_us <= a.stopped_since_us)
             return false;
-        if (magnitude <= tolerance)
+        if (hold_position || magnitude <= tolerance)
             a.within_tolerance = true;
         else if (magnitude > hold_limit)
             a.within_tolerance = false;
         if (!a.stable_frames) {
             a.brake_min_px = a.brake_max_px = error;
+            a.brake_min_y_px = a.brake_max_y_px = in.target_center_px.y;
             a.stable_since_us = in.pixel_grasp_sample_us;
         }
         a.brake_min_px = std::min(a.brake_min_px, error);
         a.brake_max_px = std::max(a.brake_max_px, error);
-        if (a.brake_max_px - a.brake_min_px > t_.pixel_align_brake_motion_px) {
+        a.brake_min_y_px = std::min(a.brake_min_y_px, in.target_center_px.y);
+        a.brake_max_y_px = std::max(a.brake_max_y_px, in.target_center_px.y);
+        if (a.brake_max_px - a.brake_min_px > t_.pixel_align_brake_motion_px ||
+            (hold_position && a.brake_max_y_px - a.brake_min_y_px > t_.pixel_align_brake_motion_px)) {
             a.brake_min_px = a.brake_max_px = error;
+            a.brake_min_y_px = a.brake_max_y_px = in.target_center_px.y;
             a.stable_since_us = in.pixel_grasp_sample_us;
             a.stable_frames = 0;
         }
@@ -184,11 +214,22 @@ bool PushTask::pixelAlign(TaskTick& tick, bool strict) {
         return false; // retain zero on the decision tick before a new direction
     }
     reason_ = "pixel_align_settle";
-    if (!stopped || magnitude > hold_limit) {
+    if (!stopped || (!hold_position && magnitude > hold_limit)) {
         brake();
         return false;
     }
     if (fresh) {
+        if (hold_position) {
+            a.brake_min_px = std::min(a.brake_min_px, error);
+            a.brake_max_px = std::max(a.brake_max_px, error);
+            a.brake_min_y_px = std::min(a.brake_min_y_px, in.target_center_px.y);
+            a.brake_max_y_px = std::max(a.brake_max_y_px, in.target_center_px.y);
+            if (a.brake_max_px - a.brake_min_px > t_.pixel_align_brake_motion_px ||
+                a.brake_max_y_px - a.brake_min_y_px > t_.pixel_align_brake_motion_px) {
+                brake();
+                return false;
+            }
+        }
         if (!a.stable_frames)
             a.stable_since_us = in.pixel_grasp_sample_us;
         ++a.stable_frames;
@@ -362,6 +403,7 @@ int PushTask::evalGroup(TaskTick& tick,
 }
 
 void PushTask::beginScatter(TaskTick& tick, bool far, bool commit, const char* why) {
+    search_phase_.sweep_.resetScatterApproach();
     trip_context_.target_id_ = -1;
     actionProgress().confirmations = 0;
     search_phase_.cue_mode_ = false;
@@ -392,22 +434,6 @@ void PushTask::beginScatter(TaskTick& tick, bool far, bool commit, const char* w
     enter(PushState::SCATTER, tick.now, why);
 }
 
-void PushTask::beginPile(TaskTick& tick, const char* why) {
-    trip_context_.target_id_ = -1;
-    actionProgress().confirmations = 0;
-    search_phase_.cue_mode_ = false;
-    search_phase_.pile_yaw0_ =
-        wrapAngle(tick.in.heading_rad +
-                  tick.in.heading_error); // world bearing of the pile (the target sits in it)
-    search_phase_.pile_phase_ = 0;
-    search_phase_.pile_seen_ = 0;
-    search_phase_.pile_push0_ = -1.f;
-    ++search_phase_.pile_runs_;
-    search_phase_.pile_chain_n_ = 0;
-    enter(PushState::PILE, tick.now, why);
-    search_phase_.pile_phase_us_ = tick.now;
-}
-
 bool PushTask::beginPileFromSweep(
     TaskTick& tick,
     const char* why) { // a disperse sweep that really swung continues in PILE (layer loop)
@@ -422,7 +448,6 @@ bool PushTask::beginPileFromSweep(
     search_phase_.pile_yaw0_ = tick.in.heading_rad;
     search_phase_.pile_phase_ = 7;
     search_phase_.pile_seen_ = 0;
-    search_phase_.pile_push0_ = -1.f;
     search_phase_.pile_chain_n_ = 0;
     search_phase_.sweep_phase_ = 0;
     enter(PushState::PILE, tick.now, why);

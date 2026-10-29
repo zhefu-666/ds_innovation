@@ -236,11 +236,92 @@ void scanDenseGroupDefersWithoutAFreshCluster() {
     f.context.clutter_fresh = true;
     f.tuning.dense_no_lock = true;
     f.tuning.sweep_confirm = 2;
+    f.in.label = "ordinary_supply";
+    f.in.corridor.ordinary = 1;
+    f.in.corridor.dangerous = 1;
+    f.in.corridor_complete = true;
+    f.in.clutter_body = {{.02f, .4f}};
     f.eval_group_now = 1;
     f.tick(SearchAction::Scan, f.in.now_us);
     CHECK(f.scatters.empty());
     CHECK(f.reason == "dense_group_confirm");
     CHECK(f.confirmations == 0);
+}
+
+void scanOnlyOverlappingBoxesEnterMultiVisibleGroup() {
+    const auto run = [](bool overlap) {
+        Fixture f;
+        f.candidate_now = true;
+        f.in.distance_m = .6f;
+        f.context.scatter_ok = true;
+        f.context.scatter_multi_ok = true;
+        f.context.clutter_fresh = true;
+        f.tuning.dense_no_lock = true;
+        f.tuning.lock_max_visible = 1;
+        f.in.label = "ordinary_supply";
+        f.in.corridor.ordinary = 1;
+        f.in.corridor.dangerous = 1;
+        f.in.corridor_complete = true;
+        f.eval_group_now = 1;
+        f.in.clutter_body = {{.02f, .4f}};
+        f.in.clutter_boxes = {cv::Rect(10, 10, 20, 20)};
+        f.in.target_box = overlap ? cv::Rect(20, 10, 20, 20) : cv::Rect(40, 10, 20, 20);
+        f.tick(SearchAction::Scan, f.in.now_us);
+        return f.scatters.empty() ? std::string() : f.scatters.front();
+    };
+    CHECK(run(true) == "near:multi_visible_split");
+    CHECK(run(false) == "near:dense_group_split");
+}
+
+void ordinaryTargetWinsOverUnrelatedGroups() {
+    for (bool complete : {false, true}) {
+        Fixture f;
+        f.candidate_now = true;
+        f.in.target_id = 13;
+        f.in.label = "ordinary_supply";
+        f.in.distance_m = 1.73f;
+        f.in.pixel_ratio_smoothed = .000733507;
+        f.in.corridor.ordinary = 1;
+        f.in.corridor_complete = complete;
+        f.in.corridor_occlusion_free = true;
+        f.in.target_box = {600, 280, 26, 26};
+        f.in.clutter_body = {{1.2f, 1.8f}, {1.21f, 1.81f}, {-.1f, 1.5f}};
+        f.in.clutter_boxes = {{900, 280, 30, 30}, {910, 280, 30, 30}, {500, 280, 30, 30}};
+        f.context.scatter_ok = f.context.scatter_multi_ok = f.context.clutter_fresh = true;
+        f.context.approach_ok = true;
+        f.context.far_y = 4.f;
+        f.tuning.dense_no_lock = true;
+        f.tuning.lock_max_visible = 2;
+        f.best_group = BestGroup{8, 1.8f};
+        f.eval_group_now = 2;
+        f.tick(SearchAction::Scan, f.in.now_us);
+        f.tick(SearchAction::Scan, f.in.now_us + 30000);
+        CHECK(f.scatters.empty());
+        CHECK(f.enters.size() == 1 && f.enters[0] == "APPROACH:target_locked");
+    }
+}
+
+void unrelatedOverlapsCannotBecomeTargetGroup() {
+    Fixture f;
+    f.candidate_now = true;
+    f.in.target_id = 169;
+    f.in.label = "ordinary_supply";
+    f.in.distance_m = .6f;
+    f.in.corridor.ordinary = 1;
+    f.in.corridor.dangerous = 1;
+    f.in.corridor_complete = true;
+    f.in.target_box = {10, 10, 20, 20};
+    // Even a blocked corridor cannot redirect this target to a separate visible pile.
+    f.in.clutter_body = {{1.5f, .4f}, {1.51f, .42f}};
+    f.in.clutter_boxes = {{100, 10, 20, 20}, {110, 10, 20, 20}};
+    f.context.scatter_ok = f.context.scatter_multi_ok = f.context.clutter_fresh = true;
+    f.tuning.dense_no_lock = true;
+    f.tuning.lock_max_visible = 1;
+    f.eval_group_now = 1;
+    f.tick(SearchAction::Scan, f.in.now_us);
+    f.tick(SearchAction::Scan, f.in.now_us + 30000);
+    CHECK(f.scatters.empty());
+    CHECK(f.enters.size() == 1 && f.enters[0] == "APPROACH:target_locked");
 }
 
 void lostSearchTiltsToTheMidViewOnce() {
@@ -386,8 +467,12 @@ int main() {
         {"scanWithoutCandidateSpinsAndClearsTheLock", scanWithoutCandidateSpinsAndClearsTheLock},
         {"scanConfirmsALockAndStartsTheCueApproach", scanConfirmsALockAndStartsTheCueApproach},
         {"scanConfirmsAnOrdinaryLock", scanConfirmsAnOrdinaryLock},
+        {"ordinaryTargetWinsOverUnrelatedGroups", ordinaryTargetWinsOverUnrelatedGroups},
+        {"unrelatedOverlapsCannotBecomeTargetGroup", unrelatedOverlapsCannotBecomeTargetGroup},
         {"scanFarGroupStartsAFarScatter", scanFarGroupStartsAFarScatter},
         {"scanDenseGroupDefersWithoutAFreshCluster", scanDenseGroupDefersWithoutAFreshCluster},
+        {"scanOnlyOverlappingBoxesEnterMultiVisibleGroup",
+         scanOnlyOverlappingBoxesEnterMultiVisibleGroup},
         {"lostSearchTiltsToTheMidViewOnce", lostSearchTiltsToTheMidViewOnce},
         {"lostSearchRescansWhenNothingIsFound", lostSearchRescansWhenNothingIsFound},
         {"lostSearchExhaustsIntoAFault", lostSearchExhaustsIntoAFault},

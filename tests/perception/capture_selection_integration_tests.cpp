@@ -16,7 +16,302 @@ SegDetection object(int id, cv::Rect box, std::string label = "ordinary_supply")
     d.body_xy_m = {0, .13f};
     return d;
 }
+void splitRetreatBoxEvidence() {
+    constexpr uint64_t now = 1000000;
+    auto original = object(7, {300, 80, 60, 60});
+    auto centre = object(8, {610, 0, 60, 60});
+    original.timestamp_us = centre.timestamp_us = now;
+    original.ground_position_valid = original.ground_contact_valid = false;
+    centre.ground_position_valid = centre.ground_contact_valid = false;
+    PushObservation in;
+    applySplitRetreatBox(in, {original, centre}, {1280, 720}, now, .25f, 7);
+    assert(in.split_ordinary_box == original.box && in.split_ordinary_box_us == now);
+    assert(in.split_ordinary_box_id == 7 && in.split_image_width_px == 1280);
+    assert(!in.target_valid && !in.geometry_valid);
+    applySplitRetreatBox(in, {centre}, {1280, 720}, now, .25f, 7);
+    assert(in.split_ordinary_box.y == 0 && in.split_ordinary_box_us == now);
+    for (int invalid = 0; invalid < 6; ++invalid) {
+        auto bad = centre;
+        if (invalid == 0)
+            bad.label = "core_supply";
+        if (invalid == 1)
+            bad.timestamp_us = now - 200001;
+        if (invalid == 2)
+            bad.timestamp_us = now + 1;
+        if (invalid == 3)
+            bad.confidence = .24f;
+        if (invalid == 4)
+            bad.box.width = 0;
+        if (invalid == 5)
+            bad.box.y = -100; // entirely outside, not a top-edge observation
+        applySplitRetreatBox(in, {bad}, {1280, 720}, now, .25f, 7);
+        assert(in.split_ordinary_box.empty() && in.split_ordinary_box_us == 0);
+    }
+    centre.box.y = -1; // detector coordinates crossing the image top are clipped to Y=0
+    applySplitRetreatBox(in, {centre}, {1280, 720}, now, .25f, 7);
+    assert(in.split_ordinary_box.y == 0 && in.split_ordinary_box.height == 59);
+}
+void nearOwnZoneExclusion() {
+    const uint64_t now = 1000000;
+    for (const std::string team : {"blue", "red"}) {
+        auto zone = object(-1, {200, 200, 300, 300}, team + "_safe_zone");
+        zone.timestamp_us = now;
+        zone.ground_position_valid = zone.ground_contact_valid = false;
+        for (const std::string label : {"ordinary_supply", "core_supply", "injured_person"}) {
+            auto cargo = object(11, {140, 250, 30, 30}, label);
+            cargo.timestamp_us = now;
+            const auto excluded = [&](cv::Rect box) {
+                cargo.box = box;
+                return targetsNearOwnZone({cargo, zone}, team, {1000, 1000}, now, .25f);
+            };
+            assert(excluded({140, 250, 30, 30}) == std::vector<int>{11}); // 30 px boundary
+            assert(excluded({139, 250, 30, 30}).empty());                 // 31 px away
+            assert(excluded({250, 140, 30, 30}) == std::vector<int>{11});
+            assert(excluded({250, 531, 30, 30}).empty());
+            assert(excluded({150, 150, 30, 30}) == std::vector<int>{11}); // diagonal < 30
+            assert(excluded({140, 140, 30, 30}).empty());                 // diagonal > 30
+            assert(excluded({180, 250, 30, 30}) == std::vector<int>{11}); // overlap
+            assert(excluded({250, 250, 30, 30}) == std::vector<int>{11}); // inside
+            cargo.box = {280, 500, 60, 60};
+            auto scaled = zone;
+            scaled.box = {400, 400, 600, 600};
+            assert(targetsNearOwnZone({cargo, scaled}, team, {2000, 2000}, now, .25f) ==
+                   std::vector<int>{11});
+            cargo.box = {140, 250, 30, 30};
+            auto enemy = zone;
+            enemy.label = team == "blue" ? "red_safe_zone" : "blue_safe_zone";
+            assert(targetsNearOwnZone({cargo, enemy}, team, {1000, 1000}, now, .25f).empty());
+            assert(targetsNearOwnZone({cargo, enemy, zone}, team, {1000, 1000}, now, .25f) ==
+                   std::vector<int>{11});
+            auto bad = zone;
+            bad.timestamp_us = now - 200001;
+            assert(targetsNearOwnZone({cargo, bad}, team, {1000, 1000}, now, .25f).empty());
+            bad.timestamp_us = now + 1;
+            assert(targetsNearOwnZone({cargo, bad}, team, {1000, 1000}, now, .25f).empty());
+            bad.timestamp_us = now;
+            bad.confidence = .24f;
+            assert(targetsNearOwnZone({cargo, bad}, team, {1000, 1000}, now, .25f).empty());
+            bad = zone;
+            bad.box = {1100, 200, 100, 100};
+            assert(targetsNearOwnZone({cargo, bad}, team, {1000, 1000}, now, .25f).empty());
+            assert(targetsNearOwnZone({cargo, zone}, team, {0, 0}, now, .25f).empty());
+            assert(targetsNearOwnZone({cargo, zone}, "unknown", {1000, 1000}, now, .25f).empty());
+        }
+    }
+    // A late zone veto immediately releases a lock, including relaxed and row modes.
+    for (const std::string label : {"ordinary_supply", "core_supply", "injured_person"}) {
+        PixelSelector selector;
+        selector.setRelax(2);
+        selector.setRow(true);
+        auto near = object(21, {140, 250, 30, 30}, label);
+        auto far = object(22, {800, 250, 10, 10});
+        auto zone = object(-1, {200, 200, 300, 300}, "blue_safe_zone");
+        PixelSelection selected;
+        for (int i = 0; i < 3; ++i) {
+            near.timestamp_us = far.timestamp_us = now + i * 10000;
+            selected = selector.update(
+                {near, far}, {1000, 1000}, 500, true, near.timestamp_us, true, .25f);
+        }
+        assert(selected.locked && selected.id == 21);
+        for (int i = 3; i < 7; ++i) {
+            near.timestamp_us = far.timestamp_us = zone.timestamp_us = now + i * 10000;
+            const auto rejected = targetsNearOwnZone(
+                {near, far, zone}, "blue", {1000, 1000}, near.timestamp_us, .25f);
+            assert(rejected == std::vector<int>{near.track_id});
+            selected = selector.update(
+                {near, far}, {1000, 1000}, 500, true, near.timestamp_us, true, .25f, rejected);
+            assert(selected.id != near.track_id);
+            const auto old = makePushObservation(
+                {near, far}, near.timestamp_us, true, .25f, near.track_id, rejected);
+            assert(!old.target_valid);
+            near.track_id = 23; // tracker re-ID cannot evade the spatial veto
+        }
+        assert(selected.locked && selected.id == far.track_id);
+        near.timestamp_us = zone.timestamp_us = now + 80000;
+        const auto rejected =
+            targetsNearOwnZone({near, zone}, "blue", {1000, 1000}, near.timestamp_us, .25f);
+        assert(
+            !makePushObservation({near}, near.timestamp_us, true, .25f, -1, rejected).target_valid);
+    }
+}
+void persistentTargetTests() {
+    for (int n : {2, 3, 5}) {
+        PixelSelector sel;
+        uint64_t now = 1000000;
+        std::vector<SegDetection> ds;
+        for (int i = 0; i < n; ++i) {
+            auto d = object(i + 1, {80 + i * 160, 300, i ? 40 : 70, i ? 40 : 70});
+            d.body_xy_m = {-.5f + .25f * i, .8f};
+            ds.push_back(d);
+        }
+        auto step = [&] {
+            now += 20000;
+            for (auto& d : ds)
+                d.timestamp_us = now;
+            return sel.update(ds, {1000, 800}, 500, true, now, false, .25f);
+        };
+        step();
+        step();
+        auto out = step();
+        assert(out.locked && out.id == 1);
+        sel.syncTaskTarget(1, "ordinary_supply");
+        sel.setRow(true);
+        for (int i = 0; i < 200; ++i) {
+            for (int j = 0; j < n; ++j)
+                ds[j].box.width = ds[j].box.height = j == 0 ? 35 : (i / 5 % n == j ? 110 : 60);
+            out = step();
+            assert(out.locked && out.id == 1 && out.event == "target_held");
+        }
+        ds[0].ground_contact_valid = ds[0].ground_position_valid = false;
+        assert(step().id == 1);
+        sel.syncTaskTarget(-1, "");
+        assert(!step().locked);
+    }
+    {
+        PixelSelector sel;
+        uint64_t now = 2000000;
+        auto a = object(1, {100, 300, 60, 60});
+        auto b = object(2, {700, 300, 50, 50});
+        auto step = [&](std::vector<SegDetection> ds, uint64_t dt = 20000) {
+            now += dt;
+            for (auto& d : ds)
+                d.timestamp_us = now;
+            return sel.update(ds, {1000, 800}, 500, true, now, false, .25f);
+        };
+        step({a, b});
+        step({a, b});
+        assert(step({a, b}).id == 1);
+        sel.syncTaskTarget(1, a.label);
+        for (int i = 0; i < 14; ++i) {
+            auto out = step({b});
+            assert(!out.locked && out.held_id == 1 && out.released_id == -1);
+        }
+        assert(step({a, b}).id == 1);
+        auto re = a;
+        re.track_id = 9;
+        auto other = a;
+        other.track_id = 10;
+        other.box.x += 20;
+        for (int i = 0; i < 3; ++i) {
+            const auto out = step({re, other, b});
+            assert(!out.locked && out.event == "rebind_ambiguous");
+        }
+        step({re, b});
+        step({re, b});
+        auto out = step({re, b});
+        assert(out.id == 9 && out.rebound_from == 1);
+        sel.syncTaskTarget(1, a.label); // A task guard may delay accepting the rebind.
+        out = step({re, b});
+        assert(out.id == 9 && out.rebound_from == 1 && out.event == "await_task_rebind");
+        sel.syncTaskTarget(9, a.label);
+        for (int i = 0; i < 15; ++i)
+            assert(!step({b}).locked);
+        out = step({b});
+        assert(out.released_id == 9 && out.event == "target_lost_timeout");
+        sel.syncTaskTarget(9, a.label);
+        out = step({b});
+        assert(!out.locked && out.released_id == 9 && out.event == "await_task_release");
+        sel.syncTaskTarget(-1, "");
+        step({b});
+        step({b});
+        out = step({b});
+        assert(out.id == 2 && out.rebound_from == -1);
+        b.timestamp_us = now + 20000;
+        out = sel.update({b}, {1000, 800}, 500, true, now + 20000, false, .25f, {2});
+        assert(!out.locked && out.released_id == 2 && out.event == "target_rejected");
+    }
+    {
+        PixelSelector sel;
+        uint64_t now = 4000000;
+        auto a = object(1, {100, 300, 60, 60});
+        a.body_xy_m = {-.2f, .8f};
+        auto b = object(2, {700, 300, 50, 50});
+        b.body_xy_m = {.4f, .8f};
+        auto step = [&](std::vector<SegDetection> ds, int16_t pitch, bool stable, float yaw) {
+            now += 50000;
+            for (auto& d : ds)
+                d.timestamp_us = now;
+            return sel.update(ds, {1000, 800}, pitch, stable, now, false, .25f, {}, "", yaw);
+        };
+        step({a, b}, 500, true, 0);
+        step({a, b}, 500, true, 0);
+        assert(step({a, b}, 500, true, 0).id == 1);
+        sel.syncTaskTarget(1, a.label);
+        for (int i = 0; i < 8; ++i)
+            assert(!step({}, 2000, false, 0).locked);
+        a.track_id = 9;
+        a.box = {500, 100, 70, 70};
+        const float angle = std::atan2(.2f, .8f) - .1f, range = std::hypot(.2f, .8f);
+        a.body_xy_m = {-range * std::sin(angle), range * std::cos(angle)};
+        step({a, b}, 2000, true, .1f);
+        step({a, b}, 2000, true, .1f);
+        const auto out = step({a, b}, 2000, true, .1f);
+        assert(out.id == 9 && out.rebound_from == 1 && out.event == "view_reacquired");
+    }
+    {
+        PixelSelector sel;
+        uint64_t now = 6000000;
+        auto a = object(1, {100, 300, 60, 60});
+        auto step = [&](int16_t pitch, bool stable) {
+            now += 50000;
+            a.timestamp_us = now;
+            return sel.update({a}, {1000, 800}, pitch, stable, now, false, .25f);
+        };
+        step(500, true);
+        step(500, true);
+        assert(step(500, true).id == 1);
+        step(2000, false);
+        PixelSelection out;
+        for (int i = 0; i < 7; ++i) {
+            out = step(2000, true);
+            assert(!out.locked);
+        }
+        assert(out.released_id == 1 && out.event == "target_lost_timeout");
+        step(2000, true);
+        step(2000, true);
+        assert(step(2000, true).id == 1);
+    }
+}
+void scatterSelectionLifecycle() {
+    PixelSelector selector;
+    auto d = object(13, {600, 280, 26, 26});
+    d.body_xy_m = {0.f, 1.73f};
+    PixelSelection selected;
+    uint64_t now = 2000000;
+    const auto step = [&](PushState state, int target_id) {
+        selector.syncTaskState(state, target_id, "ordinary_supply");
+        d.timestamp_us = now;
+        selected = selector.update({d}, {1280, 720}, -3000, true, now, false, .5f);
+        now += 30000;
+    };
+    step(PushState::SCAN, -1);
+    step(PushState::SCAN, -1);
+    step(PushState::SCAN, -1);
+    assert(selected.locked && selected.id == 13);
+    // Entry clears the old episode once; ongoing scatter reaches three fresh frames.
+    for (int i = 0; i < 10; ++i) {
+        step(PushState::SCATTER, -1);
+        assert(selected.locked == (i >= 2));
+    }
+    step(PushState::SCAN, -1);
+    assert(selected.locked && selected.id == 13);
+    step(PushState::APPROACH, 13);
+    assert(selected.locked && selected.id == 13);
+    step(PushState::PILE, -1);
+    assert(!selected.locked);
+    step(PushState::PILE, -1);
+    assert(!selected.locked);
+    step(PushState::PILE, -1);
+    assert(selected.locked);
+    step(PushState::SCATTER, -1);
+    assert(!selected.locked);
+}
+
 int main() {
+    splitRetreatBoxEvidence();
+    scatterSelectionLifecycle();
+    persistentTargetTests();
+    nearOwnZoneExclusion();
     assert(frameAngle(FrameAction::Open) == 0 && frameAngle(FrameAction::Close) == 20);
     PixelSelector selector;
     auto small = object(1, {10, 10, 10, 10}), large = object(2, {30, 10, 30, 30}),
@@ -52,8 +347,7 @@ int main() {
         }
         assert(p.locked && p.id == 22);
     }
-    { // The lock vanishes (frame occlusion) and a new id shows up seconds later: with a long relock
-      // window the candidate nearest the vanished lock wins over a slightly larger one far away.
+    { // A long disappearance releases the episode; no unbounded nearest-pixel inheritance.
         const auto run = [&](uint64_t window) {
             PixelSelector sel;
             sel.setRelock(window, .10);
@@ -79,7 +373,7 @@ int main() {
             }
             return p.id;
         };
-        assert(run(4000000) == 41 && run(1500000) == 42);
+        assert(run(4000000) == 42 && run(1500000) == 42);
     }
     { // Pile edge: an injured piece on the robot->target line in front of the larger block ranks it
       // behind a clean one; relax levels lift that.
@@ -165,7 +459,7 @@ int main() {
         }
         assert(p.locked && p.id == 8);
         up.injured_upright_rejected = true;
-        for (int i = 3; i < 6; ++i) {
+        for (int i = 3; i < 7; ++i) { // release tick, then three fresh confirmations
             up.timestamp_us = lie.timestamp_us = 800000 + i * 10000;
             p = late.update({up, lie},
                             {100, 100},
@@ -283,7 +577,7 @@ int main() {
         }
         assert(p.locked && p.id == 42);
     }
-    // A challenger must exceed the hysteresis threshold for three consecutive new frames.
+    // A larger challenger must never preempt a valid lock.
     PixelSelector hysteresis;
     small.mask.release();
     large.mask.release();
@@ -299,7 +593,7 @@ int main() {
     large.box = {40, 10, 30, 30};
     assert(rank(360000).id == 1);
     assert(rank(380000).id == 1);
-    assert(rank(400000).id == 2);
+    assert(rank(400000).id == 1);
     assert(!hysteresis.update({small, large}, {100, 100}, 500, true, 410000, false, .25)
                 .locked);         // repeated captured frame
     assert(!rank(800000).locked); // gap breaks continuity
@@ -327,6 +621,19 @@ int main() {
         step(1140000, {re, nb});
         step(1160000, {re, nb});
         assert(step(1180000, {re, nb}).id == 9); // re-IDed cube relocked by position
+    }
+    { // Alternating tracker IDs must keep the pending target by image position.
+        PixelSelector alternating;
+        PixelSelection p;
+        for (int i = 0; i < 3; ++i) {
+            const uint64_t t = 1200000 + i * 10000;
+            auto target = object(10 + i, i == 0 ? cv::Rect{20, 30, 30, 30} : cv::Rect{29, 39, 12, 12});
+            auto neighbour = object(20, {70, 30, i == 1 ? 32 : 10, i == 1 ? 32 : 10});
+            target.timestamp_us = neighbour.timestamp_us = t;
+            p = alternating.update(
+                {target, neighbour}, {100, 100}, 500, true, t, false, .25);
+        }
+        assert(p.locked && p.id == 12);
     }
     FrameView a{500, {{5, 5}, {95, 5}, {95, 95}, {5, 95}}, true, true}, b = a;
     b.pitch_cdeg = 2000;

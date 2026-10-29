@@ -316,7 +316,7 @@ void sweepViewTests() {
                s.task.swing_cap_neg_ >= 99.f && s.task.swing_cap_pos_ >= 99.f);
 #endif
     }
-    { // 有很多目标时不锁定：锁定目标附近成团则进入拆分(SCATTER)而不是APPROACH；关闭开关则照常锁定。
+    { // Only a blocked target corridor lets a local dense group pre-empt approach.
         for (int on = 0; on < 2; ++on) {
             TaskTuning t = base();
             t.sweep_view_cap_mid = true;
@@ -324,6 +324,7 @@ void sweepViewTests() {
             Sim s(t);
             s.in.target_valid = true;
             s.in.distance_m = .45f;
+            s.in.corridor = inv(3); // three supplies cannot be carried together
             bool split = false, approach = false;
             for (int i = 0; i < 400; ++i) {
                 s.in.clutter_body = {{.12f, .50f}, {-.10f, .52f}};
@@ -345,8 +346,7 @@ void sweepViewTests() {
             }
         }
     }
-    { // 只有目标少时才锁定：视野里目标数超过lock_max_visible且成对靠近时开框清扫，不论是否成"紧团"；2个以内照常锁定；冷却期内可选择无视20
-      // s间隔。
+    { // Clean target corridors remain selectable regardless of visible count or sweep cooldown.
         const auto run = [&](int max_visible,
                              bool ignore_gap,
                              bool gap_active,
@@ -382,13 +382,13 @@ void sweepViewTests() {
         auto r = run(0, false, false, three);
         assert(!r.first && r.second); // 关闭：松散三个照常锁定
         r = run(2, false, false, three);
-        assert(r.first && !r.second); // 3个可见 > 2：清扫而不锁定
+        assert(!r.first && r.second); // three visible objects do not invalidate this corridor
         r = run(2, false, false, two);
         assert(!r.first && r.second); // 2个可见：照常锁定
         r = run(2, false, true, three);
         assert(!r.first && r.second); // 冷却期内且不无视间隔：回落到锁定
         r = run(2, true, true, three);
-        assert(r.first && !r.second); // 无视间隔：冷却期内仍清扫
+        assert(!r.first && r.second); // ignoring the gap does not override a clean corridor
     }
     { // 锁定后近处被车框遮挡丢失：原地等待新ID，不立刻进入丢失搜索；新ID出现在原位置附近则改绑；超时仍走原来的丢失流程。
         const auto run = [&](uint64_t hold, bool newid) {
@@ -490,153 +490,19 @@ void pileTests() {
         t.pile_clear = true;
         return t;
     };
-    struct Blk {
-        cv::Point2f p;
-        bool ordinary;
-    };
-    struct R {
-        bool entered = false, ended = false;
-        std::string end;
-        std::set<std::string> reasons;
-        float advanced = 0, cut_yaw = 0, phi_cut = 0, y_measure = 0, y_end = 0;
-    };
-    const auto run = [&](TaskTuning t,
-                         std::vector<Blk> world_rel,
-                         int corridor,
-                         float dist,
-                         int ticks = 2400,
-                         const Blk* tgt = nullptr) {
-        Sim s(t);
+    { // The old dense-corridor entry must not start a metric cut.
+        Sim s(base());
         s.all_ordinary = false;
         s.in.distance_m = .5f;
         assert(s.until(PushState::APPROACH, 80));
-        const float x0 = s.px, y0 = s.py;
-        R r;
-        PushState prev = s.out.state;
-        for (int i = 0; i < ticks && !r.ended; ++i) {
-            s.in.clutter_body.clear();
-            s.in.clutter_ordinary.clear();
-            const float c = std::cos(s.phi), sn = std::sin(s.phi);
-            for (const auto& b : world_rel) {
-                const float dx = x0 + b.p.x - s.px, dy = y0 + b.p.y - s.py;
-                const cv::Point2f q{dx * c + dy * sn, -dx * sn + dy * c};
-                s.in.clutter_body.push_back(q);
-                if (b.ordinary)
-                    s.in.clutter_ordinary.push_back(q);
-            }
-            s.in.clutter_ts_us = s.in.now_us;
-            if (tgt && (s.out.state == PushState::PILE ||
-                        r.entered)) { // locked target kept valid inside PILE, at a fixed world spot
-                const float dx = x0 + tgt->p.x - s.px, dy = y0 + tgt->p.y - s.py;
-                const cv::Point2f q{dx * c + dy * sn, -dx * sn + dy * c};
-                s.in.target_valid = true;
-                s.in.distance_m = std::hypot(q.x, q.y);
-                s.in.heading_error = std::atan2(-q.x, q.y);
-                s.in.label = "ordinary_supply";
-            } else if (s.out.state == PushState::PILE || r.entered) {
-                s.in.target_valid = false;
-            } else {
-                s.in.target_valid = true;
-                s.in.distance_m = dist;
-                s.in.corridor = inv(corridor);
-            }
+        s.in.corridor = inv(3);
+        for (int i = 0; i < 40; ++i) {
             s.tick();
-            if (s.out.state == PushState::PILE) {
-                r.entered = true;
-                r.reasons.insert(s.out.reason);
-                if (s.out.reason == "pile_advance")
-                    r.advanced = s.py - y0;
-                if (s.out.reason == "pile_measure" && r.y_measure == 0)
-                    r.y_measure = s.py;
-                if (s.out.reason == "pile_cut_align" || s.out.reason == "pile_cut_drive") {
-                    r.cut_yaw = s.task.search_phase_.sweep_.pile_cut_yaw_;
-                    r.phi_cut = s.phi;
-                }
-            }
-            if (prev == PushState::PILE && s.out.state != PushState::PILE) {
-                r.ended = true;
-                r.end = s.out.reason;
-                r.y_end = s.py;
-            }
-            prev = s.out.state;
+            assert(s.out.state != PushState::PILE);
         }
-        return r;
-    };
-    // 3个普通物资在框内(超过2个会被走廊规则拒绝) + 1个非普通物资在左侧框内。
-    const std::vector<Blk> pile_left_bad{
-        {{-.12f, .75f}, false}, {{-.05f, .75f}, true}, {{.05f, .75f}, true}, {{.10f, .75f}, true}};
-    std::vector<Blk> pile_right_bad;
-    for (const auto& b : pile_left_bad)
-        pile_right_bad.push_back({{-b.p.x, b.p.y}, b.ordinary});
-    { // 框口走廊>=3：开着框直进0.5 m -> 后退看 -> 量块角度 ->
-      // 向非普通物资一侧的反方向...的最优侧转一个物块视角 -> 切入 -> 后退 -> 回搜索。
-        const auto r = run(base(), pile_left_bad, 3, .5f);
-        assert(r.entered && r.ended);
-        for (const char* k : {"pile_advance",
-                              "pile_view_back",
-                              "pile_measure",
-                              "pile_cut_align",
-                              "pile_cut_drive",
-                              "pile_cut_back"})
-            if (!r.reasons.count(k)) {
-                std::cerr << "missing pile reason " << k << "\n";
-                assert(false);
-            }
-        assert(r.end == "pile_split_done");
-        assert(r.advanced > .47f && r.advanced < .55f);
-        assert(std::abs(r.y_end - r.y_measure) < .08f); // 切入后只退回观察位，不再多退一段
-        // 把左边那个非普通物资筛掉、普通物资全留在框里：向右转一个物块视角(约7.6度)，镜像场景向左。
-        const float turn = r.cut_yaw - 0.f;
-        assert(turn < -.09f && turn > -.2f);
-        const auto m = run(base(), pile_right_bad, 3, .5f);
-        assert(m.end == "pile_split_done" && m.cut_yaw > .09f && m.cut_yaw < .2f);
-    }
-    { // 非普通物资藏在框中间，转一个物块视角还夹着它：默认放弃切；pile_cut_max_steps=3
-      // 时多转几个物块视角，先把框里清成同一类型再切。
-        const std::vector<Blk> deep_bad{
-            {{0.f, .75f}, false}, {{.08f, .75f}, true}, {{.16f, .75f}, true}, {{.24f, .75f}, true}};
-        const auto narrow = run(base(), deep_bad, 3, .5f);
-        assert(narrow.entered && narrow.ended && narrow.end == "pile_cut_no_gain");
-        TaskTuning wide = base();
-        wide.pile_cut_max_steps = 3;
-        const auto w = run(wide, deep_bad, 3, .5f);
-        assert(w.entered && w.ended && w.end == "pile_split_done" &&
-               w.reasons.count("pile_cut_drive"));
-        assert(w.cut_yaw < -.18f); // 向右转了不止一个物块视角(单步约7.6度=.13 rad)
-    }
-    { // 被锁定的普通物资紧贴(4
-      // cm)一个非普通物资：不能把它当成重复物资丢掉，否则簇里只剩非普通物资，误判无增益。
-        const std::vector<Blk> touch{{{-.065f, .75f}, false}, {{.067f, .75f}, false}};
-        const Blk target{{-.107f, .75f}, true};
-        TaskTuning wide = base();
-        wide.pile_cut_max_steps = 3;
-        const auto r = run(wide, touch, 3, .5f, 2400, &target);
-        assert(r.entered && r.ended && r.end == "pile_split_done" && r.cut_yaw > .18f);
-    }
-    { // 默认关闭；走廊<3；目标超出触发距离：都不进入。
-        TaskTuning off = base();
-        off.pile_clear = false;
-        assert(!run(off, pile_left_bad, 3, .5f, 600).entered);
-        assert(!run(base(), pile_left_bad, 2, .5f, 600).entered);
-        assert(!run(base(), pile_left_bad, 3, .9f, 600).entered);
-    }
-    { // 直进之后框里只剩<=2个普通物资：不再多此一举地切，直接回搜索去锁定。
-        const std::vector<Blk> ok{{{-.30f, .75f}, true},
-                                  {{-.05f, .75f}, true},
-                                  {{.10f, .75f}, true},
-                                  {{.30f, .75f}, true}};
-        const auto r = run(base(), ok, 3, .5f);
-        assert(r.entered && r.ended && r.end == "pile_frame_already_ok");
-        assert(!r.reasons.count("pile_cut_drive"));
-    }
-    { // 转一个物块视角也分不开(块都挤在框中间)：不切，也不乱动。
-        const std::vector<Blk> tight{
-            {{-.03f, .75f}, true}, {{0.f, .75f}, true}, {{.03f, .75f}, true}, {{.01f, .78f}, true}};
-        const auto r = run(base(), tight, 3, .5f);
-        assert(r.entered && r.ended && r.end == "pile_cut_no_gain");
     }
     { // PILE chain: pushed-out cluster deeper than one layer -> face, rush in, big-angle turn, back
-      // off, re-measure (capped), then the cut; one layer -> straight to the cut.
+      // off, re-measure (capped), then return to search; one layer also returns to search.
         const auto chain =
             [&](std::vector<cv::Point2f> rel, bool on, int max_rounds, float fov = 0.f) {
                 TaskTuning t = base();
@@ -655,7 +521,6 @@ void pileTests() {
                 s.task.search_phase_.pile_yaw0_ = s.phi;
                 s.task.search_phase_.pile_phase_ = 7;
                 s.task.search_phase_.pile_seen_ = 0;
-                s.task.search_phase_.pile_push0_ = -1.f;
                 s.task.search_phase_.pile_chain_n_ = 0;
                 s.task.search_phase_.pile_phase_us_ = s.in.now_us;
                 std::set<std::string> reasons;
@@ -702,6 +567,7 @@ void pileTests() {
         }
         {
             const auto [rs, end, n] = chain(flat, true, 3);
+            assert(end == "pile_chain_one_layer");
             assert(!rs.count("pile_chain_face") && !rs.count("disperse_rush") &&
                    n == 0); // one layer: no more sweeping
         }
@@ -712,7 +578,8 @@ void pileTests() {
         }
         {
             const auto [rs, end, n] = chain(deep, true, 0);
-            assert(!rs.count("pile_chain_face") && n == 0); // cap 0: measure and cut right away
+            assert(end == "pile_chain_limit");
+            assert(!rs.count("pile_chain_face") && n == 0); // cap 0: return to search without cutting
         }
     }
     { // A swung disperse sweep that ends in APPROACH hands over to PILE (phase 7) only when

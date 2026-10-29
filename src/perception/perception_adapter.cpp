@@ -65,6 +65,87 @@ PushObservation makePushObservation(const std::vector<SegDetection>& detections,
     }
     return in;
 }
+void applySplitRetreatBox(PushObservation& in,
+                          const std::vector<SegDetection>& detections,
+                          cv::Size image_size,
+                          uint64_t now,
+                          float threshold,
+                          int preferred_id) {
+    in.split_ordinary_box = {};
+    in.split_ordinary_box_us = 0;
+    in.split_ordinary_box_id = -1;
+    in.split_image_width_px = image_size.width;
+    if (image_size.width <= 0 || image_size.height <= 0)
+        return;
+    const cv::Rect image(0, 0, image_size.width, image_size.height);
+    const SegDetection* best = nullptr;
+    const auto offset = [&](const SegDetection& d) {
+        return std::abs(d.box.x + .5f * d.box.width - .5f * image_size.width);
+    };
+    for (const auto& d : detections) {
+        if (d.label != "ordinary_supply" || !std::isfinite(d.confidence) ||
+            d.confidence < threshold || d.confidence > 1 || !d.timestamp_us ||
+            d.timestamp_us > now || now - d.timestamp_us > 200000 || d.box.width <= 0 ||
+            d.box.height <= 0 || (d.box & image).empty())
+            continue;
+        const bool preferred = preferred_id >= 0 && d.track_id == preferred_id;
+        const bool best_preferred = best && preferred_id >= 0 && best->track_id == preferred_id;
+        if (!best || (preferred && !best_preferred) ||
+            (preferred == best_preferred && offset(d) < offset(*best)))
+            best = &d;
+    }
+    if (best) {
+        in.split_ordinary_box = best->box & image;
+        in.split_ordinary_box_us = best->timestamp_us;
+        in.split_ordinary_box_id = best->track_id;
+    }
+}
+std::vector<int> targetsNearOwnZone(const std::vector<SegDetection>& detections,
+                                    const std::string& team,
+                                    cv::Size image_size,
+                                    uint64_t now,
+                                    float threshold) {
+    std::vector<int> rejected;
+    if ((team != "blue" && team != "red") || image_size.width <= 0 || image_size.height <= 0)
+        return rejected;
+    const cv::Rect image(0, 0, image_size.width, image_size.height);
+    const double gap = kTargetZoneGapImageFrac * std::min(image_size.width, image_size.height);
+    const auto usable = [&](const SegDetection& d) {
+        return std::isfinite(d.confidence) && d.confidence >= threshold && d.confidence <= 1 &&
+               d.timestamp_us && now >= d.timestamp_us && now - d.timestamp_us <= 200000 &&
+               d.box.width > 0 && d.box.height > 0;
+    };
+    std::vector<cv::Rect> zones;
+    for (const auto& d : detections)
+        if (d.label == team + "_safe_zone" && usable(d)) {
+            const auto box = d.box & image;
+            if (!box.empty())
+                zones.push_back(box);
+        }
+    if (zones.empty())
+        return rejected;
+    for (const auto& d : detections) {
+        const auto kind = targetKind(d.label);
+        if ((kind != TargetKind::ORDINARY && kind != TargetKind::CORE &&
+             kind != TargetKind::INJURED) ||
+            d.track_id < 0 || !usable(d))
+            continue;
+        const auto box = d.box & image;
+        if (box.empty())
+            continue;
+        for (const auto& zone : zones) {
+            const double dx =
+                std::max({0, box.x - (zone.x + zone.width), zone.x - (box.x + box.width)});
+            const double dy =
+                std::max({0, box.y - (zone.y + zone.height), zone.y - (box.y + box.height)});
+            if (std::hypot(dx, dy) <= gap) {
+                rejected.push_back(d.track_id);
+                break;
+            }
+        }
+    }
+    return rejected;
+}
 bool applyZoneDetectionSight(PushObservation& in,
                              const std::vector<SegDetection>& detections,
                              const std::string& team, cv::Size image_size,

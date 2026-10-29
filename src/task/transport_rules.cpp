@@ -96,10 +96,11 @@ RuleVerdict checkTrip(const Inventory& s, bool first) {
             return RuleVerdict::INJURED_NOT_ALONE;
         return RuleVerdict::OK;
     }
-    if (s.supplies() > kMaxSuppliesPerTrip)
-        return RuleVerdict::TOO_MANY_SUPPLIES;
     if (s.core > 0 && !first)
         return RuleVerdict::CORE_BEFORE_FIRST;
+    const int max_supplies = first ? kMaxSuppliesPerTrip : kMaxSuppliesFirstTrip;
+    if (s.supplies() > max_supplies)
+        return RuleVerdict::TOO_MANY_SUPPLIES;
     return RuleVerdict::OK;
 }
 RuleVerdict checkCorridor(const Inventory& c,

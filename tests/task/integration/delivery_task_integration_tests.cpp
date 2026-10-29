@@ -189,7 +189,7 @@ void scoringTests() {
         assert(rig.task.transport_phase_.delivery_visual_ && !rig.task.fault_);
         rig.stationaryOpen();
         assert(rig.output.phase == TaskPhase::Search &&
-               rig.output.search_action == SearchAction::TurnAway);
+               rig.output.search_action == SearchStatusAction::TurnAway);
         assert(rig.output.delivery_expected == 2 && rig.output.delivery_credited == 2 &&
                rig.output.delivery_visual);
         assert(!rig.output.navigation_requested);

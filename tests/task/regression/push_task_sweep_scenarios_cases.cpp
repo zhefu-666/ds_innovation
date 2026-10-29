@@ -304,59 +304,22 @@ void sweepTriggerCases() {
             assert(startsMix(1) == 1);
         } // one ordinary inside the cluster is enough
     }
-    { // 普通物资只有很少像素（远/小）：不追，较短时间后直接冲入打散；像素足够大则正常锁定；太远不触发；对准途中看到像素足够的才中止。
-        TaskTuning t;
-        t.enable_search_cues = false;
-        const auto mk = [&](float ratio, float dist, Sim& s) {
-            s.in.target_valid = true;
-            s.in.distance_m = dist;
-            s.in.pixel_mode = "box_area";
-            s.in.pixel_ratio_smoothed = s.in.pixel_ratio_raw = ratio;
-        };
-        const auto first = [&](Sim& s, const char* why, int ticks) {
-            for (int i = 0; i < ticks; ++i) {
-                s.tick();
-                if (s.out.reason == why)
-                    return i;
+    { // Small ordinary supplies follow normal approach at both near and far ranges.
+        for (float ratio : {.000733507f, .002f, .006f}) {
+            for (float distance : {.9f, 1.8f}) {
+                TaskTuning t;
+                t.enable_search_cues = false;
+                Sim s(t);
+                s.in.distance_m = distance;
+                s.in.pixel_mode = "box_area";
+                s.in.pixel_ratio_smoothed = s.in.pixel_ratio_raw = ratio;
+                assert(!s.task.weakCandidate(s.in));
+                assert(s.until(PushState::APPROACH, 100));
+                assert(s.visited.count(PushState::SCATTER) == 0);
             }
-            return -1;
-        };
-        {
-            Sim s(t);
-            mk(.002f, .9f, s);
-            assert(first(s, "blind_scatter_start", 400) >= 0);
-            assert(first(s, "blind_scatter_done", 3000) >= 0);
-        }
-        {
-            Sim s(t);
-            mk(.006f, .9f, s);
-            assert(first(s, "blind_scatter_start", 300) < 0 && s.out.state == PushState::APPROACH);
-        }
-        {
-            Sim s(t);
-            mk(.002f, 1.8f, s);
-            assert(first(s, "blind_scatter_start", 300) < 0);
-        }
-        {
-            TaskTuning tw = t;
-            tw.weak_target_scatter = false;
-            Sim s(tw);
-            mk(.002f, .9f, s);
-            assert(first(s, "blind_scatter_start", 300) < 0);
-        }
-        {
-            Sim s(t);
-            mk(.002f, .9f, s);
-            s.in.heading_error = .6f;
-            assert(first(s, "blind_scatter_start", 400) >= 0);
-            s.tick();
-            assert(s.out.state == PushState::SCATTER && s.out.reason == "blind_scatter_align");
-            mk(.006f, .9f, s);
-            assert(first(s, "blind_scatter_target_seen", 200) >= 0);
         }
     }
-    { // 很远(>0.8 m)的锁定不可信：不论群还是单个锁定都直接前驱(不被远处的锁定打断)；<=0.8
-      // m恢复原决策。
+    { // Far ordinary targets stay selectable; groups still guide search without a target.
         TaskTuning t;
         t.enable_search_cues = false;
         t.blind_scatter_max_y_m = .5f;
@@ -395,11 +358,11 @@ void sweepTriggerCases() {
         const std::vector<cv::Point2f> grp{{.20f, 2.30f}, {-.25f, 2.60f}};
         {
             const R r = run(true, 2.5f, grp, 400);
-            assert(r.group && r.approach && !r.seen);
+            assert(!r.group && !r.approach && r.chase);
         }
         {
             const R r = run(true, 2.5f, {}, 400);
-            assert(r.group && r.approach && !r.seen);
+            assert(!r.group && !r.approach && r.chase);
         }
         {
             const R r = run(true, .7f, {{.20f, .60f}, {-.25f, .80f}}, 400);
@@ -414,7 +377,7 @@ void sweepTriggerCases() {
             assert(!r.far_start && !r.group);
         }
     }
-    { // 单个远处锁定(世界固定，杂物视图过期)：直接前驱，锁定进入0.5 m窗口后交给正常APPROACH，不扫。
+    { // A distant ordinary target enters normal approach even without a clutter group.
         TaskTuning t;
         t.enable_search_cues = false;
         t.blind_scatter_max_y_m = .5f;
@@ -444,9 +407,9 @@ void sweepTriggerCases() {
             if (s.out.state == PushState::APPROACH)
                 chase = true;
         }
-        assert(far && chase && !near_group);
+        assert(!far && chase && !near_group);
     }
-    { // 前驱途中群里的普通物资锁定不打断：群进入0.5 m窗口后直接扫(near_group)，不回单目标追踪。
+    { // A clean ordinary target wins over a nearby group before scatter starts.
         TaskTuning t;
         t.enable_search_cues = false;
         t.blind_scatter_max_y_m = .5f;
@@ -461,7 +424,7 @@ void sweepTriggerCases() {
         const std::vector<cv::Point2f> world{
             {x0 + .0f, y0 + 1.90f}, {x0 + .08f, y0 + 1.98f}, {x0 - .07f, y0 + 1.84f}};
         bool far = false, near_group = false, seen = false, chase = false, done = false;
-        for (int i = 0; i < 3000 && !done; ++i) {
+        for (int i = 0; i < 3000 && !done && !chase; ++i) {
             const float c = std::cos(s.phi), sn = std::sin(s.phi);
             s.in.clutter_body.clear();
             for (const auto& w : world) {
@@ -488,7 +451,7 @@ void sweepTriggerCases() {
             if (near_group && s.out.reason == "blind_scatter_done")
                 done = true;
         }
-        assert(far && near_group && !seen && !chase && done);
+        assert(!far && !near_group && !seen && chase && !done);
     }
     { // 开局首次远距离接近(整场一次)：首个远群前驱用高速、剩余0.35
       // m降回常态；随后首次近距打散用高转速摆框；之后的远驱/打散都是常态；总开关关闭则全程常态。
@@ -525,7 +488,7 @@ void sweepTriggerCases() {
                     s.in.clutter_body.push_back({dx * c + dy * sn, -dx * sn + dy * c});
                 }
                 const cv::Point2f lk = s.in.clutter_body[0];
-                s.in.target_valid = lk.y > .1f;
+                s.in.target_valid = false; // group-only fallback, no confirmed cargo target
                 s.in.distance_m = std::hypot(lk.x, lk.y);
                 s.in.heading_error = std::atan2(-lk.x, lk.y);
                 s.in.clutter_ts_us = s.in.now_us;
@@ -619,31 +582,20 @@ void sweepTriggerCases() {
             const B a = runGroup(s);
             assert(a.done && !a.fast && !a.burst_swing && a.plain_swing);
         }
-        { // 远处少像素锁定反复靠近(approach_max次)：只有第一次靠近是高速。
-            const auto mk = [&](float ratio, float dist, Sim& s) {
-                s.in.target_valid = true;
-                s.in.distance_m = dist;
-                s.in.pixel_mode = "box_area";
-                s.in.pixel_ratio_smoothed = s.in.pixel_ratio_raw = ratio;
-            };
+        { // A small ordinary target uses normal approach, never the opening burst.
             Sim s(t);
-            mk(.002f, 1.1f, s);
-            int fast_stints = 0, slow_stints = 0;
-            std::string prev;
-            float max_slow = 0;
-            for (int i = 0; i < 4000; ++i) {
+            s.in.target_valid = true;
+            s.in.distance_m = 1.1f;
+            s.in.pixel_mode = "box_area";
+            s.in.pixel_ratio_smoothed = s.in.pixel_ratio_raw = .002f;
+            bool acquired = false;
+            for (int i = 0; i < 100 && !acquired; ++i) {
                 s.tick();
-                const std::string& r = s.out.reason;
-                if (r == "first_burst_approach" && prev != r)
-                    ++fast_stints;
-                if (r == "blind_scatter_approach") {
-                    max_slow = std::max(max_slow, s.out.motion.vx_mps);
-                    if (prev != r && fast_stints >= 1)
-                        ++slow_stints;
-                }
-                prev = r;
+                assert(s.out.state != PushState::SCATTER);
+                assert(s.out.reason != "first_burst_approach");
+                acquired = s.out.state == PushState::APPROACH;
             }
-            assert(fast_stints == 1 && max_slow <= .4f + 1e-4f);
+            assert(acquired);
         }
         { // 普通锁定先出现(没有远群前驱)：不触发高速接近；之后的首个近距打散也是常态转速。
             Sim s = newSim(t);
@@ -765,56 +717,30 @@ void sweepTriggerCases() {
             assert(sweep && s.out.state == PushState::SCATTER);
         }
     }
-    { // 远处(0.5~1.4
-      // m)的少像素普通物资：先低速靠近，再从近距离触发冲入打散；不超过常态速度；靠近次数有上限。
-        TaskTuning t;
-        t.enable_search_cues = false;
-        t.blind_scatter_max_y_m = .5f;
-        t.max_speed = .4f;
-        t.approach_speed = .4f;
-        const auto mk = [&](float ratio, float dist, Sim& s) {
-            s.in.target_valid = true;
-            s.in.distance_m = dist;
-            s.in.pixel_mode = "box_area";
-            s.in.pixel_ratio_smoothed = s.in.pixel_ratio_raw = ratio;
-        };
-        {
-            Sim s(t);
-            mk(.002f, 1.1f, s);
-            bool far_start = false, approach = false, approached = false, start = false;
-            float max_vx = 0;
-            for (int i = 0; i < 3000 && !approached; ++i) {
-                s.tick();
-                if (s.out.reason == "blind_scatter_far_start")
-                    far_start = true;
-                if (s.out.reason == "blind_scatter_approach") {
-                    approach = true;
-                    max_vx = std::max(max_vx, s.out.motion.vx_mps);
+    { // Small ordinary supplies approach at normal speed at both near and far distances.
+        for (float distance : {.45f, 1.1f}) {
+            for (int scatter_approaches : {0, 2}) {
+                TaskTuning t;
+                t.enable_search_cues = false;
+                t.blind_scatter_max_y_m = .5f;
+                t.blind_scatter_approach_max = scatter_approaches;
+                t.max_speed = t.approach_speed = .4f;
+                Sim s(t);
+                s.in.target_valid = true;
+                s.in.distance_m = distance;
+                s.in.pixel_mode = "box_area";
+                s.in.pixel_ratio_smoothed = s.in.pixel_ratio_raw = .002f;
+                bool approach = false;
+                float max_vx = 0;
+                for (int i = 0; i < 40; ++i) {
+                    s.tick();
+                    assert(s.out.state != PushState::SCATTER);
+                    if (s.out.state == PushState::APPROACH) {
+                        approach = true;
+                        max_vx = std::max(max_vx, s.out.motion.vx_mps);
+                    }
                 }
-                if (s.out.reason == "blind_scatter_start")
-                    start = true;
-                if (s.out.reason == "blind_scatter_approached")
-                    approached = true;
-            }
-            assert(far_start && approach && approached && !start && max_vx > 0 &&
-                   max_vx <= .4f + 1e-4f && s.out.state == PushState::SCAN);
-            mk(.002f, .45f, s);
-            for (int i = 0; i < 400 && !start; ++i) {
-                s.tick();
-                if (s.out.reason == "blind_scatter_start")
-                    start = true;
-            }
-            assert(start);
-        }
-        {
-            TaskTuning tn = t;
-            tn.blind_scatter_approach_max = 0;
-            Sim s(tn);
-            mk(.002f, 1.1f, s);
-            for (int i = 0; i < 600; ++i) {
-                s.tick();
-                assert(s.out.reason != "blind_scatter_far_start" &&
-                       s.out.reason != "blind_scatter_approach");
+                assert(approach && max_vx > 0 && max_vx <= .4f + 1e-4f);
             }
         }
     }
@@ -1278,7 +1204,7 @@ void corridorSweepCases() {
                     s.in.clutter_body.push_back({dx * c + dy * sn, -dx * sn + dy * c});
                 }
                 const cv::Point2f lk = s.in.clutter_body[0];
-                s.in.target_valid = lk.y > .1f;
+                s.in.target_valid = false; // group-only fallback, no confirmed cargo target
                 s.in.distance_m = std::hypot(lk.x, lk.y);
                 s.in.heading_error = std::atan2(-lk.x, lk.y);
                 s.in.clutter_ts_us = s.in.now_us;
@@ -1329,7 +1255,7 @@ void corridorSweepCases() {
             assert(whole <= double(t.sweep_op_budget_us) / 1e6 + .2 && whole >= far_part + 2.3);
         }
         // 确认等待：普通物资锁定(2.5
-        // m)+远群。默认等待内由3帧确认的单目标追踪优先于2帧群决策；等待为0则回到群追。
+        // m)+远群。普通目标始终正常确认，打散等待为0也不能抢占。
         struct Cf {
             bool group = false, approach = false, seen = false;
             uint64_t t_group = 0;
@@ -1369,15 +1295,15 @@ void corridorSweepCases() {
             TaskTuning z = ct;
             z.sweep_confirm_wait_us = 0;
             const Cf c = confirm(z, false, false);
-            assert(c.group);
+            assert(c.approach && !c.group);
         }
-        { // 目标ID来回跳(永远凑不够3帧)：等待有界，约1.2 s后仍交给群决策，不无限挂起。
+        { // Unconfirmed changing IDs cannot start either a cargo approach or a far sweep.
             const Cf c = confirm(ct, true, false);
-            assert(c.group && c.t_group >= 900000 && c.t_group <= 2500000);
+            assert(!c.group && !c.approach);
         }
-        { // 开局首次远驱(first_burst且未用过)不被确认等待拦住。
+        { // Opening burst does not override ordinary-target confirmation.
             const Cf c = confirm(ct, true, true);
-            assert(c.group && c.t_group <= 500000);
+            assert(!c.group && !c.approach);
         }
     }
 }

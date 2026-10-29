@@ -18,7 +18,7 @@ void rulesTests() {
     assert(a.ordinary == 1 && a.core == 1 && a.unknown == 1 && a.supplies() == 2 && a.total() == 3);
     assert(checkTrip({}, true) == RuleVerdict::EMPTY);
     assert(checkTrip(inv(1), false) == RuleVerdict::OK &&
-           checkTrip(inv(2), false) == RuleVerdict::OK);
+           checkTrip(inv(2), false) == RuleVerdict::TOO_MANY_SUPPLIES);
     assert(checkTrip(inv(3), false) == RuleVerdict::TOO_MANY_SUPPLIES);
     assert(checkTrip(inv(4), true) == RuleVerdict::TOO_MANY_SUPPLIES);
     assert(checkTrip(inv(2, 2), true) == RuleVerdict::TOO_MANY_SUPPLIES);
@@ -48,9 +48,171 @@ void rulesTests() {
 }
 
 void captureTests() {
+    // A full ordinary box touching Y180 counts in both split and held inventory.
+    {
+        CaptureConfig cfg;
+        cfg.pixel_grasp_enabled = true;
+        cfg.grasp_center_ranges = {
+            {"ordinary_supply", 2000, 1280, 720, {0,226,1279,489}, {647.5f,337}, false},
+            {"core_supply", 2000, 1280, 720, {500,226,800,489}, {650,337}, true}};
+        CaptureMonitor monitor(cfg);
+        PushObservation in;
+        in.now_us = 1000000;
+        in.camera_pitch_cdeg = 2000;
+        in.camera_pitch_stable = in.gripper_closed_observed = true;
+        in.target_valid = true; in.target_id = 1; in.label = "ordinary_supply";
+        SegDetection a, b;
+        a.track_id = 1; b.track_id = 2;
+        a.label = b.label = "ordinary_supply";
+        a.confidence = b.confidence = .95f;
+        a.timestamp_us = b.timestamp_us = in.now_us;
+        a.box = {600,350,80,80};
+        for (int y : {139,140,163,173,179,180,193,203,220}) {
+            b.box = {600,y-40,80,80};
+            monitor.update(in, {a,b}, in.now_us, in.label);
+            assert(in.split_layout_valid);
+            // For these 80px boxes, centre Y140 touches; Y139 is fully outside.
+            const bool overlaps = y >= 140;
+            assert(in.split_ordinary_count == (overlaps ? 2 : 1));
+            assert(in.image_layout_vertical_dominant == overlaps);
+            assert(in.held.ordinary == (overlaps ? 2 : 1));
+            assert(in.corridor.ordinary == 1);
+        }
+    }
+
+    { // Layout uses frame centres, not single-box aspect ratios or remote objects.
+        CaptureConfig config;
+        config.pixel_grasp_enabled = true;
+        config.grasp_center_ranges = {
+            {"ordinary_supply",2000,1280,720,{0,226,1279,489},{647.5f,337},false},
+            {"core_supply",2000,1280,720,{268.5f,236,1017,555},{647.5f,337}}};
+        CaptureMonitor monitor(config);
+        PushObservation in;
+        in.camera_pitch_cdeg = 2000;
+        in.camera_pitch_stable = true;
+        uint64_t now = 1000000;
+        auto box = [&](int id, int x, int y, std::string label = "ordinary_supply") {
+            SegDetection d;
+            d.track_id = id; d.label = label; d.confidence = .95f;
+            d.box = {x - 20, y - 20, 40, 40}; d.timestamp_us = now;
+            return d;
+        };
+        auto a = box(1,640,260), b = box(2,645,440);
+        monitor.update(in,{a,b},now);
+        assert(in.split_layout_valid && in.image_layout_vertical_dominant && in.split_vertical_pairs == 1);
+        // Lock loss while swinging must not hide the enclosing frame inventory.
+        assert(!in.target_valid);
+        b = box(2,820,265);
+        monitor.update(in,{a,b},now);
+        assert(in.split_layout_valid && !in.image_layout_vertical_dominant && in.split_vertical_pairs == 0);
+        b = box(2,640,440,"core_supply");
+        monitor.update(in,{a,b},now);
+        assert(in.image_layout_vertical_dominant && in.split_vertical_pairs == 1);
+        b.box.y = 60; // outside the frame; no longer part of the column
+        monitor.update(in,{a,b},now);
+        assert(in.split_layout_valid && in.split_vertical_pairs == 0);
+        b = box(2,640,440); b.confidence = .2f;
+        monitor.update(in,{a,b},now);
+        assert(!in.split_layout_valid);
+        monitor.update(in,{a},now + 300000);
+        // An empty fresh image is distinct from cached detections; runtime supplies image time.
+        assert(in.split_layout_valid && in.split_vertical_pairs == 0);
+        in.camera_pitch_stable = false;
+        monitor.update(in,{a},now);
+        assert(!in.split_layout_valid && in.split_layout_us == 0);
+        in.camera_pitch_stable = true; in.camera_pitch_cdeg = 0;
+        monitor.update(in,{a},now);
+        assert(!in.split_layout_valid);
+    }
+
+    { // A different candidate cannot overwrite the accepted task target.
+        TaskTuning t;
+        t.pixel_grasp_enabled = true;
+        t.startup_advance_us = 0;
+        t.track_pitch_cdeg = t.intermediate_pitch_cdeg = 0;
+        PushTask task(t);
+        PushObservation in;
+        in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+        in.target_valid = in.pixel_grasp_view = in.pixel_grasp_target_valid = true;
+        in.pixel_selection_managed = in.camera_pitch_stable = true;
+        in.camera_pitch_cdeg = 0;
+        in.target_id = 7;
+        in.label = "ordinary_supply";
+        in.now_us = 1000000;
+        task.update(in);
+        task.enter(PushState::MID_APPROACH, in.now_us, "target_lock_regression");
+        auto step = [&] {
+            in.now_us += 20000;
+            in.pixel_grasp_sample_us = in.now_us;
+            in.pixel_grasp_error_px = 80;
+            in.pixel_grasp_steering = .125f;
+            return task.update(in);
+        };
+        auto out = step();
+        assert(out.target_id == 7);
+        in.target_id = 8;
+        for (int i = 0; i < 20; ++i) {
+            out = step();
+            assert(out.target_id == 7 && stopped(out.motion) &&
+                   out.reason == "pixel_target_identity_wait");
+        }
+        in.target_valid = in.pixel_grasp_target_valid = false;
+        out = step();
+        assert(out.target_id == 7 && stopped(out.motion));
+        in.target_valid = in.pixel_grasp_target_valid = true;
+        in.pixel_rebound_from = 7;
+        out = step();
+        assert(out.target_id == 8 && stopped(out.motion) && out.reason == "pixel_target_rebound");
+        in.pixel_rebound_from = -1;
+        out = step();
+        assert(out.target_id == 8);
+        in.target_valid = in.pixel_grasp_target_valid = false;
+        in.pixel_released_id = 8;
+        out = step();
+        assert(out.target_id == -1 && stopped(out.motion) && out.immediate_motion_stop);
+        assert(task.search_phase_.pixel_approach_started_us_ == 0);
+        in.pixel_released_id = -1;
+        in.target_valid = in.pixel_grasp_target_valid = true;
+        in.target_id = 9;
+        out = step();
+        assert(out.target_id == 9);
+        // The screenshot's FAR handoff branch must obey the same identity rule.
+        task.enter(PushState::SCAN, in.now_us, "far_identity_regression");
+        in.pixel_grasp_view = false;
+        in.target_center_px_valid = in.pixel_view_handoff_ready = true;
+        in.camera_pitch_cdeg = t.far_pitch_cdeg;
+        in.target_id = 10;
+        out = step();
+        assert(out.target_id == 9 && stopped(out.motion) &&
+               out.reason == "pixel_target_identity_wait");
+        in.target_id = 9;
+        in.pixel_grasp_view = true;
+        in.pixel_grasp_near_view = true;
+        in.camera_pitch_cdeg = t.near_pitch_cdeg;
+        in.gripper_done = true;
+        in.gripper_feedback_open = 1;
+        task.enter(PushState::PREPARE, in.now_us, "prepare_identity_regression");
+        in.target_id = 10;
+        in.pixel_rebound_from = 9;
+        out = step();
+        assert(out.target_id == 10 && stopped(out.motion) && out.reason == "pixel_target_rebound");
+        in.pixel_rebound_from = -1;
+        task.enter(PushState::RUSH, in.now_us, "capture_identity_regression");
+        in.target_id = 11;
+        in.pixel_rebound_from = 10;
+        out = step();
+        assert(out.target_id == 11 && stopped(out.motion) && out.reason == "pixel_target_rebound");
+        in.pixel_rebound_from = -1;
+        in.pixel_released_id = 11;
+        in.target_valid = false;
+        out = step();
+        assert(out.target_id == -1 && stopped(out.motion) && out.state == PushState::CAPTURE_FAIL);
+    }
+
     { // Pure observations: no devices. Exercise the approved centering controller.
         TaskTuning t;
         t.pixel_grasp_enabled = true;
+        t.approach_budget_us = 60000000; // long controller sequence; deadline tested separately
         t.require_multi_view = false;
         t.startup_advance_us = 0;
         t.track_pitch_cdeg = t.intermediate_pitch_cdeg = 0;
@@ -85,7 +247,8 @@ void captureTests() {
         };
         step(80); assert(std::abs(out.motion.wz_rps - .20f) < 1e-6f);
         step(50); assert(std::abs(out.motion.wz_rps - .20f) < 1e-6f);
-        step(30); assert(std::abs(out.motion.wz_rps - .12f) < 1e-6f);
+        step(31); assert(std::abs(out.motion.wz_rps - .124f) < 1e-6f);
+        step(30); assert(stopped(out.motion) && out.immediate_motion_stop && out.reason == "pixel_align_brake");
         // Crossing the centre must brake, including the still-old-direction UART command.
         in.sent_wz_rps = .12f;
         step(-50); assert(stopped(out.motion) && out.reason == "pixel_align_brake");
@@ -132,11 +295,12 @@ void captureTests() {
         }
         step(41); assert(stopped(out.motion) && out.reason == "pixel_align_brake");
         step(0); settle();
-        // Initial alignment need not reach +/-12. Once inside +/-24, the entire
+        // Initial alignment need not reach +/-12. Once inside +/-30, the entire
         // brake/settle sequence tolerates jitter up to +/-40 without chasing it.
         in.target_id = 9;
-        step(23); assert(stopped(out.motion));
-        step(23);
+        task.trip_context_.target_id_ = 9; // Explicit test-fixture transfer.
+        step(30); assert(stopped(out.motion));
+        step(30);
         for (int i=0; i<4; ++i) step(26);
         assert(out.pixel_align_state == "settle");
         for (float error : {25.f,30.f,39.f,26.f}) {
@@ -145,7 +309,8 @@ void captureTests() {
         step(28); assert(out.motion.vx_mps > 0);
         // Being outside the entry band from the start cannot authorize forward motion.
         in.target_id = 10;
-        for (int i=0; i<20; ++i) { step(30); assert(out.motion.vx_mps == 0); }
+        task.trip_context_.target_id_ = 10; // Explicit test-fixture transfer.
+        for (int i=0; i<20; ++i) { step(31); assert(out.motion.vx_mps == 0); }
         step(0); settle();
         // Stale/missing images discard confirmation and require a fresh stable window.
         in.pixel_grasp_target_valid = false;
@@ -156,8 +321,10 @@ void captureTests() {
         assert(stopped(out.motion));
         step(0); assert(stopped(out.motion)); settle();
         in.target_id = 8;
+        task.trip_context_.target_id_ = 8; // Explicit test-fixture transfer.
         step(0); assert(stopped(out.motion)); settle();
         in.label = "core_supply"; task.first_ = true;
+        task.trip_context_.label_ = in.label; // Explicit test-fixture transfer.
         step(0); assert(stopped(out.motion)); settle();
         in.camera_pitch_stable = false;
         step(0); assert(stopped(out.motion));
@@ -198,6 +365,7 @@ void captureTests() {
         TaskTuning t;
         t.pixel_grasp_enabled = true;
         t.demo_capture_motion = demo;
+        t.rush_budget_us = 15000000; // controller sequence; deadline has its own regression
         t.frame_open_default = true;
         t.require_multi_view = false;
         t.startup_advance_us = 0;
@@ -208,6 +376,7 @@ void captureTests() {
         in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
         in.target_valid = true;
         in.target_id = 7; in.label = label;
+        in.sent_velocity_valid = true;
         in.pixel_bearing_valid = true;
         in.pixel_bearing = .2f;
         in.geometry_valid = in.target_region_valid = in.target_center_valid = false;
@@ -241,7 +410,7 @@ void captureTests() {
         // Both directions preserve proportional speed, with a zero-command braking tick
         // before reversing; no legacy floor, boost or one-second escalation.
         for (int i = 0; i < 30; ++i) {
-            d.box.x = i < 10 ? 500 : (i < 20 ? 620 : 560);
+            d.box.x = i < 10 ? 500 : (i < 20 ? 630 : 550);
             step();
             assert(out.motion.vx_mps == 0);
             if (out.reason == "pixel_center_align") {
@@ -263,7 +432,11 @@ void captureTests() {
         for (int i=0;i<20;++i) step();
         assert(out.motion.vx_mps > 0 && out.motion.camera_pitch_cdeg == 0);
         d.box.y = 490; // Centre reaches UI120 view handoff Y540.
-        step();
+        d.box.x = 750; // off-centre must not prevent the stationary view switch
+        for (int i=0;i<20 && out.reason!="pixel_center_switch_to_140";++i) {
+            step();
+            assert(stopped(out.motion) && out.immediate_motion_stop);
+        }
         assert(out.reason == "pixel_center_switch_to_140" && stopped(out.motion) &&
                out.motion.camera_pitch_cdeg == 2000);
         in.camera_pitch_stable = false;
@@ -271,14 +444,16 @@ void captureTests() {
         assert(stopped(out.motion) && out.reason == "camera_pitch_wait");
         in.camera_pitch_cdeg = 2000; in.camera_pitch_stable = true;
         d.box.y = 200; // Same object recovered in the new view; centre Y250.
+        d.box.x = 598;
         for (int i=0;i<20 && out.state!=PushState::PREPARE;++i) step();
         assert(out.state == PushState::PREPARE && out.motion.gripper_offset == 0);
         in.gripper_done = true; in.gripper_feedback_open = 1;
         for (int i=0;i<20 && out.state!=PushState::RUSH;++i) step();
         assert(out.state == PushState::RUSH);
-        // Near-view alignment also bypasses the legacy turn floor and boost.
+        // Unmeasured ordinary cargo retains precise centering.
+        if (label == "ordinary_supply") {
         for (int i = 0; i < 30; ++i) {
-            d.box.x = i < 15 ? 560 : 630;
+            d.box.x = i < 15 ? 568 : 618;
             step();
             assert(out.motion.vx_mps == 0);
             if (out.reason == "pixel_center_align") {
@@ -291,6 +466,7 @@ void captureTests() {
         step();
         assert(stopped(out.motion) && out.reason == "turn_sweep_blocked");
         in.directional_clearance_valid = false;
+        }
         d.box.x = 598;
         for (int i=0;i<20;++i) step();
         assert(out.reason == "pixel_center_approach" && out.motion.vx_mps > 0 && out.motion.wz_rps == 0);
@@ -301,14 +477,24 @@ void captureTests() {
         for (int i=0;i<20;++i) step();
         assert(out.state == PushState::RUSH && out.motion.vx_mps > 0);
         d.box.y = 287; // centre Y337, exact stop line
-        for (int i=0;i<20 && out.state!=PushState::LOWER_FRAME;++i) step();
+        if (label != "ordinary_supply") d.box.x = 750; // X800 is inside measured bounds
+        for (int i=0;i<20 && out.state!=PushState::LOWER_FRAME;++i) {
+            step();
+            assert(stopped(out.motion) && out.immediate_motion_stop);
+        }
         assert(out.state == PushState::LOWER_FRAME && stopped(out.motion));
+        assert(label == "ordinary_supply" ||
+               (in.target_grasp_range_lateral_measured && !in.pixel_grasp_aligned));
         // A fresh pre-close range failure must veto issuing the close command.
         auto veto = task;
         auto bad = in; bad.now_us += 50000; bad.pixel_grasp_ready = false;
         const auto rejected = veto.update(bad);
-        assert(rejected.state == PushState::CAPTURE_FAIL && rejected.motion.gripper_offset == 0);
-        step();
+        if (label == "ordinary_supply")
+            assert(rejected.state == PushState::LOWER_FRAME && stopped(rejected.motion) &&
+                   rejected.motion.gripper_offset == 0);
+        else
+            assert(rejected.state == PushState::CAPTURE_FAIL && rejected.motion.gripper_offset == 0);
+        for (int i=0;i<30 && task.frame_raised_!=0;++i) step();
         assert(out.motion.gripper_offset == 20);
         in.gripper_feedback_open = 0; in.gripper_closed_observed = true;
         for (int i=0;i<30 && out.state!=PushState::CARRY;++i) step();
@@ -321,6 +507,63 @@ void captureTests() {
         d.timestamp_us = in.now_us - 300000;
         monitor.update(in,{d},in.now_us,label);
         assert(!in.captured && !in.pixel_grasp_target_valid);
+    }
+    { // Whole-image fallback bounds cannot authorize off-centre ordinary capture.
+        CaptureConfig config;
+        config.pixel_grasp_enabled = true;
+        config.grasp_center_ranges = {
+            {"ordinary_supply",2000,1280,720,{0,226,1279,489},{647.5f,337},false}};
+        CaptureMonitor monitor(config);
+        PushObservation in;
+        in.target_valid = in.camera_pitch_stable = true;
+        in.target_id = 7; in.label = "ordinary_supply"; in.camera_pitch_cdeg = 2000;
+        SegDetection d;
+        d.track_id = 7; d.label = in.label; d.confidence = .95f; d.timestamp_us = 1000000;
+        d.box = {900,300,100,100};
+        monitor.update(in,{d},d.timestamp_us);
+        assert(in.target_grasp_range_inside && !in.target_grasp_range_lateral_measured &&
+               !in.pixel_grasp_ready && !in.pixel_grasp_aligned);
+        d.box.x = 598;
+        monitor.update(in,{d},d.timestamp_us);
+        assert(in.pixel_grasp_ready && in.pixel_grasp_aligned);
+    }
+    { // One deadline covers repeated view entries, target loss and pitch waits.
+        TaskTuning t;
+        t.pixel_grasp_enabled = true; t.startup_advance_us = 0;
+        t.far_pitch_cdeg = -3000; t.track_pitch_cdeg = t.intermediate_pitch_cdeg = 0;
+        t.near_pitch_cdeg = 2000;
+        PushTask seed(t);
+        PushObservation in;
+        in.now_us = 1000000;
+        in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+        in.camera_pitch_cdeg = -3000; in.camera_pitch_stable = true;
+        in.target_valid = in.target_center_px_valid = in.pixel_view_handoff_ready = true;
+        in.target_id = 7; in.label = "ordinary_supply";
+        in.target_center_px = {800,580}; in.pixel_grasp_error_px = -160;
+        in.pixel_grasp_sample_us = in.now_us;
+        seed.update(in);
+        seed.enter(PushState::APPROACH,in.now_us,"deadline_regression");
+        const auto started = seed.search_phase_.pixel_approach_started_us_;
+        auto sweep = seed;
+        sweep.enter(PushState::SCATTER,in.now_us,"leave_approach");
+        assert(sweep.search_phase_.pixel_approach_started_us_ == 0);
+        for (int scenario=0;scenario<3;++scenario) {
+            auto task=seed; auto sample=in;
+            sample.now_us = started + t.approach_budget_us - 50000;
+            task.last_us_ = sample.now_us - 50000;
+            task.enter(PushState::APPROACH,sample.now_us,"view_handoff_regression");
+            assert(task.search_phase_.pixel_approach_started_us_ == started);
+            if (scenario==1) sample.target_valid=false;
+            if (scenario==2) sample.camera_pitch_stable=false;
+            sample.pixel_selection_managed=true;
+            task.trip_context_.target_id_=7; task.trip_context_.label_=sample.label;
+            sample.now_us += 100000; sample.pixel_grasp_sample_us=sample.now_us;
+            const auto out=task.update(sample);
+            assert(out.reason=="pixel_approach_timeout" && out.state==PushState::CAPTURE_FAIL &&
+                   stopped(out.motion) && out.immediate_motion_stop && out.target_id==7);
+            assert(out.original_reason=="pixel_approach_timeout" &&
+                   out.final_validation=="not_executed");
+        }
     }
     { // Reproduce the real SCAN lock at UI90 with an unprojectable lower-edge box.
         TaskTuning t;
@@ -362,7 +605,62 @@ void captureTests() {
         monitor.update(stale,{d},in.now_us+300000);
         assert(!stale.target_center_px_valid && !stale.pixel_view_handoff_ready);
         rejected(stale);
-        const auto out=task.update(in);
+        in.sent_velocity_valid = true;
+        // Lower-quarter boxes switch after stationary fresh images, even off-centre.
+        // Horizontal centering is not a prerequisite for a camera-only handoff.
+        for (int x : {50, 549, 550, 630, 631, 1160}) {
+            auto copy = task;
+            auto sample = in;
+            auto box = d;
+            box.box = {x, 490, 100, 100}; // Centre Y540, not box bottom.
+            PushOutput aligned;
+            bool switched = false;
+            for (int i = 0; i < 20; ++i) {
+                sample.now_us += 50000;
+                box.timestamp_us = sample.now_us;
+                monitor.update(sample, {box}, sample.now_us);
+                aligned = copy.update(sample);
+                assert(aligned.motion.vx_mps == 0);
+                if (aligned.reason == "pixel_center_switch_to_120") {
+                    assert(stopped(aligned.motion) && aligned.immediate_motion_stop);
+                    assert(aligned.motion.camera_pitch_cdeg == 0);
+                    switched = true;
+                    break;
+                }
+                assert(aligned.motion.camera_pitch_cdeg == -3000);
+                assert(stopped(aligned.motion) && aligned.immediate_motion_stop);
+            }
+            assert(switched);
+        }
+        // Zero sent speed is insufficient while fresh target images still drift in Y.
+        {
+            auto copy=task; auto sample=in; auto box=d;
+            for (int i=0;i<12;++i) {
+                sample.now_us+=50000;
+                box.timestamp_us=sample.now_us;
+                box.box={750,500+(i%2)*20,100,100};
+                monitor.update(sample,{box},sample.now_us);
+                const auto waiting=copy.update(sample);
+                assert(stopped(waiting.motion) && waiting.immediate_motion_stop &&
+                       waiting.motion.camera_pitch_cdeg==-3000);
+            }
+        }
+        // A centred target cannot change views while a turn is still being sent.
+        in.sent_wz_rps = .1f;
+        PushOutput out;
+        for (int i = 0; i < 10; ++i) {
+            in.now_us += 50000; d.timestamp_us = in.now_us;
+            monitor.update(in, {d}, in.now_us);
+            out = task.update(in);
+            assert(stopped(out.motion) && out.motion.camera_pitch_cdeg == -3000);
+        }
+        in.sent_wz_rps = 0;
+        for (int i = 0; i < 20; ++i) {
+            in.now_us += 50000; d.timestamp_us = in.now_us;
+            monitor.update(in, {d}, in.now_us);
+            out = task.update(in);
+            if (out.reason == "pixel_center_switch_to_120") break;
+        }
         assert(out.state == PushState::APPROACH && stopped(out.motion) &&
                out.reason == "pixel_center_switch_to_120" && out.motion.camera_pitch_cdeg == 0);
         assert(!in.geometry_valid && !in.target_region_valid);

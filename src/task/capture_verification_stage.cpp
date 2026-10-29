@@ -20,6 +20,7 @@ CaptureVerificationResult CaptureVerificationStage::update(
     };
     const auto reject = [&](RuleVerdict verdict, const char* prefix) {
         result.verdict = verdict;
+        result.inventory = in.held; // rejected contents are evidence for local separation only
         return finish(CaptureVerificationOutcome::AbortDrop,
                       std::string(prefix) + verdictName(verdict),
                       true);
@@ -38,7 +39,9 @@ CaptureVerificationResult CaptureVerificationStage::update(
                              verdict == RuleVerdict::INJURED_BEFORE_FIRST ||
                              verdict == RuleVerdict::INJURED_NOT_ALONE ||
                              verdict == RuleVerdict::CORE_BEFORE_FIRST ||
-                             verdict == RuleVerdict::TOO_MANY_SUPPLIES;
+                             verdict == RuleVerdict::TOO_MANY_SUPPLIES ||
+                             (!first && verdict == RuleVerdict::UNKNOWN_OBJECT && in.captured &&
+                              in.held_complete && in.held.ordinary > 0);
             bad_frames_ = bad ? bad_frames_ + 1 : 0;
             if (bad)
                 bad_verdict_ = verdict;
@@ -119,6 +122,7 @@ CaptureVerificationResult CaptureVerificationStage::update(
             const auto reason = *result.verdict != RuleVerdict::OK
                                     ? std::string("multi_grab_") + verdictName(*result.verdict)
                                     : "multi_grab_inventory_mismatch";
+            result.inventory = in.multi_view_inventory;
             return finish(CaptureVerificationOutcome::AbortDrop, reason, true);
         }
         result.inventory = in.multi_view_inventory;

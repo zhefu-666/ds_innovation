@@ -22,9 +22,12 @@ void cameraStartupCases();
 void searchSelectionCases();
 void sweepTriggerCases();
 void approachCases();
+void farTargetSmoothingTests();
 void strictDeliveryCases();
 void captureSafetyCases();
 void demoWatchdogCases();
 void fieldCarryCases();
 void fieldCaptureCases();
 void corridorSweepCases();
+
+void ordinarySelectionRegressionTests();

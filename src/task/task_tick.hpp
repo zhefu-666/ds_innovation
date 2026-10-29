@@ -9,6 +9,8 @@ struct TaskTick {
     const PushObservation& in;
     uint64_t now, elapsed = 0;
     MotionCommand motion;
+    bool immediate_motion_stop = false;
+    bool controlled_motion_stop = false; // ordinary deceleration; explicit stops still win
     bool forward_ok = false, scan_ok = false, observed_zone = false, scan_spin = false;
     float target_forward_m = 0, far_y = 0;
     decltype(SweepLedger{}.budget(TaskTuning{}, uint64_t{})) sweepBudget;

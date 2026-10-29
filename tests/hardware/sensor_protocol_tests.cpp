@@ -504,9 +504,16 @@ int main() {
         frames = collect(60);
         assert(!frames.empty() && vx(frames.front()) >= 0 && vx(frames.back()) > 0 &&
                vx(frames.back()) < .1f && frames.front()[9] == 5 && frames.front()[10] == 9);
-        link.submit(drive, true);
+        // Explicit pixel stop bypasses the ramp; verify both axes on virtual UART.
+        MotionCommand pixel_stop = drive;
+        pixel_stop.vx_mps = pixel_stop.wz_rps = 0;
+        link.submit(pixel_stop, true);
         frames = collect(30);
         assert(!frames.empty() && vx(frames.back()) == 0);
+        float stopped_wz;
+        std::memcpy(&stopped_wz, frames.back().data() + 5, 4);
+        assert(stopped_wz == 0 && frames.back()[9] == 5 && frames.back()[10] == 9 &&
+               pitch(frames.back()) == 12);
         link.submit(drive);
         frames = collect(35);
         assert(!frames.empty() && vx(frames.back()) < .1f);

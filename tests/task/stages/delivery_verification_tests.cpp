@@ -472,6 +472,20 @@ void visualThresholdsAndMissingSamples() {
     CHECK(image.stage.insideCount() == 0 && image.stage.outsideCount() == 1);
 }
 
+
+void jawVerificationNeverRepushes() {
+    Fixture jaw;
+    jaw.field();
+    jaw.tuning.pixel_grasp_enabled = true;
+    jaw.tuning.assume_verify_out_obs = 2;
+    jaw.fixedCargo(-.02f);
+    expect(jaw.update(100, 1, 1), DeliveryVerificationOutcome::Continue);
+    expect(jaw.update(200, 2, 2), DeliveryVerificationOutcome::Continue);
+    const auto result = jaw.update(8000000, 3, 3);
+    expect(result, DeliveryVerificationOutcome::Complete, 0, false, "delivery_unverified");
+    CHECK(result.events.find("verify_outside_repush") == std::string::npos);
+}
+
 void outsideEvidenceAndRepushBudget() {
     Fixture repush;
     repush.field();
@@ -603,6 +617,7 @@ int main() {
         visualEvidenceIsIndependentOfCredit();
         visualThresholdUsesTrackedCargoFix();
         visualThresholdsAndMissingSamples();
+        jawVerificationNeverRepushes();
         outsideEvidenceAndRepushBudget();
         localResetMethodsPreserveOtherEvidence();
         clearTripPreservesInventoryAndCargoTimestamp();

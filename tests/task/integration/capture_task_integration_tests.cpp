@@ -192,6 +192,7 @@ void failureTests() {
         rig.task.rush_yaw_ref_ = .4f;
         rig.task.last_target_valid_ = true;
         rig.task.last_target_xy_ = {.1f, .2f};
+        rig.task.first_ = true; // this case tests a legal inventory mismatch on a later trip
         rig.summary(1, ordinary(2));
         rig.tick();
         assert(rig.output.state == PushState::ABORT_DROP);
@@ -369,6 +370,8 @@ void lifecycleTests() {
 } // namespace
 
 int main() {
+    // Pixel separation/preclose contracts use the real CaptureMonitor in
+    // first_trip_capture_review_tests.cpp; counts alone are no longer evidence.
     verifiedTests();
     failureTests();
     lifecycleTests();

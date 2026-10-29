@@ -147,9 +147,19 @@ void SweepStage::scatter(const TaskTuning& t,
                 scatter_idle_since_us_ =
                     now > t_.blind_scatter_wait_us ? now - t_.blind_scatter_wait_us : 1;
             };
-        const auto sightedTarget = [&] { // driving to a far group: a lock does not stop the drive
-                                         // until it is inside the short window (the group sweep
-                                         // itself checks first); a committed sweep ignores locks
+        const auto sightedTarget = [&] {
+            if (targetKind(in.label) == TargetKind::ORDINARY) {
+                // A confirmed ordinary target can end alignment/far approach even if
+                // the group was committed. Actual sweep motion finishes before reselecting.
+                const bool observing = sweep_phase_ == 0 || sweep_phase_ == 7 || sweep_phase_ == 6;
+                return observing && candidate(in, now) && in.geometry_valid &&
+                       in.target_region_valid && in.path_safe && in.opponent_zone_clear &&
+                       checkCorridor(in.corridor,
+                                     in.corridor_complete,
+                                     in.corridor_occlusion_free,
+                                     in.label,
+                                     c.first_ordinary) == RuleVerdict::OK;
+            }
             return !scatter_commit_ && candidate(in, now) && !weakCandidate(in) &&
                    !(scatter_far_ && in.distance_m > t_.blind_scatter_max_y_m);
         };
@@ -166,6 +176,12 @@ void SweepStage::scatter(const TaskTuning& t,
         if (sweepOver) {
             scatter_far_ = false;
             scatterEnd(sweep_op_timeout ? "sweep_op_timeout" : "sweep_budget_exhausted");
+            break;
+        }
+        if ((sweep_phase_ == 0 || sweep_phase_ == 7) && sightedTarget()) {
+            drive(0, 0);
+            scatter_commit_ = scatter_far_ = false;
+            scatterEnd("blind_scatter_target_seen");
             break;
         }
         if (t_.sweep_view_handoff && midPitch() &&
@@ -207,6 +223,121 @@ void SweepStage::scatter(const TaskTuning& t,
             !(disperse_turn_.active() && sweep_phase_ == 5)) {
             scatterEnd("blind_scatter_observation_lost");
             break;
+        }
+        if (burst_fast_ && scatter_far_ && (sweep_phase_ == 0 || sweep_phase_ == 7)) {
+            auto& a = scatter_alignment_;
+            const bool heading_still = a.heading_us && now > a.heading_us &&
+                                       now - a.heading_us <= t_.frame_timeout_us &&
+                                       std::abs(wrapAngle(in.heading_rad - a.heading)) <=
+                                           .08f * float(now - a.heading_us) * 1e-6f;
+            a.heading = in.heading_rad;
+            a.heading_us = now;
+            const bool commands_stopped =
+                !in.sent_velocity_valid ||
+                (std::isfinite(in.sent_vx_mps) && std::isfinite(in.sent_wz_rps) &&
+                 std::abs(in.sent_vx_mps) <= t_.pixel_align_stopped_vx &&
+                 std::abs(in.sent_wz_rps) <= t_.pixel_align_stopped_wz);
+            if (!a.started_us)
+                a.started_us = now;
+
+            // Re-observe the group on every frame. A cleared primary lock is not proof that
+            // the group vanished, but an old IMU bearing alone must never authorize a drive.
+            std::vector<cv::Point2f> pts;
+            uint64_t visual_us = 0;
+            const bool camera_ready =
+                in.camera_pitch_cdeg == kCameraPitchInvalid || in.camera_pitch_stable;
+            if (camera_ready && clutter_fresh) {
+                pts = in.clutter_body;
+                visual_us = in.clutter_ts_us;
+            }
+            const bool metric_target = camera_ready && candidate(in, now) && in.geometry_valid &&
+                                       std::isfinite(in.distance_m) && in.distance_m > 0 &&
+                                       std::isfinite(in.heading_error);
+            if (metric_target) {
+                pts.emplace_back(targetBody());
+                s.add_ordinary_extra(pts.back());
+                visual_us =
+                    std::max(visual_us, in.pixel_grasp_sample_us ? in.pixel_grasp_sample_us : now);
+            }
+            const SweepBest best =
+                findBest(pts,
+                         std::max(t_.blind_scatter_max_y_m, t_.blind_scatter_far_max_y_m),
+                         t_.blind_scatter_far_radius_m);
+            const float visual_yaw =
+                wrapAngle(in.heading_rad + std::atan2(-best.centre.x, best.centre.y));
+            const bool visible =
+                best.n >=
+                    (metric_target ? t_.blind_scatter_far_lock_min : t_.blind_scatter_far_min) &&
+                std::isfinite(best.d) && best.d > 0 && visual_us && now >= visual_us &&
+                now - visual_us <= t_.sweep_fresh_us &&
+                std::abs(wrapAngle(visual_yaw - scatter_yaw_)) <= t_.blind_scatter_max_bearing_rad;
+            if (visible)
+                scatter_yaw_ = visual_yaw;
+            const float err = wrapAngle(scatter_yaw_ - in.heading_rad);
+            if (a.ready && (!visible || std::abs(err) > 2.f * t_.blind_scatter_align_tol_rad)) {
+                a.ready = false;
+                a.braking = true;
+                a.started_us = now;
+                a.stable_since_us = 0;
+                a.stable_frames = 0;
+            }
+            if (!a.ready) {
+                if (now - a.started_us > t_.blind_scatter_align_budget_us) {
+                    scatter_far_ = false;
+                    scatterEnd("blind_scatter_realign_timeout");
+                    break;
+                }
+                if (!visible) {
+                    a.braking = true;
+                    a.stable_since_us = 0;
+                    a.stable_frames = 0;
+                    reason_ = "blind_scatter_reobserve";
+                    break;
+                }
+                // Brake before correcting or reversing. Zero UART output is checked together
+                // with IMU heading drift; reaching the yaw tolerance for one tick is not enough.
+                reason_ = "blind_scatter_align_brake";
+                if (a.braking && (!commands_stopped || !heading_still)) {
+                    a.stable_since_us = 0;
+                    a.stable_frames = 0;
+                    break;
+                }
+                a.braking = false;
+                if (std::abs(err) > t_.blind_scatter_align_tol_rad) {
+                    a.stable_since_us = 0;
+                    a.stable_frames = 0;
+                    reason_ = "blind_scatter_align";
+                    const float cap = std::min(t_.pixel_align_max_wz, t_.max_wz);
+                    const float wz = std::clamp(t_.startup_hold_gain * err, -cap, cap);
+                    // Preserve the proportional correction below drive()'s legacy turn floor.
+                    drive(0, wz);
+                    if (motion_wz != 0)
+                        motion_wz = wz;
+                    // Opposite residual rotation must finish braking before a reversal.
+                    if (in.sent_velocity_valid && in.sent_wz_rps * err < 0) {
+                        motion_wz = 0;
+                        a.braking = true;
+                    }
+                    break;
+                }
+                a.braking = true;
+                if (!commands_stopped || !heading_still) {
+                    a.stable_since_us = 0;
+                    a.stable_frames = 0;
+                    break;
+                }
+                if (!a.stable_since_us)
+                    a.stable_since_us = visual_us;
+                if (visual_us > a.visual_us) {
+                    a.visual_us = visual_us;
+                    ++a.stable_frames;
+                }
+                if (a.stable_frames < t_.pixel_align_stable_frames ||
+                    visual_us < a.stable_since_us ||
+                    visual_us - a.stable_since_us < t_.pixel_align_stable_us)
+                    break;
+                a.ready = true;
+            }
         }
         if (sweep_phase_ == 0) {
             if (sightedTarget()) {
@@ -258,7 +389,9 @@ void SweepStage::scatter(const TaskTuning& t,
                 !ordinary_lock) { // the group reached the short window: sweep it now, whatever
                                   // single lock is in view
                 std::vector<cv::Point2f> pts = in.clutter_body;
-                if (candidate(in, now) && std::isfinite(in.distance_m)) {
+                const bool metric_target = candidate(in, now) && std::isfinite(in.distance_m) &&
+                                           in.distance_m > 0 && std::isfinite(in.heading_error);
+                if (metric_target) {
                     pts.emplace_back(targetBody());
                     s.add_ordinary_extra(pts.back());
                 }
@@ -336,8 +469,6 @@ void SweepStage::pile(const TaskTuning& t,
     auto& pile_cool_until_us_ = c.search.pile_cool_until_us_;
     auto& pile_phase_ = c.search.pile_phase_;
     auto& pile_phase_us_ = c.search.pile_phase_us_;
-    auto& pile_push0_ = c.search.pile_push0_;
-    auto& pile_runs_ = c.search.pile_runs_;
     auto& pile_seen_ = c.search.pile_seen_;
     auto& pile_yaw0_ = c.search.pile_yaw0_;
     auto& reason_ = c.reason;
@@ -392,7 +523,7 @@ void SweepStage::pile(const TaskTuning& t,
             s.clear_rejected();
             s.clear_rejected_bearings();
             scan_mid_limit_ = scan_turn_acc_ + 2.f * float(CV_PI);
-            std::cout << "[PILE] end why=" << why << " runs=" << pile_runs_ << "\n";
+            std::cout << "[PILE] end why=" << why << "\n";
             enter(SearchAction::Scan, now, why);
         };
         const auto setPhase = [&](int ph) {
@@ -400,7 +531,6 @@ void SweepStage::pile(const TaskTuning& t,
             pile_phase_us_ = now;
             pile_seen_ = 0;
             pile_travel0_ = travel_;
-            pile_push0_ = -1.f;
         };
         if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
             pileEnd("pile_no_heading");
@@ -505,173 +635,6 @@ void SweepStage::pile(const TaskTuning& t,
             return false;
         };
         switch (pile_phase_) {
-            case 0: { // frame open (the rest of the flow carries it open), stand still for a
-                      // moment
-                if (!sweepFrameReady())
-                    break;
-                if (now - pile_phase_us_ < 400000) {
-                    reason_ = "pile_settle";
-                    break;
-                }
-                std::cout << "[PILE] start yaw0=" << pile_yaw0_
-                          << " corridor=" << in.corridor.total() << " distance=" << in.distance_m
-                          << "\n";
-                setPhase(1);
-                break;
-            }
-            case 1: { // face the pile
-                if (now - pile_phase_us_ > t_.pile_advance_budget_us) {
-                    pileEnd("pile_face_pile_timeout");
-                    break;
-                }
-                if (faceYaw(pile_yaw0_, .6f * t_.pile_align_tol_rad, "pile_face_pile"))
-                    setPhase(2);
-                break;
-            }
-            case 2: { // straight into the pile with the frame open: pile_advance_m at
-                      // pile_advance_speed
-                if ((travel_ - pile_travel0_) >= t_.pile_advance_m * motionRatio() ||
-                    now - pile_phase_us_ > t_.pile_advance_budget_us) {
-                    setPhase(3);
-                    break;
-                }
-                const float err = wrapAngle(pile_yaw0_ - yaw);
-                reason_ = "pile_advance";
-                drive(t_.pile_advance_speed, std::abs(err) > .04f ? t_.heading_gain * err : 0.f);
-                break;
-            }
-            case 3: { // short back-off so the camera sees the remaining cluster
-                if (backTo(t_.pile_view_back_m, t_.pile_back_budget_us)) {
-                    setPhase(4);
-                    break;
-                }
-                reason_ = "pile_view_back";
-                break;
-            }
-            case 4: { // measure the cluster, turn by one block's angular size to the better
-                      // side and cut in
-                if (now - pile_phase_us_ < t_.pile_measure_us) {
-                    reason_ = "pile_measure";
-                    break;
-                }
-                const auto c = pileCluster();
-                if (c.size() < 2) {
-                    if (++pile_seen_ < 8) {
-                        reason_ = "pile_measure_wait";
-                        break;
-                    }
-                    pileEnd("pile_cluster_clear");
-                    break;
-                }
-                float cx = 0, cy = 0, ymin = 1e9f;
-                for (const auto& b : c) {
-                    cx += b.p.x / float(c.size());
-                    cy += b.p.y / float(c.size());
-                    ymin = std::min(ymin, b.p.y);
-                }
-                const float range = std::max(.10f, float(std::hypot(cx, cy)));
-                const float theta =
-                    2.f * std::atan(t_.pile_block_half_m /
-                                    range); // one block as the camera sees it at this range
-                struct Eval {
-                    int ord_in = 0, other_in = 0, ord_shed = 0, other_shed = 0;
-                    float along_min = 1e9f;
-                    float need = 0, cost = 0;
-                };
-                const auto eval = [&](float beta) { // frame edge line through the origin at
-                                                    // body bearing beta (left positive)
-                    Eval e;
-                    const float un = -std::sin(beta), uy = std::cos(beta), nx = std::cos(beta),
-                                ny = std::sin(beta);
-                    for (const auto& b : c) {
-                        const float along = b.p.x * un + b.p.y * uy, lat = b.p.x * nx + b.p.y * ny;
-                        const bool in_frame = along > 0 && std::abs(lat) <= t_.pile_frame_half_m;
-                        if (in_frame) {
-                            (b.ordinary ? e.ord_in : e.other_in)++;
-                            e.along_min = std::min(e.along_min, along);
-                        } else
-                            (b.ordinary ? e.ord_shed : e.other_shed)++;
-                    }
-                    // Keep the ordinary supplies in the frame, drop what the corridor rules
-                    // would reject, and no more than kMaxSuppliesPerTrip supplies enclosed.
-                    e.need = 100.f * float(e.other_in) +
-                             20.f * float(std::max(0, e.ord_in - kMaxSuppliesPerTrip));
-                    e.cost = e.need + 3.f * float(e.ord_shed);
-                    return e;
-                };
-                const Eval e0 = eval(0.f), el = eval(theta), er = eval(-theta);
-                std::cout << "[PILE] measure n=" << c.size() << " range=" << range
-                          << " block_deg=" << theta * 57.2958f << " straight(cost=" << e0.cost
-                          << " in=" << e0.ord_in << "+" << e0.other_in << ") left(cost=" << el.cost
-                          << " in=" << el.ord_in << "+" << el.other_in << " shed=" << el.ord_shed
-                          << "+" << el.other_shed << ") right(cost=" << er.cost
-                          << " in=" << er.ord_in << "+" << er.other_in << " shed=" << er.ord_shed
-                          << "+" << er.other_shed << ")\n";
-                // Same-type first: a mixed frame is the dominant cost (other_in), so widen the
-                // cut one block at a time until the enclosed set is clean; ties keep the
-                // smaller turn, then the left side.
-                bool left = el.cost <= er.cost;
-                int best_k = 1;
-                Eval best = left ? el : er;
-                for (int k = 2; k <= t_.pile_cut_max_steps && best.other_in > 0; ++k) {
-                    const Eval wl = eval(k * theta), wr = eval(-k * theta);
-                    for (const bool wleft :
-                         {true, false}) { // a wide turn can sweep the frame clear of every block:
-                                          // only cuts that still enclose an ordinary supply count
-                        const Eval& wb = wleft ? wl : wr;
-                        if (wb.ord_in > 0 && wb.cost < best.cost) {
-                            best = wb;
-                            left = wleft;
-                            best_k = k;
-                        }
-                    }
-                }
-                if (e0.need <= 0) {
-                    pileEnd("pile_frame_already_ok");
-                    break;
-                } // nothing the corridor rules would reject is enclosed any more
-                if (!(best.need < e0.need)) {
-                    pileEnd("pile_cut_no_gain");
-                    break;
-                }
-                pile_cut_yaw_ = wrapAngle(yaw + (left ? 1.f : -1.f) * float(best_k) * theta);
-                pile_cut_m_ = std::clamp(
-                    best.along_min - t_.sweep_frame_front_m + t_.pile_cut_depth_m, 0.f, .5f);
-                std::cout << "[PILE] cut side=" << (left ? "left" : "right") << " steps=" << best_k
-                          << " turn_deg=" << best_k * theta * 57.2958f << " in=" << best.ord_in
-                          << "+" << best.other_in << " travel=" << pile_cut_m_ << "\n";
-                setPhase(5);
-                break;
-            }
-            case 5: { // turn, then drive the edge in
-                if (now - pile_phase_us_ > t_.pile_cut_budget_us) {
-                    pile_cut_m_ = pile_push0_ >= 0 ? (travel_ - pile_push0_) / motionRatio() : 0.f;
-                    setPhase(6);
-                    break;
-                }
-                if (pile_push0_ >= 0) {
-                    if (travel_ - pile_push0_ >= pile_cut_m_ * motionRatio()) {
-                        setPhase(6);
-                        break;
-                    }
-                    const float err = wrapAngle(pile_cut_yaw_ - yaw);
-                    reason_ = "pile_cut_drive";
-                    drive(t_.pile_cut_speed, std::abs(err) > .04f ? t_.heading_gain * err : 0.f);
-                    break;
-                }
-                if (faceYaw(pile_cut_yaw_, .1f, "pile_cut_align"))
-                    pile_push0_ = travel_;
-                break;
-            }
-            case 6: { // back out to the viewing position; SCAN picks the target from what is
-                      // left
-                if (backTo(pile_cut_m_, t_.pile_back_budget_us)) {
-                    pileEnd("pile_split_done");
-                    break;
-                }
-                reason_ = "pile_cut_back";
-                break;
-            }
             case 7: { // chain: is the pushed-out cluster still more than one layer deep?
                 if (!sweepFrameReady())
                     break;
@@ -714,7 +677,7 @@ void SweepStage::pile(const TaskTuning& t,
                           << " one_layer=" << one_layer << " round=" << pile_chain_n_ << "/"
                           << t_.pile_chain_max << "\n";
                 if (one_layer || pile_chain_n_ >= t_.pile_chain_max) {
-                    setPhase(4);
+                    pileEnd(one_layer ? "pile_chain_one_layer" : "pile_chain_limit");
                     break;
                 }
                 ++pile_chain_n_;

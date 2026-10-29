@@ -123,7 +123,8 @@ DeliveryVerificationStage::update(const PushObservation& in,
             noteCargo("verify_other_inside", context.repush_count);
             visual_ok = true;
         }
-        if (!visual_ok && outside_ >= t.assume_verify_out_obs &&
+        // Jaw delivery ends with open-gripper retreat; never re-close to push released cargo.
+        if (!t.pixel_grasp_enabled && !visual_ok && outside_ >= t.assume_verify_out_obs &&
             context.repush_count < t.assume_repush_max) {
             clearTrip();
             noteCargo("verify_outside_repush", context.repush_count + 1);

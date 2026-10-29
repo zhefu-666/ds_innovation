@@ -67,7 +67,7 @@ struct Rig {
     PushTask task;
     PushObservation input;
     PushOutput output;
-    float origin_y = 0;
+    float origin_y = 0, origin_x = 0;
     bool vref = false, fresh_cargo = true, fresh_navigation = true;
     ZoneEstimate::Source source = ZoneEstimate::Source::MULTI_POINT;
     uint64_t frame = 0;
@@ -111,6 +111,7 @@ struct Rig {
     void refresh() {
         input.zone_estimate = zone(input.now_us, ++frame, origin_y);
         input.zone_estimate.source = source;
+        input.zone_estimate.origin_body_m.x = origin_x;
         if (fresh_navigation)
             input.navigation_timestamp_us = input.now_us;
         if (!input.cargo_body.empty() && fresh_cargo)
@@ -119,6 +120,7 @@ struct Rig {
         input.vref_points = vref ? 3 : 0;
         input.vref_zone =
             zone(input.cargo_body.empty() ? input.now_us : input.cargo_ts_us, frame, origin_y);
+        input.vref_zone.origin_body_m.x = origin_x;
     }
 
     PushOutput tick() {
@@ -182,6 +184,82 @@ struct Rig {
                   << " events=" << events << '\n';
     }
 };
+
+
+void jawEnterReleaseRetreat() {
+    for (int mode : {0, 1, 2}) {
+        auto parameters = tuning();
+        parameters.pixel_grasp_enabled = true;
+        parameters.field_carry = mode == 1;
+        parameters.assume_all_safe = mode == 2;
+        Rig rig(parameters, PushState::ENTER);
+        rig.origin_x = -parameters.supply_half_x_m;
+        rig.origin_y = rig.task.holdCenter() - parameters.deposit_y_m + .02f;
+        rig.input.gripper_feedback_open = 0;
+        rig.tick();
+        assert(rig.output.state == PushState::ENTER && rig.output.motion.vx_mps > 0);
+        assert(rig.output.motion.gripper_offset == 20);
+        rig.origin_y = rig.task.holdCenter() - parameters.deposit_y_m;
+        rig.tick();
+        assert(rig.output.state == PushState::RAISE_RELEASE);
+        rig.stationary(false);
+        rig.input.gripper_done = false;
+        rig.tick();
+        assert(rig.output.state == PushState::RAISE_RELEASE);
+        rig.stationary(true);
+        rig.input.gripper_done = true;
+        rig.tick();
+        assert(rig.output.state == PushState::RAISE_RELEASE);
+        rig.stationary(true);
+        rig.input.gripper_feedback_open = 1;
+        rig.tick();
+        assert(rig.output.state == PushState::BACK_OUT &&
+               rig.output.reason == "gripper_opened_at_drop");
+        assert(!rig.task.transport_phase_.release_retreat_.needsCargoTracking());
+        rig.stationary(true);
+        rig.tick();
+        assert(rig.output.state == PushState::BACK_OUT && rig.output.motion.vx_mps < 0);
+        assert(rig.output.motion.gripper_offset == 0);
+        rig.origin_y = .5f;
+        rig.tick();
+        assert(rig.output.state == PushState::VERIFY_DELIVERY);
+        rig.stationary(true);
+        assert(rig.task.transport_phase_.repush_n_ == 0);
+        rig.report("jaw_enter_open_then_retreat");
+    }
+    {
+        auto parameters = tuning(true);
+        parameters.pixel_grasp_enabled = true;
+        Rig rig(parameters);
+        rig.task.transport_phase_.release_retreat_.beginReleaseBackOff(0);
+        rig.tick();
+        assert(rig.output.state == PushState::BACK_OUT &&
+               !rig.task.transport_phase_.release_retreat_.needsCargoTracking());
+        rig.task.actionProgress().travel = 10;
+        rig.tick();
+        assert(rig.output.state != PushState::ENTER);
+        assert(rig.output.motion.gripper_offset == 0);
+        rig.report("jaw_release_clears_legacy_prepush");
+    }
+    {
+        auto parameters = tuning(true);
+        parameters.pixel_grasp_enabled = true;
+        Rig rig(parameters, PushState::CARRY);
+        rig.origin_x = -parameters.supply_half_x_m;
+        rig.origin_y = rig.task.holdCenter() - .05f;
+        rig.vref = true;
+        rig.input.gripper_feedback_open = 0;
+        rig.tick();
+        assert(rig.output.state == PushState::ENTER);
+        rig.stationary(false);
+        rig.input.camera_pitch_cdeg = rig.task.desiredPitch();
+        rig.input.zone_valid = false;
+        rig.tick();
+        assert(rig.output.state == PushState::ENTER && rig.output.motion.vx_mps > 0);
+        assert(rig.output.motion.gripper_offset == 20);
+        rig.report("jaw_visual_carry_enters_before_release");
+    }
+}
 
 void releaseGates() {
     {
@@ -695,6 +773,7 @@ void lifecycleAndRecovery() {
 } // namespace
 
 int main() {
+    jawEnterReleaseRetreat();
     releaseGates();
     backOutGatesAndDeadlines();
     prepushProgressAndEvidence();

@@ -63,8 +63,6 @@ struct Fixture {
     decltype(data.pile_cool_until_us_)& pile_cool_until_us = data.pile_cool_until_us_;
     decltype(data.pile_phase_)& pile_phase = data.pile_phase_;
     decltype(data.pile_phase_us_)& pile_phase_us = data.pile_phase_us_;
-    decltype(data.pile_push0_)& pile_push0 = data.pile_push0_;
-    decltype(data.pile_runs_)& pile_runs = data.pile_runs_;
     decltype(data.pile_seen_)& pile_seen = data.pile_seen_;
     decltype(data.pile_yaw0_)& pile_yaw0 = data.pile_yaw0_;
     decltype(reason_text)& reason = reason_text;
@@ -203,6 +201,40 @@ struct Fixture {
     }
 };
 
+void confirmedOrdinaryInterruptsOnlyObservationStages() {
+    for (int phase : {0, 7, 4, 5}) {
+        for (bool clean : {false, true}) {
+            Fixture f;
+            f.candidate_now = true;
+            f.in.target_valid = f.in.pixel_locked = true;
+            f.in.label = "ordinary_supply";
+            f.in.distance_m = 1.73f;
+            f.in.pixel_ratio_smoothed = .000733507;
+            f.in.geometry_valid = f.in.target_region_valid = true;
+            f.in.path_safe = f.in.opponent_zone_clear = true;
+            f.in.corridor.ordinary = 1;
+            f.in.corridor.dangerous = clean ? 0 : 1;
+            f.in.corridor_complete = f.in.corridor_occlusion_free = true;
+            f.scatter_commit = f.scatter_far = true;
+            f.sweep_phase = phase;
+            f.scatter_approach_m = 2.f;
+            f.scatter_range = 2.f;
+            f.pile_phase_us = f.sweep_start_us = f.in.now_us;
+            f.context.clutter_fresh = true;
+            f.tick(SearchAction::Scatter, f.in.now_us);
+            const bool expected = clean && (phase == 0 || phase == 7);
+            if (expected) {
+                CHECK(f.enters.size() == 1 && f.enters[0] == "SCAN:blind_scatter_target_seen");
+                CHECK(!f.scatter_commit && !f.scatter_far);
+                CHECK(f.motion_vx == 0.f && f.motion_wz == 0.f);
+            } else {
+                for (const auto& entry : f.enters)
+                    CHECK(entry != "SCAN:blind_scatter_target_seen");
+            }
+        }
+    }
+}
+
 void cuePrepareFaultsWhenShortPushIsOff() {
     Fixture f;
     f.tuning.enable_short_push = false;
@@ -279,6 +311,177 @@ void scatterTimeoutEndsIntoScan() {
     CHECK(f.enters[0] == "SCAN:blind_scatter_timeout");
 }
 
+// Exercise actual cluster selection, UART residual commands and IMU drift together.
+void prepareFarScatter(Fixture& f) {
+    f.pile_phase_us = f.in.now_us;
+    f.scatter_far = f.burst_fast = true;
+    f.burst_swing_armed = true;
+    f.scatter_range = 2.f;
+    f.scatter_approach_m = 1.5f;
+    f.tuning.first_burst_full_impact = true;
+    f.tuning.blind_scatter_max_y_m = .5f;
+    f.tuning.blind_scatter_far_max_y_m = 4.f;
+    f.in.sent_velocity_valid = true;
+    f.context.scatter_ok = true;
+    f.services.drive = [&](float vx, float wz) {
+        f.motion_vx = vx;
+        f.motion_wz = wz;
+    };
+    f.services.find_best = [&](const std::vector<cv::Point2f>& pts, float max_y, float radius) {
+        DisperseClusterPlanner planner;
+        const auto best = planner.findBest(f.tuning, f.in, pts, max_y, radius);
+        return SweepBest{best.n, best.d, planner.bestCentre()};
+    };
+}
+
+void observeFarGroup(Fixture& f, float bearing = 0) {
+    const float x = -2.f * std::sin(bearing), y = 2.f * std::cos(bearing);
+    f.in.clutter_body = {{x, y}, {x - .05f, y}, {x + .05f, y}};
+    f.in.clutter_ordinary = f.in.clutter_body;
+    f.context.clutter_fresh = true;
+}
+
+void farTick(Fixture& f, uint64_t now, bool fresh = true) {
+    f.motion_vx = f.motion_wz = 0;
+    if (fresh)
+        f.in.clutter_ts_us = now;
+    f.tick(SearchAction::Scatter, now);
+}
+
+void settleFarScatter(Fixture& f, uint64_t start) {
+    for (int i = 0; i <= 6; ++i)
+        farTick(f, start + i * 50000);
+    CHECK(f.reason == "first_burst_approach");
+    CHECK(f.motion_vx == f.tuning.first_burst_speed);
+    CHECK(f.sweep_phase == 7);
+}
+
+void farScatterBrakesAtTransientAlignment() {
+    Fixture f;
+    prepareFarScatter(f);
+    observeFarGroup(f);
+    f.in.sent_wz_rps = .18f;
+    farTick(f, 1000000);
+    farTick(f, 1050000);
+    CHECK(f.motion_vx == 0 && f.motion_wz == 0);
+    CHECK(f.reason == "blind_scatter_align_brake");
+    // A zero command alone is insufficient while the measured heading keeps moving.
+    f.in.sent_wz_rps = 0;
+    for (int i = 0; i < 5; ++i) {
+        f.in.heading_rad += .01f;
+        observeFarGroup(f, -f.in.heading_rad);
+        farTick(f, 1100000 + i * 50000);
+        CHECK(f.motion_vx == 0 && f.motion_wz == 0);
+    }
+    settleFarScatter(f, 1350000);
+}
+
+void farScatterReconfirmsVisualDirection() {
+    Fixture f;
+    prepareFarScatter(f);
+    // The original stored bearing is zero; the current group is 0.4 rad to the left.
+    observeFarGroup(f, .4f);
+    farTick(f, 1000000);
+    farTick(f, 1050000);
+    CHECK(f.motion_vx == 0 && f.motion_wz > 0);
+    CHECK(f.motion_wz <= f.tuning.pixel_align_max_wz);
+    CHECK(std::abs(f.scatter_yaw - .4f) < 1e-4f);
+    f.in.heading_rad = .4f;
+    observeFarGroup(f);
+    settleFarScatter(f, 1100000);
+}
+
+void farScatterStopsAndRealignsWithoutResettingTravel() {
+    Fixture f;
+    prepareFarScatter(f);
+    observeFarGroup(f);
+    settleFarScatter(f, 1000000);
+    f.travel = .3f;
+    const auto started = f.sweep_start_us;
+    const auto travel0 = f.sweep_travel0;
+    f.in.heading_rad = .35f;
+    observeFarGroup(f, -.35f);
+    f.in.sent_vx_mps = 1.f;
+    f.in.sent_wz_rps = .14f; // the old turn is still being sent, as in the incident
+    farTick(f, 1350000);
+    CHECK(f.motion_vx == 0 && f.motion_wz == 0);
+    CHECK(f.reason == "blind_scatter_align_brake");
+    f.in.sent_vx_mps = f.in.sent_wz_rps = 0;
+    farTick(f, 1400000);
+    CHECK(f.motion_vx == 0 && f.motion_wz < 0);
+    f.in.heading_rad = 0;
+    observeFarGroup(f);
+    f.in.sent_wz_rps = -.1f;
+    farTick(f, 1450000);
+    CHECK(f.motion_vx == 0 && f.motion_wz == 0);
+    f.in.sent_wz_rps = 0;
+    settleFarScatter(f, 1500000);
+    CHECK(f.sweep_start_us == started && f.sweep_travel0 == travel0);
+    CHECK(f.travel == .3f);
+}
+
+void farScatterLosesVisionAndNeedsFreshConfirmation() {
+    Fixture f;
+    prepareFarScatter(f);
+    observeFarGroup(f);
+    settleFarScatter(f, 1000000);
+    f.in.clutter_body.clear();
+    f.in.clutter_ordinary.clear();
+    farTick(f, 1350000);
+    CHECK(f.motion_vx == 0 && f.motion_wz == 0);
+    CHECK(f.reason == "blind_scatter_reobserve");
+    observeFarGroup(f);
+    f.in.clutter_ts_us = 1400000;
+    for (int i = 0; i < 6; ++i) {
+        farTick(f, 1400000 + i * 50000, false);
+        CHECK(f.motion_vx == 0); // reusing one image cannot satisfy the stable-frame count
+    }
+    settleFarScatter(f, 1700000);
+}
+
+void farScatterFreshFramesMustSpanTheSettlingWindow() {
+    Fixture f;
+    prepareFarScatter(f);
+    observeFarGroup(f);
+    for (int i = 0; i < 4; ++i)
+        farTick(f, 1000000 + i * 50000);
+    for (int i = 0; i < 4; ++i) {
+        farTick(f, 1200000 + i * 50000, false);
+        CHECK(f.motion_vx == 0); // three early frames do not prove the rest of the stop window
+    }
+    farTick(f, 1400000);
+    CHECK(f.reason == "first_burst_approach" && f.motion_vx == f.tuning.first_burst_speed);
+}
+
+void farScatterCannotUseStaleVisionOrAnUnrelatedGroup() {
+    Fixture f;
+    prepareFarScatter(f);
+    observeFarGroup(f);
+    f.in.clutter_ts_us = 1;
+    farTick(f, 1000000, false);
+    CHECK(f.reason == "blind_scatter_reobserve" && f.motion_vx == 0);
+    // A group outside the original bearing's association gate must not redirect the rush.
+    f.in.heading_rad = 1.f;
+    observeFarGroup(f);
+    farTick(f, 1050000);
+    CHECK(f.reason == "blind_scatter_reobserve" && f.motion_vx == 0);
+    farTick(f, 1000000 + f.tuning.blind_scatter_align_budget_us + 1);
+    CHECK(f.enters.size() == 1);
+    CHECK(f.enters[0] == "SCAN:blind_scatter_realign_timeout");
+}
+
+void farScatterNewAttemptNeedsToSettleAgain() {
+    Fixture f;
+    prepareFarScatter(f);
+    observeFarGroup(f);
+    settleFarScatter(f, 1000000);
+    f.stage.resetScatterApproach();
+    f.sweep_phase = 0;
+    farTick(f, 1350000);
+    CHECK(f.motion_vx == 0 && f.motion_wz == 0);
+    settleFarScatter(f, 1400000);
+}
+
 void pileWithoutHeadingEndsIntoScan() {
     Fixture f;
     f.in.heading_valid = false;
@@ -288,22 +491,48 @@ void pileWithoutHeadingEndsIntoScan() {
     CHECK(f.pile_phase == 0);
 }
 
-void pileGivesUpWhenTheClusterIsAlreadyClear() {
-    Fixture f;
-    f.pile_phase = 4;
-    f.pile_phase_us = f.in.now_us - 1000000;
-    f.tuning.pile_measure_us = 0;
-    f.pile_seen = 7;
-    f.context.clutter_fresh = false;
-    f.in.target_valid = false;
-    f.tick(SearchAction::Pile, f.in.now_us);
-    CHECK(f.enters.size() == 1);
-    CHECK(f.enters[0] == "SCAN:pile_cluster_clear");
+void removedMetricPilePhasesCannotMove() {
+    for (int phase = 0; phase <= 6; ++phase) {
+        Fixture f;
+        f.pile_phase = phase;
+        f.pile_phase_us = f.in.now_us;
+        f.context.clutter_fresh = true;
+        f.in.clutter_body = {{-.04f, .4f}, {.04f, .4f}};
+        f.in.clutter_ordinary = f.in.clutter_body;
+        int drive_calls = 0;
+        f.services.drive = [&](float, float) { ++drive_calls; };
+        f.tick(SearchAction::Pile, f.in.now_us);
+        CHECK(drive_calls == 0);
+        CHECK(f.enters.size() == 1 && f.enters[0] == "SCAN:pile_bad_phase");
+        CHECK(f.motion_vx == 0 && f.motion_wz == 0);
+    }
+}
+
+void pileChainFinishesWithoutCut() {
+    for (bool flat : {false, true}) {
+        Fixture f;
+        f.pile_phase = 7;
+        f.pile_phase_us = f.in.now_us;
+        f.tuning.pile_measure_us = 0;
+        f.tuning.pile_chain_max = 0;
+        f.context.clutter_fresh = true;
+        f.in.clutter_body = {{-.04f, .4f}, {.04f, flat ? .4f : .65f}};
+        f.in.clutter_ordinary = f.in.clutter_body;
+        int drive_calls = 0;
+        f.services.drive = [&](float, float) { ++drive_calls; };
+        f.tick(SearchAction::Pile, f.in.now_us);
+        CHECK(drive_calls == 0);
+        CHECK(f.enters.size() == 1);
+        CHECK(f.enters[0] == (flat ? "SCAN:pile_chain_one_layer" : "SCAN:pile_chain_limit"));
+        CHECK(f.motion_vx == 0 && f.motion_wz == 0);
+    }
 }
 } // namespace
 
 int main() {
     const std::pair<const char*, void (*)()> tests[] = {
+        {"confirmedOrdinaryInterruptsOnlyObservationStages",
+         confirmedOrdinaryInterruptsOnlyObservationStages},
         {"cuePrepareFaultsWhenShortPushIsOff", cuePrepareFaultsWhenShortPushIsOff},
         {"cuePrepareConfirmsIntoClearPile", cuePrepareConfirmsIntoClearPile},
         {"cuePrepareNeedsClearanceEvidence", cuePrepareNeedsClearanceEvidence},
@@ -313,8 +542,20 @@ int main() {
         {"clearPauseResumesTheSearch", clearPauseResumesTheSearch},
         {"scatterWithoutHeadingEndsIntoScan", scatterWithoutHeadingEndsIntoScan},
         {"scatterTimeoutEndsIntoScan", scatterTimeoutEndsIntoScan},
+        {"farScatterBrakesAtTransientAlignment", farScatterBrakesAtTransientAlignment},
+        {"farScatterReconfirmsVisualDirection", farScatterReconfirmsVisualDirection},
+        {"farScatterStopsAndRealignsWithoutResettingTravel",
+         farScatterStopsAndRealignsWithoutResettingTravel},
+        {"farScatterLosesVisionAndNeedsFreshConfirmation",
+         farScatterLosesVisionAndNeedsFreshConfirmation},
+        {"farScatterFreshFramesMustSpanTheSettlingWindow",
+         farScatterFreshFramesMustSpanTheSettlingWindow},
+        {"farScatterCannotUseStaleVisionOrAnUnrelatedGroup",
+         farScatterCannotUseStaleVisionOrAnUnrelatedGroup},
+        {"farScatterNewAttemptNeedsToSettleAgain", farScatterNewAttemptNeedsToSettleAgain},
+        {"removedMetricPilePhasesCannotMove", removedMetricPilePhasesCannotMove},
+        {"pileChainFinishesWithoutCut", pileChainFinishesWithoutCut},
         {"pileWithoutHeadingEndsIntoScan", pileWithoutHeadingEndsIntoScan},
-        {"pileGivesUpWhenTheClusterIsAlreadyClear", pileGivesUpWhenTheClusterIsAlreadyClear},
     };
     for (const auto& [name, run] : tests) {
         try {

@@ -41,7 +41,7 @@ endif()
 find_package(OpenCV REQUIRED)
 find_package(nlohmann_json 3.6.0 REQUIRED)
 
-set(RESCUE_TASK_SOURCES src/task/push_task.cpp
+set(RESCUE_TASK_SOURCES src/task/push_task.cpp src/task/first_trip_capture.cpp
     src/task/startup_phase.cpp src/task/search_phase.cpp src/task/capture_phase.cpp
     src/task/transport_phase.cpp src/task/recovery_phase.cpp src/task/phase_actions.cpp src/task/capture_verification_stage.cpp
     src/task/delivery_verification_stage.cpp src/task/release_retreat_stage.cpp src/task/push_in_stage.cpp

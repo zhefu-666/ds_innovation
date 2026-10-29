@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <utility>
 
 namespace rescue::app {
@@ -173,6 +174,20 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         detections = geometry_result.detections;
     }
     auto rejected_ids = task.rejectedTargets(observed_at);
+    // Apply the image-space veto before removing zone landmarks from cargo selection.
+    // The explicit rejection releases an existing pixel lock without dropout grace.
+    // Keep all detections for corridor/hold evidence, and do not veto carried cargo
+    // while Transport approaches its required destination.
+    if (previous.phase != TaskPhase::Transport) {
+        const auto near_zone = targetsNearOwnZone(
+            detections, config.team, frame.size(), observed_at, config.confidence);
+        rejected_ids.insert(rejected_ids.end(), near_zone.begin(), near_zone.end());
+        for (int id : near_zone)
+            std::cout << "[ZONE_TARGET_EXCLUSION] id=" << id << " team=" << config.team
+                      << " max_gap_px="
+                      << kTargetZoneGapImageFrac * std::min(frame.cols, frame.rows)
+                      << " reason=near_own_safe_zone" << std::endl;
+    }
     {
         // A vetoed block keeps its world bearing even when the tracker re-issues its id.
         const auto bearings = task.rejectedBearings(observed_at);
@@ -207,15 +222,24 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         const uint64_t idle_us = observed_at > progress_ref_us ? observed_at - progress_ref_us : 0;
         pixel_selector.setRelax(idle_us >= 120000000 ? 2 : idle_us >= 60000000 ? 1 : 0);
     }
-    if (previous.state == PushState::SCATTER || previous.state == PushState::PILE)
-        pixel_selector.forgetCenter(); // the sweep swings the view: the old pixel position no
-                                       // longer marks where the lock vanished
+    const bool selecting_task =
+        previous.run_status == RunStatus::Running &&
+        (previous.phase == TaskPhase::Search || previous.phase == TaskPhase::Capture);
+    pixel_selector.syncSplitSelection(previous.split_target_reselecting,
+                                      previous.split_target_candidate_id);
+    if (!previous.split_target_reselecting)
+        pixel_selector.syncTaskState(
+            previous.state, selecting_task ? previous.target_id : -1, task.targetLabel());
     // Zone detections are navigation landmarks; they never enter cargo selection,
     // crowding, row grouping or gripper inventory as solid objects.
     std::vector<SegDetection> cargo_detections;
     for (const auto& d : detections)
         if (d.label != "blue_safe_zone" && d.label != "red_safe_zone")
             cargo_detections.push_back(d);
+    const auto selection_imu = imu ? imu->snapshotAt(timestamp) : ImuSnapshot{};
+    const float selection_heading = selection_imu.fresh && selection_imu.sample.measurements_valid
+                                        ? selection_imu.sample.body_rpy_rad[2]
+                                        : std::numeric_limits<float>::quiet_NaN();
     const auto selection =
         pixel_selector.update(cargo_detections,
                               frame.size(),
@@ -225,7 +249,8 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
                               previous.first_ordinary_delivered,
                               config.confidence,
                               rejected_ids,
-                              prefer_label);
+                              prefer_label,
+                              selection_heading);
     auto input = makePushObservation(cargo_detections,
                                      observed_at,
                                      previous.first_ordinary_delivered,
@@ -236,15 +261,35 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
                                      false,
                                      false,
                                      prefer_label);
-    if (!selection.locked)
+    applySplitRetreatBox(
+        input, cargo_detections, frame.size(), observed_at, config.confidence, previous.target_id);
+    for (const auto& d : cargo_detections)
+        if (d.track_id == selection.id) {
+            input.target_box = d.box;
+            if (d.ground_position_valid)
+                input.target_geometry_us = d.timestamp_us;
+            break;
+        }
+    if (!selection.locked) {
         input.target_valid = false;
+        input.target_id = -1;
+        input.label.clear();
+    }
+    input.pixel_selection_managed = true;
+    input.pixel_released_id = selection.released_id;
+    input.pixel_rebound_from = selection.rebound_from;
     (void)box_area_accepted; // 现场同步：像素比不再要求box_area_accepted标定（沿用demo）
     std::cout << "[PIXEL_SELECTION] timestamp=" << observed_at
               << " pitch=" << frame_sensors.actuator.camera_pitch_cdeg
               << " stable=" << frame_sensors.pitch_stable << " id=" << selection.id
               << " mode=" << selection.mode << " raw=" << selection.raw
               << " smooth=" << selection.smoothed << " locked=" << selection.locked
-              << " reason=" << selection.reason
+              << " reason=" << selection.reason << " event=" << selection.event
+              << " task_id=" << previous.target_id << " held_id=" << selection.held_id
+              << " released_id=" << selection.released_id
+              << " rebound_from=" << selection.rebound_from
+              << " split_reselect=" << previous.split_target_reselecting
+              << " split_candidate=" << previous.split_target_candidate_id
               << (selection.row.empty() ? std::string() : " ROW[" + selection.row + "]") << "\n";
     input.pixel_ratio_raw = selection.raw;
     input.pixel_ratio_smoothed = selection.smoothed;
@@ -277,9 +322,16 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     if (geometry)
         geometry->apply(input, geometry_result, expected_stop, config.team, imuNowUs());
     const bool stable_view = frame_sensors.actuator.valid && frame_sensors.pitch_stable;
-    const bool detected_zone = vref_ready && applyZoneDetectionSight(
-        input, detections, config.team, frame.size(), vref_calibration.cameraMatrix(),
-        frame_sensors.actuator.camera_pitch_cdeg, stable_view, observed_at, config.confidence);
+    const bool detected_zone =
+        vref_ready && applyZoneDetectionSight(input,
+                                              detections,
+                                              config.team,
+                                              frame.size(),
+                                              vref_calibration.cameraMatrix(),
+                                              frame_sensors.actuator.camera_pitch_cdeg,
+                                              stable_view,
+                                              observed_at,
+                                              config.confidence);
     // Detection boxes guide post-capture search even without pose keypoints.
     // Fall back to pose bearing only when its color is actually identified.
     const bool pose_sight = !detected_zone && stable_view && vision_result.pose_ran &&
@@ -291,8 +343,8 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             center += point.pixel;
         center *= 1.f / float(zone_points.size());
         const cv::Mat& k = vref_calibration.cameraMatrix();
-        const double x = (center.x - k.at<double>(0,2)) / k.at<double>(0,0),
-                     y = (center.y - k.at<double>(1,2)) / k.at<double>(1,1);
+        const double x = (center.x - k.at<double>(0, 2)) / k.at<double>(0, 0),
+                     y = (center.y - k.at<double>(1, 2)) / k.at<double>(1, 1);
         const double pitch = double(frame_sensors.actuator.camera_pitch_cdeg) * .01 * CV_PI / 180.;
         const double forward = std::cos(pitch) - y * std::sin(pitch);
         if (forward > .05) {
@@ -314,6 +366,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             d.confidence >= obstacleConfidence(d) && std::isfinite(d.body_xy_m.x) &&
             std::isfinite(d.body_xy_m.y)) {
             input.clutter_body.push_back(d.body_xy_m);
+            input.clutter_boxes.push_back(d.box);
             if (d.label == "ordinary_supply")
                 input.clutter_ordinary.push_back(d.body_xy_m);
         }
@@ -392,8 +445,14 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         }
     }
     // Holding-region and rush-corridor inventory; uncertainty leaves them incomplete.
-    capture.update(input, cargo_detections, observed_at,
+    capture.update(input,
+                   cargo_detections,
+                   observed_at,
                    previous.phase == TaskPhase::Capture ? task.targetLabel() : std::string());
+    if (input.capture_scene_valid)
+        input.capture_scene_us = timestamp;
+    if (input.split_layout_valid)
+        input.split_layout_us = timestamp; // source image, never repeated control-loop time
     if (input.target_valid && input.geometry_valid) {
         static uint64_t last_clutter_log_us = 0;
         if (observed_at - last_clutter_log_us >= 1000000) {

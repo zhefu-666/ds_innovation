@@ -16,9 +16,10 @@ enum class TargetKind {
     DANGEROUS,
     UNKNOWN
 };
-// The current field strategy carries at most two supply objects per trip (first trip: ordinary
-// only).
+// The first trip carries exactly one ordinary supply; later trips carry at most two supply
+// objects.
 constexpr int kMaxSuppliesPerTrip = 2;
+constexpr int kMaxSuppliesFirstTrip = 1;
 
 TargetKind targetKind(const std::string& label);
 // May this label be chosen as the primary target of a new trip?

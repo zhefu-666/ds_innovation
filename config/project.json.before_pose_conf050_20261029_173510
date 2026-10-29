@@ -1,0 +1,754 @@
+{
+  "schema_version": 1,
+  "behavior_policy": "legacy_field_v1",
+  "hardware": {
+    "uart_port": "/dev/ttyACM0",
+    "baudrate": 115200,
+    "camera_index": 0,
+    "frame_width": 1280,
+    "frame_height": 720,
+    "fps": 60,
+    "imu": false,
+    "imu_port": "/dev/ttyUSB0",
+    "imu_baud": 115200,
+    "imu_timeout_ms": 200,
+    "pitch_feedback": false
+  },
+  "models": {
+    "rknn_library": "../benchmark_results/librknnrt.so",
+    "model_path": "../models/detect_v5_int8.rknn",
+    "pose_model_path": "../models/zone_pose_int8.rknn",
+    "input_size": 640,
+    "confidence": 0.5,
+    "injured_confidence": 0.25,
+    "nms": 0.45,
+    "pose_confidence": 0.25,
+    "pose_keypoint_confidence": 0.5,
+    "detect_core_mask": 4,
+    "pose_core_mask": 3,
+    "parallel_inference": true,
+    "class_names": [
+      "blue",
+      "orange",
+      "green",
+      "black",
+      "zone_blue",
+      "zone_red"
+    ]
+  },
+  "calibration": {
+    "calibration_file": "camera.yaml",
+    "zone_geometry_file": "project.json#/zone_geometry",
+    "task_calibration_file": "project.json#/frame/assume",
+    "zone_color_file": "project.json#/zone_color/field",
+    "pitch_presets_cdeg": [
+      -3000,
+      -3000,
+      -3000
+    ],
+    "allow_mechanical_pitch_model": false
+  },
+  "behavior": {
+    "sensor_timeout_ms": 200,
+    "tof_stop_distance_m": 0.18,
+    "imu_tilt_limit_deg": 30.0,
+    "match_seconds": 180,
+    "startup_advance_ms": 0,
+    "startup_speed_mps": 0.1,
+    "scan_wz_rps": 0.4,
+    "turn_wz_rps": 0.25,
+    "controlled_empty_field": true
+  },
+  "runtime": {
+    "team": "blue",
+    "show": true,
+    "save_output": false,
+    "dry_run": false,
+    "hardware": false,
+    "telemetry": true,
+    "telemetry_fps": 30,
+    "telemetry_file": "/dev/shm/rescue-telemetry.bin",
+    "vision_log_dir": "telemetry_logs/vision",
+    "match_socket": "/tmp/rescue-match.sock"
+  },
+  "paths": {
+    "camera": "camera.yaml"
+  },
+  "profiles": {
+    "demo_default": {
+      "binary": "../build-release/rescue_upper_host",
+      "frame_config": "project.json#/frame/pending",
+      "acceptance": "project.json#/acceptance/pending",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
+      "rknn_library": "../benchmark_results/librknnrt.so",
+      "camera_calibration": "project.json#/paths/camera",
+      "zone_geometry": "project.json#/zone_geometry",
+      "team": "blue",
+      "camera": 0,
+      "width": 1280,
+      "height": 720,
+      "fps": 60,
+      "port": "/dev/ttyACM0",
+      "baud": 115200,
+      "imu_port": "/dev/ttyUSB0",
+      "imu_baud": 115200,
+      "python": "python3",
+      "http_port": 8080,
+      "ws_port": 18765,
+      "resource_root": ".",
+      "schema_version": 1
+    },
+    "demo_assume": {
+      "binary": "../build-release/rescue_upper_host",
+      "frame_config": "project.json#/frame/assume",
+      "acceptance": "project.json#/acceptance/assume",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
+      "rknn_library": "../benchmark_results/librknnrt.so",
+      "camera_calibration": "project.json#/paths/camera",
+      "zone_geometry": "project.json#/zone_geometry",
+      "team": "blue",
+      "camera": 0,
+      "width": 1280,
+      "height": 720,
+      "fps": 60,
+      "port": "/dev/ttyACM0",
+      "baud": 115200,
+      "imu_port": "/dev/ttyUSB0",
+      "imu_baud": 115200,
+      "python": "python3",
+      "http_port": 8080,
+      "ws_port": 18765,
+      "resource_root": ".",
+      "schema_version": 1
+    },
+    "demo_mechanical_assume": {
+      "binary": "../build-release/rescue_upper_host",
+      "frame_config": "project.json#/frame/assume",
+      "acceptance": "project.json#/acceptance/assume",
+      "model": "../models/detect_v5_int8.rknn",
+      "pose_model": "../models/zone_pose_int8.rknn",
+      "rknn_library": "../benchmark_results/librknnrt.so",
+      "camera_calibration": "project.json#/paths/camera",
+      "zone_geometry": "project.json#/zone_geometry",
+      "team": "blue",
+      "camera": 0,
+      "width": 1280,
+      "height": 720,
+      "fps": 60,
+      "port": "/dev/ttyACM0",
+      "baud": 115200,
+      "imu_port": "/dev/ttyUSB0",
+      "imu_baud": 115200,
+      "python": "python3",
+      "http_port": 8080,
+      "ws_port": 18765,
+      "resource_root": ".",
+      "schema_version": 1
+    }
+  },
+  "frame": {
+    "pending": {
+      "schema_version": 2,
+      "version": "frame-20261007-pending",
+      "status": "pending_field_calibration",
+      "dimensions_source": "user_confirmed_not_field_measured",
+      "image_width": 1280,
+      "image_height": 720,
+      "coordinate_transform_verified": 0,
+      "action_mapping_verified": 0,
+      "capture_stop_verified": 0,
+      "body_envelope_verified": 0,
+      "visual_acceptance_passed": 0,
+      "box_area_accepted": 0,
+      "a6_open_state": -1,
+      "a6_close_state": -1,
+      "forward_sign": 0,
+      "rotation_origin_x_m": 0,
+      "rotation_origin_y_m": 0,
+      "outer_width_m": 0.165,
+      "outer_depth_m": 0.09515,
+      "inner_width_m": 0.15,
+      "inner_depth_m": 0.08008,
+      "entrance_width_m": 0.15,
+      "edge_height_m": 0.01,
+      "near_inner_m": 0.09092,
+      "far_inner_m": 0.171,
+      "body_left_m": 0.145,
+      "body_right_m": 0.145,
+      "body_rear_m": 0.1,
+      "body_front_m": 0.18107,
+      "body_front_source": "derived_0.28107_minus_0.100_pending_endpoint_verification",
+      "grasp_trigger_y_m": 0,
+      "maximum_block_depth_m": 0,
+      "stopping_margin_m": 0,
+      "open_width_m": 0,
+      "open_front_m": 0,
+      "robot_swept_radius_m": 0,
+      "frame_views": [],
+      "pending": [
+        "coordinate origin and sign",
+        "0 open 20 close physical and A6 mapping",
+        "stop position and block dimensions",
+        "two or three view polygons and independent samples",
+        "body and moving mechanism envelope",
+        "box-area mode acceptance or original-image instance masks"
+      ],
+      "maximum_block_width_m": 0
+    },
+    "demo": {
+      "schema_version": 2,
+      "version": "frame-20261008-demo",
+      "status": "demo_temp_assumptions",
+      "dimensions_source": "user_table_2026-10-08_mm_converted_to_m; front 181.07 derived from 281.07-100 pending check",
+      "image_width": 1280,
+      "image_height": 720,
+      "coordinate_transform_verified": 0,
+      "action_mapping_verified": 1,
+      "capture_stop_verified": 0,
+      "body_envelope_verified": 0,
+      "visual_acceptance_passed": 0,
+      "box_area_accepted": 0,
+      "a6_open_state": -1,
+      "a6_close_state": -1,
+      "forward_sign": 0,
+      "rotation_origin_x_m": 0,
+      "rotation_origin_y_m": 0,
+      "outer_width_m": 0.165,
+      "outer_depth_m": 0.09515,
+      "inner_width_m": 0.15,
+      "inner_depth_m": 0.08008,
+      "entrance_width_m": 0.15,
+      "edge_height_m": 0.01,
+      "near_inner_m": 0.09092,
+      "far_inner_m": 0.171,
+      "body_left_m": 0.145,
+      "body_right_m": 0.145,
+      "body_rear_m": 0.1,
+      "body_front_m": 0.18107,
+      "body_front_source": "derived_0.28107_minus_0.100; reported 176.07 has ~5mm push recess",
+      "grasp_trigger_y_m": 0,
+      "maximum_block_depth_m": 0,
+      "stopping_margin_m": 0,
+      "open_width_m": 0,
+      "open_front_m": 0,
+      "robot_swept_radius_m": 0,
+      "frame_views": [],
+      "pending": [
+        "coordinate origin and sign (forward_sign)",
+        "stop position and block dimensions",
+        "two or three view polygons (draft from images)",
+        "body and moving mechanism envelope (open_width/open_front/swept radius)",
+        "box-area mode acceptance",
+        "a6_done_settle_ms measured"
+      ],
+      "maximum_block_width_m": 0,
+      "action_mapping_source": "user_confirmed_2026-10-08: open=0 close=+20 (new MCU -20..20, 0=mid 90deg, negative up); A6 byte1 accepted as done flag",
+      "a6_semantics": "done_flag",
+      "a6_done_settle_ms": 1000,
+      "a6_done_settle_source": "estimate; field echo 10ms precedes servo motion; not measured",
+      "frame_view_matching": "image_polygon",
+      "frame_view_matching_source": "user_choice_2026-10-08 TEMP_ASSUMPTION; only 5deg ground model validated"
+    },
+    "assume": {
+      "schema_version": 2,
+      "version": "gripper-20261024-assume",
+      "image_trigger_reference": "config/gripper-image-reference.json",
+      "status": "TEMP_ASSUMPTION_gripper_mapping_NOT_ACCEPTANCE",
+      "dimensions_source": "user_table_2026-10-08_mm_converted_to_m; front 181.07 derived from 281.07-100 pending check",
+      "image_width": 1280,
+      "image_height": 720,
+      "coordinate_transform_verified": 1,
+      "action_mapping_verified": 1,
+      "capture_stop_verified": 1,
+      "body_envelope_verified": 1,
+      "visual_acceptance_passed": 1,
+      "box_area_accepted": 1,
+      "a6_open_state": -1,
+      "a6_close_state": -1,
+      "forward_sign": 1,
+      "rotation_origin_x_m": 0,
+      "rotation_origin_y_m": 0,
+      "outer_width_m": 0.15,
+      "outer_depth_m": 0.09515,
+      "inner_width_m": 0.14,
+      "inner_depth_m": 0.08008,
+      "entrance_width_m": 0.14,
+      "edge_height_m": 0.01,
+      "near_inner_m": 0.09092,
+      "far_inner_m": 0.171,
+      "body_left_m": 0.145,
+      "body_right_m": 0.145,
+      "body_rear_m": 0.1,
+      "body_front_m": 0.18107,
+      "body_front_source": "derived_0.28107_minus_0.100; reported 176.07 has ~5mm push recess",
+      "grasp_trigger_y_m": 0.131,
+      "maximum_block_depth_m": 0.04,
+      "stopping_margin_m": 0.015,
+      "open_width_m": 0.15,
+      "open_front_m": 0.2,
+      "robot_swept_radius_m": 0.26,
+      "frame_views": [
+        {
+          "pitch_cdeg": 4000,
+          "calibrated": 1,
+          "fully_observable": 1,
+          "polygon": [
+            [
+              330,
+              525
+            ],
+            [
+              1085,
+              530
+            ],
+            [
+              1235,
+              719
+            ],
+            [
+              165,
+              719
+            ]
+          ]
+        },
+        {
+          "pitch_cdeg": 3500,
+          "calibrated": 1,
+          "fully_observable": 1,
+          "polygon": [
+            [
+              340,
+              470
+            ],
+            [
+              1075,
+              475
+            ],
+            [
+              1230,
+              719
+            ],
+            [
+              170,
+              719
+            ]
+          ]
+        }
+      ],
+      "pending": [
+        "ALL values above marked verified are TEMP_ASSUMPTION; real measurement still pending"
+      ],
+      "maximum_block_width_m": 0.04,
+      "action_mapping_source": "MCU MotionPacket screenshot 2026-10-24: signed TX offset +5 open/-5 closed; logical values remain 0/20; physical acceptance pending",
+      "a6_semantics": "done_flag",
+      "a6_mapping_source": "2026-10-27 user logs: open and close both respond 1 with changed id; user confirmed close position; treated as protocol acknowledgement",
+      "frame_view_matching": "image_polygon",
+      "frame_view_matching_source": "user_choice_2026-10-08 TEMP_ASSUMPTION; only 5deg ground model validated",
+      "assume_source": "temporary smoke-test profile; gripper hardware only, not field acceptance",
+      "a6_done_settle_ms": 100,
+      "a6_done_settle_source": "User confirmed 2026-10-27: opening and closing each take 100 ms; A6 is acknowledgement, not grip detection."
+    },
+    "gripper": {
+      "schema_version": 2,
+      "version": "gripper-20261028-measured-pending-vision",
+      "status": "measured_geometry_pending_overlap_and_holding_calibration",
+      "dimensions_source": "User measurements 2026-10-27; body origin unchanged, x right y forward, metres",
+      "image_width": 1280,
+      "image_height": 720,
+      "coordinate_transform_verified": 1,
+      "action_mapping_verified": 1,
+      "capture_stop_verified": 0,
+      "body_envelope_verified": 1,
+      "visual_acceptance_passed": 0,
+      "box_area_accepted": 0,
+      "a6_open_state": -1,
+      "a6_close_state": -1,
+      "forward_sign": 1,
+      "rotation_origin_x_m": 0,
+      "rotation_origin_y_m": 0,
+      "inner_width_m": 0.09,
+      "inner_depth_m": 0.11,
+      "entrance_width_m": 0.09,
+      "near_inner_m": 0.07,
+      "far_inner_m": 0.18,
+      "body_left_m": 0.145,
+      "body_right_m": 0.145,
+      "body_rear_m": 0.1,
+      "body_front_m": 0.18107,
+      "body_front_source": "derived_0.28107_minus_0.100; reported 176.07 has ~5mm push recess",
+      "grasp_trigger_y_m": 0.1,
+      "maximum_block_depth_m": 0.04,
+      "stopping_margin_m": 0.015,
+      "open_width_m": 0.24,
+      "open_front_m": 0.18,
+      "robot_swept_radius_m": 0.26,
+      "frame_views": [],
+      "pending": [
+        "Measure stopping margin: retained old 15 mm is incompatible with 100 mm grasp centre, 70 mm rear boundary and retained 40 mm object depth; available rear allowance is 10 mm.",
+        "Mark full holding polygon from real UI 140-degree image; UI 120 sees only half and must not supply complete inventory.",
+        "Collect stationary ground correspondences for 90/120 and 120/140; validate metric transfer and near-range stopping before activation."
+      ],
+      "maximum_block_width_m": 0.04,
+      "action_mapping_source": "MCU MotionPacket screenshot 2026-10-24: signed TX offset +5 open/-5 closed; logical values remain 0/20; physical acceptance pending",
+      "a6_semantics": "done_flag",
+      "a6_mapping_source": "2026-10-27 user logs: open and close both respond 1 with changed id; user confirmed close position; treated as protocol acknowledgement",
+      "frame_view_matching": "image_polygon",
+      "frame_view_matching_source": "Pending full holding polygon at UI 140 (internal 2000); do not reuse old 35/40-degree polygons.",
+      "a6_done_settle_ms": 100,
+      "a6_done_settle_source": "User confirmed 2026-10-27: opening and closing each take 100 ms; A6 is acknowledgement, not grip detection.",
+      "capture_verification": "single_view",
+      "capture_pitch_cdeg": 2000,
+      "mechanism_note": "Symmetric lateral jaws, ground-level cargo; single/multiple objects in lateral and fore-aft arrangements. User confirms no slipping on rotation, release leaves cargo, closed jaws may push, retreat does not hook cargo. Existing object sizes and body envelope retained.",
+      "image_trigger_reference": "config/gripper-image-reference.json"
+    }
+  },
+  "acceptance": {
+    "pending": {
+      "schema_version": 1,
+      "status": "pending_real_robot_evidence",
+      "watchdog_verified": false,
+      "watchdog_max_ms": "",
+      "stationary_mapping_trials_passed": false,
+      "manual_wheel_test_passed": false,
+      "ground_geometry_verified": false,
+      "multi_view_dataset_passed": false,
+      "evidence_record": "",
+      "operator": "",
+      "verified_date": "",
+      "note": "由实际记录填写，脚本不会自动改为通过。frame_config中的动作、几何、多档验收仍独立检查。"
+    },
+    "assume": {
+      "schema_version": 1,
+      "status": "TEMP_ASSUMPTION_assume_all_safe_NOT_ACCEPTANCE",
+      "watchdog_verified": true,
+      "watchdog_max_ms": 200,
+      "stationary_mapping_trials_passed": true,
+      "manual_wheel_test_passed": true,
+      "ground_geometry_verified": true,
+      "multi_view_dataset_passed": true,
+      "evidence_record": "TEMP_ASSUMPTION: 用户2026-10-08要求默认全都安全以跑通决策链；无实测证据，不是验收",
+      "operator": "TEMP_ASSUMPTION user 2026-10-08",
+      "verified_date": "2026-10-08",
+      "note": "临时假设文件，仅配合 --assume-all-safe 使用；原 pending 文件未改"
+    }
+  },
+  "task_calibration": {
+    "runtime": {
+      "schema_version": 1,
+      "measured": 1,
+      "note": "Controlled-field setup, max two supplies. robot_swept_radius_m=0.32 is the operator-confirmed body rotation radius. Load planning uses the enclosing circle of the existing gripper interior rectangle: x=+-0.0785, y=0.097..0.225m, centre y=0.161m. This is a derived conservative envelope, not a new measurement or dynamic acceptance. Nominal object centres retained separately. Drop planner uses the 0.157 x 0.128m rectangle at the entrance alignment, including yaw/position margins, instead of unnecessarily reserving its enclosing circle. User confirmed 2026-10-05: gripper front is robot-frame y=0.220 m. Mouth and closed front updated; grasp trigger remains y=0.200 m inside the mouth. Existing load envelope remains conservative, not remeasured.",
+      "image_width": 1280,
+      "image_height": 720,
+      "grasp_trigger_y_m": 0.2,
+      "hold_center_y_m": 0.161,
+      "injured_hold_center_y_m": 0.161,
+      "mouth_y_m": 0.22,
+      "closed_front_y_m": 0.22,
+      "rear_grip_boundary_y_m": 0.097,
+      "max_inner_width_m": 0.157,
+      "max_outer_width_m": 0.172,
+      "corridor_half_width_m": 0.11,
+      "load_radius_m": 0.10128301930728566,
+      "holding_views": [
+        {
+          "pitch_cdeg": 4000,
+          "area": [
+            440,
+            210,
+            930,
+            720
+          ],
+          "min_visible_bottom_y_px": 440
+        }
+      ],
+      "robot_swept_radius_m": 0.32,
+      "nominal_ordinary_center_y_m": 0.12,
+      "nominal_injured_center_y_m": 0.14,
+      "load_half_width_m": 0.0785,
+      "load_half_depth_m": 0.064,
+      "body_front_m": 0.22,
+      "body_rear_m": 0.1,
+      "body_left_m": 0.15,
+      "body_right_m": 0.15,
+      "open_width_m": 0.18,
+      "open_front_m": 0.22,
+      "body_envelope_note": "User 2026-10-05: front22/rear10/left15/right15 cm, open diameter18cm interpreted as width. Open front assumed unchanged at22cm; claw lateral sweep assumed within body width30cm."
+    },
+    "candidate": {
+      "schema_version": 1,
+      "measured": 0,
+      "note": "Mechanical dimensions reported by the operator; 40 deg holding gate separates six static photos only. Dynamic capture and swept load radius remain unverified. Keep measured=0 until those checks pass.",
+      "image_width": 1280,
+      "image_height": 720,
+      "grasp_trigger_y_m": 0.2,
+      "hold_center_y_m": 0.12,
+      "injured_hold_center_y_m": 0.14,
+      "mouth_y_m": 0.21,
+      "closed_front_y_m": 0.225,
+      "rear_grip_boundary_y_m": 0.097,
+      "max_inner_width_m": 0.157,
+      "max_outer_width_m": 0.172,
+      "corridor_half_width_m": 0.11,
+      "load_radius_m": 0,
+      "holding_views": [
+        {
+          "pitch_cdeg": 4000,
+          "area": [
+            440,
+            210,
+            930,
+            720
+          ],
+          "min_visible_bottom_y_px": 440
+        }
+      ]
+    },
+    "example": {
+      "schema_version": 1,
+      "measured": 0,
+      "note": "Template only: replace all zeros with robot measurements and set measured=1 only after validation. Do not use this file as evidence.",
+      "image_width": 1280,
+      "image_height": 720,
+      "hold_center_y_m": 0,
+      "injured_hold_center_y_m": 0,
+      "grasp_trigger_y_m": 0,
+      "mouth_y_m": 0,
+      "corridor_half_width_m": 0,
+      "load_radius_m": 0,
+      "holding_views": [
+        {
+          "pitch_cdeg": 4000,
+          "area": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "min_visible_bottom_y_px": 0
+        }
+      ]
+    }
+  },
+  "zone_color": {
+    "field": {
+      "schema_version": 1,
+      "measured": 1,
+      "note": "Red verified on field frames (red fraction 0.87-0.91). Blue mat is dark navy (median HSV 120/112/47 on the 2026-10-11 15:20 frame), so value_min is 30. Red/blue shares are taken among red+blue pixels only; the sampled polygon is widened expand_x and pushed expand_near toward the camera.",
+      "saturation_min": 80,
+      "value_min": 30,
+      "min_pixels": 200,
+      "min_fraction": 0.6,
+      "max_other_fraction": 0.1,
+      "min_coloured_fraction": 0.05,
+      "expand_x": 0.2,
+      "expand_near": 0.5
+    },
+    "example": {
+      "schema_version": 1,
+      "measured": 0,
+      "note": "Validate on actual red/blue zones, both teams, shadows, occlusions and distractors before setting measured=1. HSV uses OpenCV H=0..179; red 0..12 or 168..179, blue 95..135.",
+      "saturation_min": 80,
+      "value_min": 45,
+      "min_pixels": 200,
+      "min_fraction": 0.6,
+      "max_other_fraction": 0.1
+    }
+  },
+  "zone_geometry": {
+    "schema_version": 1,
+    "source": "intelligence20260617.pdf p.35/p.37; inner 600x300 mm, outer 660x360 mm, fence 30 mm wide x 20 mm high, field-facing fence is a right-triangle ramp (20 mm at inner edge, 0 at outer edge)",
+    "coordinate_convention": "origin=front inner floor boundary at divider centre; x=right facing entry, y=into zone, z=up; metres",
+    "keypoint_ids": [
+      "front_left",
+      "front_divider",
+      "front_right",
+      "rear_left",
+      "rear_divider",
+      "rear_right"
+    ],
+    "landmark_note": "User override 2026-10-27: landmark width 0.60 m, depth 0.30 m, height 0.02 m. Front y=0, rear y=0.30, outer landmark x=+-0.30. Keypoint IDs and inner delivery bounds unchanged.",
+    "divider_note": "Divider width is not dimensioned in the PDF. Exclusion half-width below is a conservative configurable policy, not a measurement.",
+    "zones": [
+      {
+        "label": "red_safe_zone",
+        "geometry_id": "rescue2027-fence-top-v2-red",
+        "inner_width_m": 0.6,
+        "inner_depth_m": 0.3,
+        "landmark_width_m": 0.6,
+        "landmark_depth_m": 0.3,
+        "landmark_height_m": 0.02,
+        "divider_exclusion_half_width_m": 0.02,
+        "supply_side": "left",
+        "confirmed": 1
+      },
+      {
+        "label": "blue_safe_zone",
+        "geometry_id": "rescue2027-fence-top-v2-blue",
+        "inner_width_m": 0.6,
+        "inner_depth_m": 0.3,
+        "landmark_width_m": 0.6,
+        "landmark_depth_m": 0.3,
+        "landmark_height_m": 0.02,
+        "divider_exclusion_half_width_m": 0.02,
+        "supply_side": "left",
+        "confirmed": 1
+      }
+    ]
+  },
+  "model_registry": {
+    "schema_version": 1,
+    "generated_at": "2026-10-26",
+    "models": [
+      {
+        "file": "models/detect_fp.rknn",
+        "role": "detector",
+        "status": "active",
+        "sha256": "db6ef05746699792028de7514420abf07e56cb4f2d8d6eabb1d1233bd25b4966"
+      },
+      {
+        "file": "models/detect_hybrid_20261015.rknn",
+        "role": "detector",
+        "status": "active",
+        "sha256": "3d3a2d8a586fb2fe0ccfd08d7eee35e588ff75c1f0f9f94679e5cae6ac50b6d6"
+      },
+      {
+        "file": "models/detect_int8_split_20261022.rknn",
+        "role": "detector",
+        "status": "active",
+        "sha256": "1bffb403efb6b516a4c1e5a44d0b95945a173be447d442dd28a4eed3168b90f9"
+      },
+      {
+        "file": "models/zone_pose_fp.rknn",
+        "role": "pose",
+        "status": "active",
+        "sha256": "fb60b26d4390f37df6b6826647a4025018204576c3c75665c86bca88c7d50b12"
+      },
+      {
+        "file": "models/zone_pose_int8_split_20261022.rknn",
+        "role": "pose",
+        "status": "active",
+        "sha256": "54b9420a0c6be709ad1594bd2ffdce394fe18759ef5e0a31441a805ce5f4b3e2"
+      },
+      {
+        "file": "models/detect_int8.rknn",
+        "role": "detector",
+        "status": "archived_candidate",
+        "sha256": "6a04f4126e6103f4dced6851581e4b5bf774e93cf4588c021bec286ffa4da3ab",
+        "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/detect_int8.rknn"
+      },
+      {
+        "file": "models/detect_int8_20261014.rknn",
+        "role": "detector",
+        "status": "archived_candidate",
+        "sha256": "a4b64b0cbb813499e4311cb5058d3b3690518bff51b622675e4a24f963942d3d",
+        "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/detect_int8_20261014.rknn"
+      },
+      {
+        "file": "models/zone_pose_red_v2_fp.rknn",
+        "role": "pose",
+        "status": "archived_candidate",
+        "sha256": "878c510995bf3aba012f9311ff02f3eaadf68fb37a9762b4fb2d2be783b71863",
+        "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_red_v2_fp.rknn"
+      },
+      {
+        "file": "models/zone_pose_v3_int8.rknn",
+        "role": "pose",
+        "status": "archived_candidate",
+        "sha256": "68194965028a1653eab7d48d764e2a565e790d3aa2095fd5652d6d29e528fdad",
+        "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_v3_int8.rknn"
+      },
+      {
+        "file": "models/detect_v5_int8.rknn",
+        "role": "detector",
+        "status": "active",
+        "sha256": "e0005fc0e3cea9afbcc578ecfbd598e03186df6db9fda62d27f5382a3468a576",
+        "classes": [
+          "blue",
+          "orange",
+          "green",
+          "black",
+          "zone_blue",
+          "zone_red"
+        ]
+      },
+      {
+        "file": "models/zone_pose_int8.rknn",
+        "role": "pose",
+        "status": "active",
+        "sha256": "befcc7240d56dfa1858dd9a077b45f86e5d387aecf60c42dd69abd3213b562dd",
+        "classes": [
+          "zone_left",
+          "zone_right"
+        ]
+      }
+    ]
+  },
+  "runtime_profiles": {
+    "preview": {
+      "schema_version": 1,
+      "behavior_policy": "legacy_field_v1",
+      "hardware": {
+        "camera_index": 0,
+        "frame_width": 1280,
+        "frame_height": 720,
+        "fps": 60,
+        "imu": true,
+        "pitch_feedback": true
+      },
+      "models": {
+        "rknn_library": "../benchmark_results/librknnrt.so",
+        "model_path": "../models/detect_v5_int8.rknn",
+        "input_size": 640,
+        "confidence": 0.5,
+        "injured_confidence": 0.25,
+        "nms": 0.45,
+        "class_names": [
+          "blue",
+          "orange",
+          "green",
+          "black",
+          "zone_blue",
+          "zone_red"
+        ],
+        "pose_model_path": "../models/zone_pose_int8.rknn"
+      },
+      "calibration": {
+        "zone_geometry_file": "project.json#/zone_geometry",
+        "pitch_presets_cdeg": [
+          -3000,
+          -3000,
+          -3000
+        ],
+        "calibration_file": "camera.yaml",
+        "allow_mechanical_pitch_model": false
+      },
+      "runtime": {
+        "team": "blue",
+        "dry_run": true,
+        "hardware": false,
+        "show": false,
+        "vision_log_dir": "none"
+      }
+    },
+    "push_replay": {
+      "schema_version": 1,
+      "behavior_policy": "legacy_replay_v1",
+      "behavior": {
+        "startup_advance_ms": 0
+      },
+      "calibration": {
+        "pitch_presets_cdeg": [
+          500,
+          500,
+          4000
+        ]
+      },
+      "runtime": {
+        "push_replay": "../tests/fixtures/push_delivery.json",
+        "show": false
+      }
+    }
+  }
+}

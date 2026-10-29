@@ -66,7 +66,9 @@ void PushTask::updateTransportPhase(TaskTick& tick) {
                     const auto approach = transport_phase_.carry_approach_.update(t_, context);
                     if (approach.outcome == CarryApproachOutcome::RaiseRelease) {
                         noteDropZone(approach.drop_event, hold);
-                        enter(PushState::RAISE_RELEASE, tick.now, approach.reason);
+                        enter(t_.pixel_grasp_enabled ? PushState::ENTER : PushState::RAISE_RELEASE,
+                              tick.now,
+                              approach.reason);
                         break;
                     }
                     reason_ = approach.reason;
@@ -97,7 +99,9 @@ void PushTask::updateTransportPhase(TaskTick& tick) {
                     actionProgress().travel = 0;
                 }
                 if (actionProgress().travel >= t_.assume_carry_m) {
-                    enter(PushState::RAISE_RELEASE, tick.now, "assumed_drop_point");
+                    enter(t_.pixel_grasp_enabled ? PushState::ENTER : PushState::RAISE_RELEASE,
+                          tick.now,
+                          "assumed_drop_point");
                     break;
                 }
                 reason_ = "assumed_blind_carry";
@@ -284,9 +288,11 @@ void PushTask::updateTransportPhase(TaskTick& tick) {
             if (g < 0)
                 fail("gripper_open_timeout");
             else if (g > 0 && p > 0) {
-                // TEMP_ASSUMPTION：快到区域先松开，再用下压(+20)姿态把块向区内推一段，之后再次抬框退出。
-                if (carryLogic() && !transport_phase_.assume_pushed_ && t_.assume_push_m > 0) {
-                    // 先退一小段让框离开块，再放下框从块后方推入；否则框会重新罩住块一起往里带。
+                if (t_.pixel_grasp_enabled) {
+                    // Jaw release: open once, then leave the cargo behind while reversing.
+                    transport_phase_.release_retreat_.clearTrip();
+                    enter(PushState::BACK_OUT, tick.now, "gripper_opened_at_drop");
+                } else if (carryLogic() && !transport_phase_.assume_pushed_ && t_.assume_push_m > 0) {
                     transport_phase_.release_retreat_.beginReleaseBackOff(
                         zone_.valid(tick.now)
                             ? zone_.predicted(tick.now).bodyToZone({0, holdCenter()}).y
@@ -298,15 +304,15 @@ void PushTask::updateTransportPhase(TaskTick& tick) {
             break;
         }
         case TransportAction::Enter: {
-            // Carry the enclosed load with frame DOWN into the correct half.
+            // Keep the gripper closed while carrying the load into the correct half.
             commandFrame(0, tick.now);
             const int lowered = frameWait(tick.in, 0, tick.now);
             if (lowered <= 0) {
                 if (lowered < 0)
-                    fail("frame_lower_timeout");
+                    fail(t_.pixel_grasp_enabled ? "gripper_close_timeout" : "frame_lower_timeout");
                 break;
             }
-            if (carryLogic() && !transport_phase_.assume_pushed_) {
+            if (!t_.pixel_grasp_enabled && carryLogic() && !transport_phase_.assume_pushed_) {
                 trackCargo(tick.in, tick.now);
                 PushInContext context;
                 context.now_us = tick.now;
@@ -371,11 +377,20 @@ void PushTask::updateTransportPhase(TaskTick& tick) {
             // the zone is unusable, exactly as the inline branch did.
             if (!context.zone_ok)
                 context.lost_target = lostTarget(tick);
-            context.carry = carryLogic();
+            // A jaw must reach the deposit position before opening; losing the zone is not arrival.
+            context.carry = carryLogic() && !t_.pixel_grasp_enabled;
             context.drop_locked = transport_phase_.drop_locked_;
             context.drop_centre_y = transport_phase_.drop_centre_zone_.y;
             if (context.zone_ok) {
                 const auto& z = tick.in.zone_estimate;
+                context.hold = z.bodyToZone({0, holdCenter()});
+                context.half_x = halfX();
+                context.zone_yaw = z.yaw_body_rad;
+            }
+            if (t_.pixel_grasp_enabled && carryLogic() && !context.zone_ok &&
+                zone_.valid(tick.now)) {
+                const auto z = zone_.predicted(tick.now);
+                context.zone_ok = true;
                 context.hold = z.bodyToZone({0, holdCenter()});
                 context.half_x = halfX();
                 context.zone_yaw = z.yaw_body_rad;
@@ -398,7 +413,9 @@ void PushTask::updateTransportPhase(TaskTick& tick) {
             break;
         }
         case TransportAction::BackOut: {
-            // Keep the frame raised so reversing leaves the load behind.
+            // Keep the gripper open so reversing leaves the load behind.
+            if (t_.pixel_grasp_enabled)
+                transport_phase_.release_retreat_.clearTrip();
             commandFrame(1, tick.now);
             const int g = frameWait(tick.in, 1, tick.now);
             if (g <= 0) {

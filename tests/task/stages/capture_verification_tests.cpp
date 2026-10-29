@@ -115,6 +115,7 @@ void multiviewInventoryMustMatchExactly() {
     CHECK(valid.inventory == mixed.pending);
 
     Fixture mismatch;
+    mismatch.first = true; // two ordinary supplies are legal only after the first delivery
     mismatch.multiview(inventory(2));
     const auto wrong_count = mismatch.update(1);
     expect(
@@ -172,6 +173,7 @@ void assumptionModesAndBoundaries() {
         }
 
         Fixture conflict;
+        conflict.first = true; // exercise inventory mismatch independently of the first-trip cap
         conflict.tuning.field_rush = !all_safe;
         conflict.tuning.assume_all_safe = all_safe;
         conflict.multiview(inventory(2));
@@ -514,6 +516,7 @@ void singleViewBoundariesAndIllegalEvidence() {
 void singleViewNeedsConsecutiveCompleteEvidence() {
     for (int interrupted_gate = 0; interrupted_gate < 5; ++interrupted_gate) {
         Fixture fixture;
+        fixture.first = true; // case 4 needs a legal but mismatched two-object inventory
         fixture.tuning.require_multi_view = false;
         fixture.tuning.capture_frames = 3;
         fixture.held(fixture.pending);
