@@ -58,3 +58,18 @@ calibration_runs/
 *.bak-*
 *.orig
 *.rej
+
+# Images and runtime logs (kept on the board)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.tif
+*.tiff
+*.svg
+*.ico
+telemetry_logs/
+logs/
+log/
