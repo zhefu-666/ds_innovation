@@ -10,7 +10,7 @@ void CarryNavigator::update(PushObservation& in, const PushOutput& previous) {
     if (!active || !in.zone_own || !in.zone_identity_verified ||
         !in.zone_estimate.trusted(in.now_us))
         return;
-    if (controlled_ && previous.navigation_gate && in.zone_counts_valid &&
+    if (controlled_ && previous.navigation_background && in.zone_counts_valid &&
         in.zone_inventory_complete) {
         release_background_ = in.zone_occupied;
         release_background_us_ = in.zone_estimate.timestamp_us;

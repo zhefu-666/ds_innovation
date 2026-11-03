@@ -101,9 +101,9 @@ def verify(binary, repository, directory):
     require(dumped["policy"]["name"] == "legacy_field_v1", "Wrong field policy")
     require(dumped["request"]["model_path"] == str(absent_model), "CLI path was changed")
     require(dumped["startup"]["requested_advance_ms"] == 5000, "Lost startup request")
-    require(dumped["startup"]["effective_advance_us"] == 1250000,
+    require(dumped["startup"]["effective_advance_us"] == 5000000,
             "Export did not include the resolved startup duration")
-    require(dumped["startup"]["effective_speed_mps"] == 1,
+    require(math.isclose(dumped["startup"]["effective_speed_mps"], .25, abs_tol=1e-6),
             "Export did not include the resolved startup speed")
     require(math.isclose(dumped["task"]["turn_wz"], .55, abs_tol=1e-6),
             "Task export incorrectly reports the requested turn rate")
@@ -112,6 +112,35 @@ def verify(binary, repository, directory):
     require("MATCH_TIME_LIMIT=" in result.stderr,
             "Startup diagnostics were lost instead of redirected from stdout")
     require(not socket.exists(), "Dump created the runtime control socket")
+
+    require(dumped["motion_link"]["angular_command_scale"] == 1,
+            "Missing scale must preserve uncompensated defaults")
+    compensation_profile = profiles / "angular-compensation.json"
+    write_profile(compensation_profile, {
+        "schema_version": 1, "behavior_policy": "legacy_field_v1",
+        "hardware": {"angular_command_scale": .177},
+    })
+    compensated = strict_json(run(binary, ["--config", compensation_profile,
+                                           *safe_live, "--dump-config", "-"], work).stdout)
+    require(math.isclose(compensated["motion_link"]["angular_command_scale"], .177, abs_tol=1e-6),
+            "File compensation did not reach MotionLink")
+    overridden = strict_json(run(binary, ["--config", compensation_profile, *safe_live,
+                                          "--angular-command-scale", "1",
+                                          "--dump-config", "-"], work).stdout)
+    require(overridden["motion_link"]["angular_command_scale"] == 1,
+            "CLI cannot disable compensation from the site config")
+    require(source_history(overridden, "request.angular_command_scale")[-1] == "explicit_cli",
+            "Scale override provenance is missing")
+    for scale in ("0", "-0.1", "1.1", "nan", "inf", "0.177junk"):
+        run(binary, [*safe_live, "--angular-command-scale", scale, "--dump-config", "-"],
+            work, expected=1, error_fragment="--angular-command-scale")
+    for scale in (0, -.1, 1.1, "0.177"):
+        write_profile(compensation_profile, {
+            "schema_version": 1, "behavior_policy": "legacy_field_v1",
+            "hardware": {"angular_command_scale": scale},
+        })
+        run(binary, ["--config", compensation_profile, *safe_live, "--dump-config", "-"],
+            work, expected=1, error_fragment="hardware.angular_command_scale")
 
     library_search = strict_json(run(binary, ["--rknn-library", "librknnrt.so",
                                               "--dump-config", "-"], work).stdout)
@@ -202,7 +231,7 @@ def verify(binary, repository, directory):
         require(actual["request"]["rknn_library"] ==
                 str((profiles / config["models"]["rknn_library"]).resolve()),
                 "Unrelated file path changed while applying a CLI override")
-        require(actual["startup"]["effective_advance_us"] == 2000000,
+        require(actual["startup"]["effective_advance_us"] == 4000000,
                 "Final startup configuration did not use the CLI request")
         history = source_history(actual, "request.model_path")
         require(f"config:{profile}#models.model_path" in history,

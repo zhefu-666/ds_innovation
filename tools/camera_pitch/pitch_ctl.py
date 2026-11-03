@@ -13,13 +13,14 @@
 set/repl 下发后会在终端实时显示A6上传的pitch读回（变化时立即打印，不变时每0.5s一行），
 含原始cdeg值、目标的小端字节和整帧A6字节（pitch字节3–4用[]标出），便于核对下位机是否
 刷新该字段；结束时汇总读回出现过的值。
-A6帧：A6 | gripper_open | 编号 | pitch低 pitch高 | CRC低 CRC高 | 0A
+A6帧：A6 | 状态/完成标志（由配置解释） | 编号 | pitch低 pitch高 | CRC低 CRC高 | 0A
 运动包：56 | vx(4) | wz(4) | int8 gripper_offset(+5开/-5关) | 编号 | pitch低 pitch高 | CRC低 CRC高
 
 角度单位为度：A6为绝对舵机角90..150，120为偏移0，125为偏移+5。
 界面和A6使用90..150°；TX为-30..30偏移角，发送前减120，工具内部用界面角的cdeg。
-set/repl 启动时先读A6反馈拿到当前动作编号，用“当前编号+1”发一次抬起并等状态与目标匹配，
-之后所有包沿用这个编号和夹爪状态。prepare45（prepare5为兼容别名）沿用当前夹爪状态与编号。
+set/repl/prepare45 先读A6并按配置解析保持目标，沿用当前编号，不新增夹爪动作。
+done_flag模式用 --known-frame-angle/--known-frame-id 保持已知开闭目标，不能把完成标志当位置。
+prepare5 为 prepare45 的兼容别名。
 速度固定为0；下位机断联停车能力需单独验收。
 """
 import argparse, fcntl, os, struct, sys, termios, threading, time, tty
@@ -47,14 +48,20 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from frame_semantics import DEFAULT_CONFIG, DONE_FLAG_NOTE, check_known_id, done_flag, load_mapping, hold_angle
 FRAME_MAPPING = None
 FRAME_KNOWN = None  # done_flag模式：(操作者记录的方框角度, 编号)
-FRAME_HOLD_STATE = None
+FRAME_HOLD_OPEN = None  # 逻辑开闭值：1=开、0=关，不是原始A6状态
 
 def motion_packet(gripper_open, action_id, pitch):
     if gripper_open not in (0, 1):
         raise ValueError('A6夹爪状态必须是0或1')
-    # Preserve binary A6 state by mapping to the signed TX target offset.
+    # gripper_open is a resolved logical target, never a raw A6 done flag.
     b = struct.pack('<BffbBh', 0x56, 0.0, 0.0, 5 if gripper_open else -5, action_id, max(-30, min(30, int(round(pitch / 100)) - 120)))
     return b + struct.pack('<H', crc16(b))
+
+
+def frame_hold_open(state, action_id):
+    """Resolve A6 semantics and the known target before building or validating TX."""
+    check_known_id(action_id, FRAME_KNOWN)
+    return int(hold_angle(state, FRAME_MAPPING, FRAME_KNOWN) == 0)
 
 
 class Feedback:
@@ -160,7 +167,7 @@ class Tracer:
         if changed or now - self.last_print >= self.every:
             err = '' if p == INVALID_PITCH or self.target is None else '  差 %+.2f°' % ((p - self.target) / 100)
             goal = '' if self.target is None else '目标 %.2f° [%s]  ' % (self.target / 100, cdeg_hex(self.target))
-            print('  +%5.2fs  %s读回 %s (%d cdeg)%s  编号=%d gripper_open=%d  RX: %s%s' % (
+            print('  +%5.2fs  %s读回 %s (%d cdeg)%s  编号=%d a6_state=%d  RX: %s%s' % (
                   now - self.t0, goal, pitch_txt(p), p, err, action_id, done, frame_hex(raw),
                   '  *变化' if changed and self.last_pitch is not None else ''), flush=True)
             self.last_print = now
@@ -216,7 +223,7 @@ class Link:
         if not self.dry_run:
             if self.last is None or time.monotonic()-self.last_received>.2:
                 raise TimeoutError('Camera tool lost fresh feedback; stopped transmitting')
-            expected_offset = 5 if self.last[0] == 1 else -5 if self.last[0] == 0 else None
+            expected_offset = 5 if frame_hold_open(self.last[0], self.last[1]) else -5
             if struct.unpack_from('<b', pkt, 9)[0] != expected_offset or pkt[10] != self.last[1]:
                 raise ValueError('Gripper state/action id changed; stopped transmitting')
             os.write(self.fd, pkt)
@@ -234,7 +241,7 @@ class Link:
 
 
 def move_pitch(link, action_id, target, timeout, tol, watch=0.0):
-    pkt = motion_packet(FRAME_HOLD_STATE, action_id, target)
+    pkt = motion_packet(FRAME_HOLD_OPEN, action_id, target)
     print('TX (pitch %.2f°, 编号%d): %s' % (target / 100, action_id, pkt.hex(' ').upper()))
     if link.dry_run:
         return True
@@ -263,9 +270,10 @@ def prepare_pitch_forty_five(link, gripper_open, action_id, timeout):
     if gripper_open not in (0, 1) or not 0 <= action_id <= 255:
         raise ValueError('A6方框状态或动作编号无效，拒绝发送')
     target = 12500
-    pkt = motion_packet(gripper_open, action_id, target)
-    print('TX (零速度、保持夹爪状态%d/编号%d、pitch 125°): %s' %
-          (gripper_open, action_id, pkt.hex(' ').upper()), flush=True)
+    hold_open = frame_hold_open(gripper_open, action_id)
+    pkt = motion_packet(hold_open, action_id, target)
+    print('TX (零速度、保持夹爪目标%s/编号%d、pitch 125°): %s' %
+          ('开' if hold_open else '关', action_id, pkt.hex(' ').upper()), flush=True)
     if link.dry_run:
         return True
     stable_since = None
@@ -334,7 +342,7 @@ def repl(link, action_id, pitch, timeout, tol):
     def tx():
         while not stop.is_set():
             with lock:
-                pkt = motion_packet(FRAME_HOLD_STATE, action_id, state['pitch'])
+                pkt = motion_packet(FRAME_HOLD_OPEN, action_id, state['pitch'])
             link.send(pkt)
             link.poll()
             time.sleep(0.05)
@@ -356,7 +364,7 @@ def repl(link, action_id, pitch, timeout, tol):
             elif line == 's':
                 if link.last:
                     d, i, p, raw = link.last
-                    print('目标 %.2f°  读回 %s  编号=%d gripper_open=%d' % (state['pitch'] / 100, pitch_detail(p, raw), i, d))
+                    print('目标 %.2f°  读回 %s  编号=%d a6_state=%d' % (state['pitch'] / 100, pitch_detail(p, raw), i, d))
                 else:
                     print('目标 %.2f°  尚无反馈' % (state['pitch'] / 100))
             elif line == 'm':
@@ -364,7 +372,7 @@ def repl(link, action_id, pitch, timeout, tol):
                 trace(link, state['pitch'], None, tol)
             elif line == 'x':
                 with lock:
-                    print(motion_packet(FRAME_HOLD_STATE, action_id, state['pitch']).hex(' ').upper())
+                    print(motion_packet(FRAME_HOLD_OPEN, action_id, state['pitch']).hex(' ').upper())
             else:
                 try:
                     target = to_cdeg(float(line))
@@ -373,7 +381,7 @@ def repl(link, action_id, pitch, timeout, tol):
                     continue
                 with lock:
                     state['pitch'] = target
-                print('目标 -> %.2f°（保持已反馈夹爪状态，编号%d）' % (target / 100, action_id))
+                print('目标 -> %.2f°（保持已解析夹爪目标，编号%d）' % (target / 100, action_id))
                 if timeout > 0:
                     trace(link, target, timeout, tol)
     except (KeyboardInterrupt, EOFError):
@@ -398,7 +406,8 @@ def main():
     ap.add_argument('--watch', type=float, default=0.0, metavar='秒',
                     help='set 到位/超时后继续保持目标并显示读回的秒数')
     args = ap.parse_args()
-    global FRAME_MAPPING, FRAME_KNOWN
+    global FRAME_MAPPING, FRAME_KNOWN, FRAME_HOLD_OPEN
+    FRAME_KNOWN = None
     if args.action not in ("status","watch"):
         FRAME_MAPPING=load_mapping(args.frame_config)
         if done_flag(FRAME_MAPPING):
@@ -422,7 +431,7 @@ def main():
         link.last = fb
         link.last_received=time.monotonic()
         done, cur_id, cur_pitch, raw = fb
-        print('当前: 动作编号=%d gripper_open=%d pitch=%s' % (cur_id, done, pitch_detail(cur_pitch, raw)))
+        print('当前: 动作编号=%d a6_state=%d pitch=%s' % (cur_id, done, pitch_detail(cur_pitch, raw)))
         if args.action == 'status':
             return
         if args.action == 'watch':
@@ -440,9 +449,7 @@ def main():
             tracer.summary()
             return
 
-        if FRAME_KNOWN is not None:
-            check_known_id(cur_id, FRAME_KNOWN)
-            hold_angle(done, FRAME_MAPPING, FRAME_KNOWN)  # flag须为1（上一动作已完成）
+        FRAME_HOLD_OPEN = frame_hold_open(done, cur_id)
         if args.action in ('prepare5', 'prepare45'):
             if not prepare_pitch_forty_five(link, done, cur_id, args.timeout):
                 sys.exit(1)
@@ -452,9 +459,6 @@ def main():
             raise ValueError('Missing feedback; refusing to guess frame or camera hold position')
         keep=cur_pitch
         action_id=cur_id
-        # move_pitch/repl use the recorded raw state, not a guessed open state.
-        global FRAME_HOLD_STATE
-        FRAME_HOLD_STATE=done
         if args.action == 'set':
             ok = move_pitch(link, action_id, to_cdeg(args.deg), args.timeout, int(round(args.tol * 100)), args.watch)
             if not ok:

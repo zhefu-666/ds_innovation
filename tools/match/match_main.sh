@@ -10,14 +10,16 @@ usage() {
   tools/match/match_main.sh [--check] [--frame open|close|keep] [--known-frame-angle 0|20 --known-frame-id N]
   tools/match/match_main.sh --run --site-clear [--frame open|close|keep] [--known-frame-angle 0|20 --known-frame-id N]
 
+--start-zone N      出发区1..4；2/3顺时针，1/4逆时针；默认读取config/project.json（当前3区）。
 --phase NAME        直接执行 startup|search|capture|transport，结束后停车退出；不执行前序阶段。transport 保持已关方框并核验现有货物。
+--capture-after-first  仅配合 --phase capture：按首个普通物资已送达开始，可测1个伤员或最多2个普通/核心物资；保留抓取核验。
 --step-phases       四阶段调试：阶段交接前停车，另一个终端用 match_ctl.py next 继续；禁用180秒总限时，默认进程上限3600秒。
 --gripper           使用2026-10-27实测夹爪候选、90/120/140三档和config/camera-overlap.yaml；未完成停止余量/140°区域/重叠标定时静态检查拒绝，不能直接运行。
 --status            只读查询下位机A6反馈(完成位/动作编号/相机角)和本机记录的方框状态，TX=0，不动任何机构；
 --clear-neighbours  给主程序加 --clear-neighbours（扫开目标走廊内的邻近物资，不搬运）；
 --run 开始前自动做同样的下位机只读查询；--frame keep 时记录/给定的编号与下位机编号不一致则拒绝。
 --frame open|close  开局固定先发反向动作、再发目标动作（open=先close再open；不看记录和下位机编号，不跳过），最终停在目标状态(开框0°/关框20°)，并记录已知方框状态；
---frame keep        不动方框，沿用上次 open/close 的记录，或用 --known-frame-* 显式给出（默认）。
+--frame keep        不动方框，沿用上次 open/close 的记录，或用 --known-frame-* 显式给出（transport 默认）；整场和 startup 默认 close。
 --run 的顺序：静态检查 -> 方框 -> 相机回 UI 90°（内部 -30°） -> 再次静态检查 -> 启动主程序（180秒，--auto-run）。
 TXT
   exit 2
@@ -25,12 +27,14 @@ TXT
 
 mode=check
 site_clear=0
-frame=keep
+frame=close
 frame_explicit=0
 single_phase=
+capture_after_first=0
 cli_angle=
 cli_id=
-startup_ms=0
+startup_ms=2000
+start_zone=
 startup_speed=.10
 clear_neighbours=0
 gripper_profile=0
@@ -39,6 +43,7 @@ while (( $# )); do
   case "$1" in
     --check) mode=check ;;
     --step-phases) step_phases=1 ;;
+    --capture-after-first) capture_after_first=1 ;;
     --phase) [[ $# -ge 2 ]] || usage; single_phase="$2"; shift ;;
     --help|-h) usage ;;
     --gripper) gripper_profile=1 ;;
@@ -50,25 +55,37 @@ while (( $# )); do
     --known-frame-angle) [[ $# -ge 2 ]] || usage; cli_angle="$2"; shift ;;
     --known-frame-id) [[ $# -ge 2 ]] || usage; cli_id="$2"; shift ;;
     --startup-advance-ms) [[ $# -ge 2 ]] || usage; startup_ms="$2"; shift ;;
+    --start-zone) [[ $# -ge 2 ]] || usage; start_zone="$2"; shift ;;
     --startup-speed) [[ $# -ge 2 ]] || usage; startup_speed="$2"; shift ;;
     *) usage ;;
   esac
   shift
 done
+if (( capture_after_first )) && [[ "$single_phase" != capture ]]; then
+  echo "--capture-after-first 只能与 --phase capture 同用" >&2; exit 2
+fi
 if [[ -n "$single_phase" ]]; then
   case "$single_phase" in startup|search|capture|transport) ;; *) usage ;; esac
   (( step_phases == 0 )) || { echo '--phase 不能与 --step-phases 同用' >&2; exit 2; }
-  if (( ! frame_explicit )) && [[ -z "$cli_angle$cli_id" && "$single_phase" != transport ]]; then frame=open; fi
+  if (( ! frame_explicit )) && [[ -z "$cli_angle$cli_id" ]]; then
+    case "$single_phase" in
+      startup) frame=close ;;
+      transport) frame=keep ;;
+      *) frame=open ;;
+    esac
+  fi
   if [[ "$single_phase" == transport && "$frame" != keep ]]; then
     echo 'transport 直接从已装货且已关框状态开始，必须 --frame keep，不能开局翻转方框。' >&2; exit 2
   fi
 fi
 [[ "$frame" == open || "$frame" == close || "$frame" == keep ]] || usage
 if [[ -n "$cli_angle$cli_id" ]]; then
+  (( frame_explicit )) || frame=keep
   [[ "$cli_angle" == 0 || "$cli_angle" == 20 ]] || { echo '--known-frame-angle 必须是 0 或 20' >&2; exit 2; }
   [[ "$cli_id" =~ ^[0-9]+$ ]] && (( cli_id >= 1 && cli_id <= 255 )) || { echo '--known-frame-id 必须是 1..255' >&2; exit 2; }
   [[ "$frame" == keep ]] || { echo '--frame open|close 会自己记录方框状态，不能同时给 --known-frame-*' >&2; exit 2; }
 fi
+[[ -z "$start_zone" || "$start_zone" =~ ^[1-4]$ ]] || { echo "--start-zone 必须是 1..4" >&2; exit 2; }
 [[ "$startup_ms" =~ ^[0-9]+$ ]] && (( startup_ms <= 60000 )) || { echo '--startup-advance-ms 必须是 0..60000 的整数' >&2; exit 2; }
 [[ "$startup_speed" =~ ^[0-9]*\.?[0-9]+$ ]] && awk -v v="$startup_speed" 'BEGIN{exit !(v>0 && v<=1)}' || { echo '--startup-speed 必须在 (0,1] m/s' >&2; exit 2; }
 if [[ "$mode" == run && $site_clear -ne 1 ]]; then
@@ -123,7 +140,7 @@ build_args() {
   args=(--config config/project.json
     --team blue --no-show --parallel-infer --async-capture
     --controlled-empty-field --match-seconds 180
-    --startup-advance-ms "$startup_ms" --startup-speed "$startup_speed" --scan-wz 0.4 --turn-wz .25
+    --startup-advance-ms "$startup_ms" --startup-speed "$startup_speed" --scan-wz 0.6 --turn-wz .25
     --telemetry --telemetry-fps 30
     --hardware --imu --imu-port /dev/ttyUSB0 --imu-baud 115200 --port /dev/ttyACM0 --baud 115200
     --known-frame-angle "$known_angle" --known-frame-id "$known_id")
@@ -131,8 +148,10 @@ build_args() {
     args+=(--task-calibration config/project.json#/frame/gripper
            --pitch-presets -3000,0,2000 --calibration config/camera-overlap.yaml)
   fi
+  [[ -z "$start_zone" ]] || args+=(--start-zone "$start_zone")
   [[ -z "$single_phase" ]] || args+=(--phase "$single_phase" --no-match-time-limit)
   (( step_phases )) && args+=(--step-phases --no-match-time-limit)
+  (( capture_after_first )) && args+=(--capture-after-first)
   (( clear_neighbours )) && args+=(--clear-neighbours)
   return 0
 }
@@ -256,6 +275,9 @@ args+=(--auto-run)
 source tools/match/telemetry_bridge.sh
 if [[ -n "$single_phase" ]]; then
   echo "[PHASE_DIRECT] phase=$single_phase：直接执行所选阶段，完成或失败后停车退出。"
+  if (( capture_after_first )); then
+    echo "[PHASE_CAPTURE] capture_after_first=1：仅设置首个普通物资已送达的测试初态；仍需识别、通道/分堆和抓取核验。"
+  fi
 elif (( step_phases )); then
   echo '[PHASE_STEP] 启动 -> 搜索接近 -> 捕获 -> 运输交付；每阶段后停车，等待 match_ctl.py next。'
   echo '[PHASE_STEP] 已禁用180秒总限时；阶段预算和健康检查保留。status 查询，stop 暂停，finish 终止。'

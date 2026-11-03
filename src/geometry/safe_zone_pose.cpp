@@ -91,6 +91,7 @@ SafeZonePose SafeZonePoseEstimator::estimate(const SafeZoneObservation& o,
     }
     const bool reference = finitePose(o.reference_rvec) && finitePose(o.reference_tvec);
     const bool recent = previous_.valid && now >= previous_us_ && now - previous_us_ <= 350000;
+    const bool normal_reference = finitePose(o.expected_normal_camera);
     struct Candidate {
         int index;
         double rms, score;
@@ -125,6 +126,13 @@ SafeZonePose SafeZonePoseEstimator::estimate(const SafeZoneObservation& o,
         if (!std::isfinite(rms) || rms > max_error_px_)
             continue;
         double score = rms;
+        if (normal_reference) {
+            const double cosine = R.col(2).dot(o.expected_normal_camera) /
+                                  cv::norm(o.expected_normal_camera);
+            const double angle = std::acos(std::clamp(cosine, -1.0, 1.0));
+            if (angle > 25 * CV_PI / 180) continue;
+            score += 2 * angle;
+        }
         if (reference)
             score += 5 * cv::norm(tv[i] - o.reference_tvec) +
                      2 * rotationDistance(rv[i], o.reference_rvec);
@@ -138,6 +146,7 @@ SafeZonePose SafeZonePoseEstimator::estimate(const SafeZoneObservation& o,
         return a.score < b.score;
     });
     if (!reference && !recent && candidates.size() > 1 &&
+        (!normal_reference || std::abs(candidates[0].score-candidates[1].score) < .05) &&
         std::abs(candidates[0].rms - candidates[1].rms) < .1 &&
         rotationDistance(rv[candidates[0].index], rv[candidates[1].index]) > .15)
         return fail("ippe_ambiguous");

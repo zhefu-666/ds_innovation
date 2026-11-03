@@ -17,6 +17,7 @@ import threading
 import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from websockets.server import serve
 from server import IMAGE_SCHEMA, channel
 
@@ -302,9 +303,16 @@ def handler(source):
             pass
     return Handler
 
+class TelemetryHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # Telemetry needs the bound address, not a DNS-derived server name.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 async def main(args):
     source = Source(args.snapshot, args.fps)
-    http = ThreadingHTTPServer((args.host, args.http_port), handler(source))
+    http = TelemetryHTTPServer((args.host, args.http_port), handler(source))
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

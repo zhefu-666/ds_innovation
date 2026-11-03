@@ -23,18 +23,24 @@ MotionLink::MotionLink(UARTController& uart, MotionLinkConfig config, std::funct
         if (!std::isfinite(rate) || rate <= 0)
             throw std::invalid_argument(
                 "MotionLink acceleration/deceleration must be finite and positive");
+    if (!std::isfinite(config_.angular_command_scale) || config_.angular_command_scale <= 0 ||
+        config_.angular_command_scale > 1)
+        throw std::invalid_argument("MotionLink angular_command_scale must be finite and in (0,1]");
     worker_ = std::thread(&MotionLink::run, this);
 }
 MotionLink::~MotionLink() {
     stop();
 }
 
-void MotionLink::submit(const MotionCommand& command, bool immediate_stop) {
+void MotionLink::submit(const MotionCommand& command,
+                        bool immediate_stop,
+                        bool preserve_angular_tuning) {
     {
         std::lock_guard<std::mutex> guard(mutex_);
         if (stopping_)
             return;
         latest_ = command;
+        preserve_angular_tuning_ = preserve_angular_tuning;
         immediate_stop_ = immediate_stop;
         stop_pending_ = stop_pending_ || immediate_stop;
         stats_.requested_vx_mps = command.vx_mps;
@@ -45,7 +51,10 @@ void MotionLink::submit(const MotionCommand& command, bool immediate_stop) {
     }
     wake_.notify_one();
 }
-void MotionLink::write(MotionCommand command, bool stale, bool immediate_stop) {
+void MotionLink::write(MotionCommand command,
+                       bool stale,
+                       bool immediate_stop,
+                       bool preserve_angular_tuning) {
     MotionCommand guarded = command;
     if (permit_ && !permit_()) {
         if (!ever_authorized_)
@@ -58,9 +67,15 @@ void MotionLink::write(MotionCommand command, bool stale, bool immediate_stop) {
     }
     const auto write_at = nowUs();
     guarded = ramp_.next(guarded, write_at, stale || immediate_stop);
+    // Restore the already tuned phases in their original units, including the ramp.
+    // All phases still pass through the same response compensation exactly once.
+    const float precomp_wz =
+        preserve_angular_tuning ? guarded.wz_rps / config_.angular_command_scale : guarded.wz_rps;
+    MotionCommand wire = guarded;
+    wire.wz_rps = precomp_wz * config_.angular_command_scale;
     bool ok = false;
     try {
-        ok = uart_.sendMotion(guarded);
+        ok = uart_.sendMotion(wire);
     } catch (const std::exception& e) {
         std::cerr << "[MCU] send rejected: " << e.what() << "\n";
     }
@@ -75,6 +90,8 @@ void MotionLink::write(MotionCommand command, bool stale, bool immediate_stop) {
         stats_.last_ok_us = nowUs();
         stats_.sent_vx_mps = guarded.vx_mps;
         stats_.sent_wz_rps = guarded.wz_rps;
+        stats_.precomp_wz_rps = precomp_wz;
+        stats_.wire_wz_rps = wire.wz_rps;
     } else
         ++stats_.failed;
     if (stale)
@@ -92,13 +109,14 @@ void MotionLink::run() {
         if (!has_command_)
             continue;
         MotionCommand command = latest_;
+        const bool preserve_angular_tuning = preserve_angular_tuning_;
         const bool immediate_stop = immediate_stop_ || stop_pending_;
         stop_pending_ = false;
         const bool stale = nowUs() - submitted_us_ > uint64_t(config_.command_timeout_ms) * 1000;
         if (stale)
             command = stopped(command);
         lock.unlock();
-        write(command, stale, immediate_stop);
+        write(command, stale, immediate_stop, preserve_angular_tuning);
         lock.lock();
     }
 }
@@ -121,7 +139,7 @@ void MotionLink::stop() {
         sent = has_command_;
     }
     if (sent)
-        write(stopped(last), false, true);
+        write(stopped(last), false, true, false);
 }
 bool MotionLink::healthy() const {
     uint64_t submitted;

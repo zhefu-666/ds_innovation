@@ -20,6 +20,8 @@ struct GeometryResult {
     bool identity_verified = false;
     std::string reason = "not_configured";
     ZoneEstimate zone;
+    bool pnp_primary = false;
+    cv::Mat zone_camera_rvec, zone_camera_tvec;
     bool pnp_attempted = false, pnp_solution_valid = false, pnp_delta_valid = false;
     std::string pnp_solver_reason = "not_run", pnp_reason = "ground_fit_unavailable";
     double pnp_position_delta_m = std::numeric_limits<double>::quiet_NaN();
@@ -38,6 +40,7 @@ struct GeometryResult {
 // Dangerous objects get contact too (for avoidance only; targetSelectable never picks them).
 struct GroundContactConfig {
     float min_confidence = .5f;
+    float ui140_core_confidence = 1.f;
     int edge_margin_px = 4;
     float max_range_m = 3.f;
     float size_tolerance = .35f;       // relative slack for loose detector boxes
@@ -83,6 +86,7 @@ class GeometryPipeline {
                uint64_t now_us) const;
 
   private:
+    void estimateZonePnp(GeometryResult&, const GeometryFrame&, const KeypointFrame&);
     std::string groundContact(SegDetection&, const GeometryFrame&);
     bool voteUpright(const SegDetection&, float single_diff, int& n, float& median);
     struct PoseVote {

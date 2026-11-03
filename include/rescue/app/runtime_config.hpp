@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rescue/perception/capture_monitor.hpp"
+#include "rescue/perception/pushboard_floor.hpp"
 #include "rescue/config/config.hpp"
 #include "rescue/geometry/geometry_pipeline.hpp"
 #include "rescue/control/match_control.hpp"
@@ -45,6 +46,7 @@ struct ResolvedRuntimeConfig {
     Config request;
     TaskTuning task;
     CaptureConfig capture;
+    PushboardFloorConfig pushboard_floor;
     GroundContactConfig ground_contact;
     MatchConfig match;
     MotionLinkConfig motion_link;

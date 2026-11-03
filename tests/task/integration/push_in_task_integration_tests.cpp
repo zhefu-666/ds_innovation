@@ -98,7 +98,7 @@ struct Rig {
         task.frame_raised_ = 0;
         task.gripper_us_ = kStart;
         task.transport_phase_.carry_us_ = kStart;
-        seed(PushState::ENTER);
+        seedPlacement();
     }
 
     ZoneEstimate estimate(uint64_t timestamp) const {
@@ -107,6 +107,17 @@ struct Rig {
 
     void seed(PushState state) {
         task.enter(state, input.now_us, "seed_push_in");
+        task.last_us_ = input.now_us;
+        task.last_vx_ = task.last_wz_ = 0;
+        task.pitch_cmd_ = task.desiredPitch();
+        task.pitch_wait_us_ = input.now_us;
+        input.camera_pitch_cdeg = task.pitch_cmd_;
+    }
+
+    void seedPlacement() {
+        task.beginCarryPlacement(input.now_us, "seed_push_in");
+        // Each case measures update-time events after the Carry destination was selected.
+        task.takeDropZoneEvent();
         task.last_us_ = input.now_us;
         task.last_vx_ = task.last_wz_ = 0;
         task.pitch_cmd_ = task.desiredPitch();
@@ -171,7 +182,7 @@ struct Rig {
         task.zone_.reset();
         task.actionProgress().travel = 10;
         tick();
-        assert(output.state == PushState::ENTER && output.reason == "assumed_release_then_push");
+        assert(output.state == PushState::CARRY && output.reason == "assumed_release_then_push");
         input.gripper_feedback_open = 0;
     }
 
@@ -216,7 +227,7 @@ void commonGates() {
         rig.cargo(.02f);
         rig.input.camera_pitch_stable = false;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER && rig.output.reason == "camera_pitch_wait");
+        assert(rig.output.state == PushState::CARRY && rig.output.reason == "camera_pitch_wait");
         assert(rig.output.motion.gripper_offset == 0 &&
                rig.output.motion.frame_transaction == kTransaction);
         assert(rig.task.transport_phase_.cargo_last_ts_ == 0);
@@ -235,7 +246,7 @@ void commonGates() {
         rig.cargo(.02f);
         rig.input.gripper_feedback_open = 1;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.task.transport_phase_.cargo_last_ts_ == 0);
         assert(rig.output.motion.frame_transaction == kTransaction + 1);
         rig.closed();
@@ -253,7 +264,7 @@ void commonGates() {
         rig.openFrame();
         rig.input.drop_plan_valid = false;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "drop_revalidation_missing");
         assert(rig.output.motion.gripper_offset == 0 &&
                rig.output.motion.frame_transaction == kTransaction);
@@ -268,7 +279,7 @@ void commonGates() {
         Rig rig;
         rig.input.drop_plan_valid = false;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_push_in_blind");
         assert(rig.output.motion.vx_mps > 0 && !rig.task.fault_);
         rig.report("field_carry_uses_experimental_push_path");
@@ -278,7 +289,7 @@ void commonGates() {
         rig.cargo(.02f);
         rig.input.path_safe = false;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER && rig.output.reason == "forward_path_blocked");
+        assert(rig.output.state == PushState::CARRY && rig.output.reason == "forward_path_blocked");
         assert(rig.task.transport_phase_.cargo_last_ts_ == rig.input.now_us);
         rig.stationary();
         rig.report("shared_forward_gate_still_tracks_cargo");
@@ -297,7 +308,7 @@ void commonGates() {
         Rig rig;
         rig.input.opponent_zone_clear = false;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "opponent_clearance_missing");
         rig.stationary();
         rig.report("shared_opponent_gate_blocks_blind_push");
@@ -402,7 +413,7 @@ void completionPriority() {
         rig.tick();
         const auto reference = rig.task.transport_phase_.cargo_ref_us_;
         rig.elapsed(kTick + rig.task.t_.assume_stuck_us - 1);
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.task.transport_phase_.cargo_ref_us_ == reference);
         rig.elapsed(kTick + rig.task.t_.assume_stuck_us);
         assert(rig.output.state == PushState::BACK_OUT && rig.task.transport_phase_.repush_n_ == 1);
@@ -427,7 +438,7 @@ void completionPriority() {
         Rig rig;
         rig.cargo(.12f);
         rig.tick();
-        assert(rig.output.state == PushState::ENTER);
+        assert(rig.output.state == PushState::CARRY);
         rig.task.takeDropZoneEvent();
         rig.task.zone_.reset();
         rig.forgetCargo();
@@ -449,7 +460,7 @@ void alignment() {
         rig.cargo(.02f, .15f);
         rig.input.imu_blocked_us = parameters.assume_imu_block_us;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_push_align_turn");
         assert(rig.output.motion.vx_mps == 0 && rig.output.motion.wz_rps < 0);
         assert(rig.task.transport_phase_.repush_n_ == 0 &&
@@ -457,7 +468,7 @@ void alignment() {
         assert(rig.task.takeDropZoneEvent().empty());
         rig.report("alignment_turn_suppresses_stuck_and_resets_reference");
         rig.elapsed(kTick + parameters.assume_align_budget_us);
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_push_in_pursuit");
         assert(rig.output.motion.vx_mps > 0 && rig.task.transport_phase_.repush_n_ == 0);
         const auto events = rig.task.takeDropZoneEvent();
@@ -477,7 +488,7 @@ void alignment() {
         if (seen)
             rig.cargo(.02f);
         rig.tick();
-        assert(rig.output.state == PushState::ENTER && rig.output.motion.vx_mps > 0);
+        assert(rig.output.state == PushState::CARRY && rig.output.motion.vx_mps > 0);
         const auto events = rig.task.takeDropZoneEvent();
         assert(events.find(seen ? "event=push_aligned" : "event=push_align_unseen") !=
                std::string::npos);
@@ -495,7 +506,7 @@ void alignment() {
         rig.input.directional_clearance_valid = true;
         rig.input.turn_safe = false;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER && rig.output.reason == "turn_sweep_blocked");
+        assert(rig.output.state == PushState::CARRY && rig.output.reason == "turn_sweep_blocked");
         assert(rig.task.transport_phase_.repush_n_ == 0);
         rig.stationary();
         rig.report("alignment_turn_uses_shared_clearance_gate");
@@ -511,18 +522,18 @@ void confirmation() {
         Rig rig(parameters);
         rig.cargo(.02f);
         rig.elapsed(parameters.enter_budget_us);
-        assert(rig.output.state == PushState::ENTER && rig.task.takeDropZoneEvent().empty());
+        assert(rig.output.state == PushState::CARRY && rig.task.takeDropZoneEvent().empty());
         rig.elapsed(parameters.enter_budget_us + 1);
-        assert(rig.output.state == PushState::ENTER && rig.output.motion.vx_mps > 0);
+        assert(rig.output.state == PushState::CARRY && rig.output.motion.vx_mps > 0);
         auto events = rig.task.takeDropZoneEvent();
         assert(events.find("event=push_unconfirmed_visible") <
                events.find("event=push_unconfirmed half="));
         rig.report("visible_confirmation_extends_after_budget", events);
         rig.elapsed(parameters.enter_budget_us + 50000);
         assert(rig.task.takeDropZoneEvent().empty());
-        rig.seed(PushState::ENTER);
+        rig.seedPlacement();
         rig.elapsed(parameters.enter_budget_us + 1);
-        assert(rig.output.state == PushState::ENTER && rig.task.takeDropZoneEvent().empty());
+        assert(rig.output.state == PushState::CARRY && rig.task.takeDropZoneEvent().empty());
         rig.report("same_state_reentry_retains_unconfirmed_history");
         rig.cargo(.08f);
         rig.elapsed(parameters.enter_budget_us + 2);
@@ -539,7 +550,7 @@ void confirmation() {
         Rig rig(parameters);
         rig.vref = true;
         rig.elapsed(parameters.enter_budget_us + 1);
-        assert(rig.output.state == PushState::ENTER && rig.output.motion.vx_mps > 0);
+        assert(rig.output.state == PushState::CARRY && rig.output.motion.vx_mps > 0);
         auto events = rig.task.takeDropZoneEvent();
         assert(events.find("event=push_unconfirmed_hidden") <
                events.find("event=push_unconfirmed half="));
@@ -569,7 +580,7 @@ void confirmation() {
         Rig rig(parameters);
         rig.cargo(.12f, 0, true);
         rig.elapsed(parameters.enter_budget_us + 1);
-        assert(rig.output.state == PushState::ENTER && !rig.task.transport_phase_.assume_pushed_);
+        assert(rig.output.state == PushState::CARRY && !rig.task.transport_phase_.assume_pushed_);
         const auto events = rig.task.takeDropZoneEvent();
         assert(events.find("event=push_unconfirmed_visible") != std::string::npos);
         rig.report("clipped_visible_cargo_cannot_confirm", events);
@@ -580,7 +591,7 @@ void steeringAndProgress() {
     {
         Rig rig;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_push_in_blind");
         rig.task.actionProgress().travel = rig.task.t_.assume_push_m;
         rig.task.last_vx_ = 0;
@@ -592,7 +603,7 @@ void steeringAndProgress() {
     {
         Rig rig;
         rig.elapsed(rig.task.t_.enter_budget_us);
-        assert(rig.output.state == PushState::ENTER && rig.output.motion.vx_mps > 0);
+        assert(rig.output.state == PushState::CARRY && rig.output.motion.vx_mps > 0);
         rig.elapsed(rig.task.t_.enter_budget_us + 1);
         rig.completed();
         rig.report("blind_push_timeout_uses_strict_greater_than");
@@ -604,7 +615,7 @@ void steeringAndProgress() {
         assert(rig.output.reason == "assumed_push_in_visual" && rig.output.motion.wz_rps == 0);
         rig.vref = false;
         rig.elapsed(kTick + 400001);
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_push_in_dead_reckoning");
         assert(rig.output.motion.vx_mps > 0);
         rig.report("anchored_push_labels_visual_reference_age");
@@ -620,7 +631,7 @@ void steeringAndProgress() {
         rig.cargo(.02f, .07f);
         rig.task.transport_phase_.repush_n_ = 2;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_push_in_visual");
         assert(close(rig.output.motion.vx_mps, .06f) && rig.output.motion.wz_rps > 0);
         rig.report("visible_line_push_uses_repush_speed_and_slant");
@@ -643,11 +654,11 @@ void steeringAndProgress() {
         rig.forgetCargo();
         rig.task.zone_.advance(0, .1f);
         rig.elapsed(kTick + 400001);
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_push_in_hold_heading");
         assert(close(rig.output.motion.wz_rps, pursuit_wz - parameters.heading_gain * .1f));
         rig.report("lost_cargo_holds_last_pursuit_heading");
-        rig.seed(PushState::ENTER);
+        rig.seedPlacement();
         rig.tick();
         assert(rig.output.reason == "assumed_push_in_hold_heading");
         rig.report("same_state_reentry_retains_pursuit_heading");
@@ -665,7 +676,7 @@ void steeringAndProgress() {
         rig.hold_y = rig.task.t_.assume_push_depth_m + .01f;
         rig.cargo(.08f);
         rig.tick();
-        assert(rig.output.state == PushState::ENTER && !rig.task.transport_phase_.assume_pushed_);
+        assert(rig.output.state == PushState::CARRY && !rig.task.transport_phase_.assume_pushed_);
         assert(rig.output.motion.vx_mps > 0);
         rig.report("visible_cargo_requires_overshoot_depth");
     }
@@ -711,7 +722,7 @@ void probesAndLifecycle() {
         rig.task.trip_context_.trip_ = ordinary();
         rig.task.transport_phase_.drop_locked_ = true;
         rig.task.transport_phase_.drop_centre_zone_ = rig.input.drop_centre_zone;
-        rig.seed(PushState::ENTER);
+        rig.seedPlacement();
         rig.elapsed(parameters.assume_probe_first_us);
         assert(rig.output.reason == "assumed_push_imu_probe" && rig.output.motion.wz_rps < 0);
         rig.report("reset_restarts_probe_with_original_sign");
@@ -726,7 +737,7 @@ void probesAndLifecycle() {
         rig.vref = true;
         rig.elapsed(100000);
         assert(rig.output.motion.wz_rps < 0);
-        rig.seed(PushState::ENTER);
+        rig.seedPlacement();
         rig.elapsed(150000);
         assert(rig.output.motion.wz_rps == 0 && rig.output.reason == "assumed_push_in_visual");
         rig.report("same_state_reentry_retains_probe_schedule");
@@ -739,7 +750,7 @@ void probesAndLifecycle() {
         rig.input.run = false;
         rig.tick();
         assert(rig.output.state == PushState::WAIT_START &&
-               rig.task.stopped_from_ == PushState::ENTER);
+               rig.task.stopped_from_ == PushState::CARRY);
         assert(rig.task.transport_phase_.cargo_last_ts_ == cargo_timestamp &&
                rig.output.batch_size == 1);
         rig.closed();
@@ -769,7 +780,7 @@ void probesAndLifecycle() {
         rig.task.trip_context_.trip_ = ordinary();
         rig.task.transport_phase_.drop_locked_ = true;
         rig.task.transport_phase_.drop_centre_zone_ = rig.input.drop_centre_zone;
-        rig.seed(PushState::ENTER);
+        rig.seedPlacement();
         rig.vref = true;
         rig.tick();
         assert(rig.output.reason == "assumed_push_in_visual" && rig.output.motion.wz_rps == 0);

@@ -46,6 +46,36 @@ DeliveryVerificationStage::update(const PushObservation& in,
     const uint64_t now = in.now_us;
     const int expected = context.trip.total();
     const bool carry = t.assume_all_safe || t.field_carry;
+    if (carry && t.pixel_grasp_enabled && expected > 0 && context.trip.ordinary == expected) {
+        // Only post-retreat fresh images count; old geometry/front-edge/assumed evidence
+        // cannot replace the user's full-box containment rule for ordinary deliveries.
+        const bool stopped = in.sent_velocity_valid && std::isfinite(in.sent_vx_mps) &&
+            std::isfinite(in.sent_wz_rps) && std::abs(in.sent_vx_mps) < .001f &&
+            std::abs(in.sent_wz_rps) < .001f;
+        const bool contained = in.delivery_observed && in.delivery_box_count >= expected &&
+            in.delivery_box_sample_us && in.delivery_box_sample_us >= now - context.elapsed_us &&
+            now >= in.delivery_box_sample_us && now - in.delivery_box_sample_us <= 200000 &&
+            in.gripper_done && in.gripper_feedback_open == 1 && stopped;
+        if (!contained) {
+            confirmations_ = 0;
+            stable_since_us_ = 0;
+        } else if (in.delivery_box_sample_us != frame_) {
+            if (!confirmations_)
+                stable_since_us_ = now;
+            ++confirmations_;
+            frame_ = in.delivery_box_sample_us;
+        }
+        const bool verified = contained && confirmations_ >= t.delivery_frames &&
+            now - stable_since_us_ >= 300000;
+        if (!verified && context.elapsed_us <= t.delivery_budget_us)
+            return result;
+        result.outcome = DeliveryVerificationOutcome::Complete;
+        result.credited = verified ? expected : 0;
+        result.visual = verified;
+        result.reason = verified ? "delivered_box_contained" : "delivery_unverified";
+        clearTrip();
+        return result;
+    }
     const auto& z = in.zone_estimate;
     const int count = context.trip.injured ? in.zone_injured_count : in.zone_supply_count;
     const int other = context.trip.injured ? in.zone_supply_count : in.zone_injured_count;

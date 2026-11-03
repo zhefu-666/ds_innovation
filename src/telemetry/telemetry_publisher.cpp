@@ -252,6 +252,7 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
       << int(in.target_region_valid) << "target_in_zone" << int(in.target_in_zone)
       << "zone_identity_verified" << int(in.zone_identity_verified) << "retreat_safe"
       << int(in.retreat_safe) << "opponent_zone_clear" << int(in.opponent_zone_clear)
+      << "startup_visible_classes" << int(in.startup_visible_classes)
       << "zone_counts_valid" << int(in.zone_counts_valid) << "reason" << s.output.reason
       << "rule_verdict" << verdictName(s.output.verdict) << "frame_offset_cmd_deg"
       << static_cast<int>(s.output.motion.gripper_offset) << "camera_pitch_cmd_cdeg"
@@ -313,6 +314,15 @@ void TelemetryPublisher::writeSnapshot(const Snapshot& s) {
       << "pixel_grasp_sample_us" << double(in.pixel_grasp_sample_us)
       << "pixel_align_state" << s.output.pixel_align_state
       << "pixel_align_stable_frames" << s.output.pixel_align_stable_frames
+      << "entry_target_id" << s.output.entry_target_id
+      << "entry_label" << s.output.entry_label
+      << "entry_first_id" << s.output.entry_first_id
+      << "entry_stage" << s.output.entry_stage
+      << "entry_position_ok" << int(s.output.entry_position_ok)
+      << "entry_confirmed" << int(s.output.entry_confirmed)
+      << "entry_stable_frames" << s.output.entry_stable_frames
+      << "entry_region_px" << "[" << s.output.entry_region_px.x << s.output.entry_region_px.y
+      << s.output.entry_region_px.width << s.output.entry_region_px.height << "]"
       << "target_center_px" << "[" << finite(in.target_center_px.x) << finite(in.target_center_px.y) << "]"
       << "target_grasp_range_inside" << int(in.target_grasp_range_inside) << "range_source" << range_source
       << "target_geometry_valid" << int(in.geometry_valid) << "target_region_known"

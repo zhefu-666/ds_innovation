@@ -64,7 +64,7 @@
       "file": "models/detect_v5_int8.rknn",
       "role": "detector",
       "status": "active",
-      "sha256": "e0005fc0e3cea9afbcc578ecfbd598e03186df6db9fda62d27f5382a3468a576",
+      "sha256": "a269e1d7a4479e71b5f84386be40ea868e8889d5b59303b1f95e1cdfa945749d",
       "classes": [
         "blue",
         "orange",
@@ -72,13 +72,14 @@
         "black",
         "zone_blue",
         "zone_red"
-      ]
+      ],
+      "source_file": "blocks_v5.7_int8.rknn"
     },
     {
       "file": "models/zone_pose_int8.rknn",
       "role": "pose",
       "status": "active",
-      "sha256": "befcc7240d56dfa1858dd9a077b45f86e5d387aecf60c42dd69abd3213b562dd",
+      "sha256": "03351043a9138bd239ebb20f93790da5a8268b8176553bde7925b8ba1cf96ccf",
       "classes": [
         "zone_left",
         "zone_right"

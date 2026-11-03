@@ -212,7 +212,7 @@ int checkConfiguration(const ResolvedRuntimeConfig& resolved, std::ostream& outp
     if (config.controlled_empty_field)
         check(measured_body_radius > 0, "robot_swept_radius");
     check(!config.pose_model_path.empty() || !config.keypoints_file.empty(), "zone_pose_source");
-    output << "STARTUP forward_ms=" << config.startup_advance_ms
+    output << "STARTUP start_zone=" << tuning.start_zone << " forward_ms=" << config.startup_advance_ms
            << " speed_mps=" << tuning.startup_advance_speed << " scan_wz_rps=" << tuning.scan_wz
            << " turn_wz_rps=" << tuning.turn_wz << " angular_limit_rps=" << tuning.max_wz
            << " clearance_checks_disabled=" << config.controlled_ignore_clearance
@@ -239,7 +239,7 @@ int Runtime::run() {
     const auto task_calibrated = resolved.task_calibrated;
     PushTask task(tuning);
     task.setPhaseStepping(config.step_phases);
-    task.setSinglePhase(config.single_phase);
+    task.setSinglePhase(config.single_phase, config.capture_after_first);
     if (!config.dry_run && !config.hardware)
         throw std::runtime_error("Select --dry-run (perception only) or --hardware (MCU output). "
                                  "No serial port was opened.");
@@ -469,6 +469,13 @@ int Runtime::run() {
             vision_frontend.infer(frame, timestamp, camera_capture ? &prepared_image : nullptr);
         AuditScope logic_audit("main.logic_and_logs");
         auto& raw = vision_result.detections;
+        const auto threshold_sensors = feedback ? feedback->feedbackAt(timestamp) : FrameSensors{};
+        const float core_threshold = config.coreConfidenceAtPitch(
+            threshold_sensors.actuator.camera_pitch_cdeg, threshold_sensors.actuator.valid,
+            threshold_sensors.pitch_stable, resolved.task.pitch_tolerance_cdeg);
+        raw.erase(std::remove_if(raw.begin(), raw.end(), [&](const SegDetection& d) {
+            return d.label == "core_supply" && d.confidence < core_threshold;
+        }), raw.end());
         for (auto& d : raw) {
             d.frame_id = frame_sequence;
             d.timestamp_us = timestamp;
@@ -540,7 +547,8 @@ int Runtime::run() {
         }
         // A dead link (write failures or stale feedback) vetoes motion permission.
         std::string preflight_reason;
-        if (!imu || !input.safety_ok)
+        if (imuReadinessRequired(previous.phase, config.single_phase) &&
+            (!imu || !input.safety_ok))
             preflight_reason = "imu_not_ready";
         else if (!task_calibrated)
             preflight_reason = "gripper_calibration_required";
@@ -622,6 +630,8 @@ int Runtime::run() {
             input.sent_velocity_valid = true;
             input.sent_vx_mps = sent_motion.sent_vx_mps;
             input.sent_wz_rps = sent_motion.sent_wz_rps;
+            input.sent_velocity_us = sent_motion.last_ok
+                ? std::min(input.now_us, sent_motion.last_ok_us) : 0;
         }
         auto out = task.update(input);
         if (out.single_phase_done ||
@@ -792,21 +802,19 @@ int Runtime::run() {
         last_submit_time = submit_time;
         if (link) {
             const auto stale_count = link->stats().stale;
-            // Pixel braking and stationary handoffs explicitly bypass the velocity ramp.
+            // Task emergency/near-grasp stops bypass the ramp; ordinary startup stops ramp.
             // Clearance revocations below also bypass the ramp for any residual motion.
             const bool hard_stop = !input.run || !input.safety_ok || !input.opponent_zone_clear ||
                                    out.state == PushState::SAFE_STOP ||
                                    out.run_status == RunStatus::Fault;
             // Do not retain translation/rotation from the ramp when its clearance is revoked.
             const auto sent = link->stats();
-            const bool residual_blocked =
-                (sent.sent_vx_mps > 0 && !input.path_safe) ||
-                (sent.sent_vx_mps < 0 && !input.retreat_safe) ||
-                (input.directional_clearance_valid &&
-                 (sent.sent_wz_rps != 0 || out.motion.wz_rps != 0) &&
-                 ((!input.turn_safe && sent.sent_vx_mps == 0 && out.motion.vx_mps == 0) ||
-                  (!input.arc_safe && (sent.sent_vx_mps != 0 || out.motion.vx_mps != 0))));
-            link->submit(out.motion, hard_stop || residual_blocked || out.immediate_motion_stop);
+            const bool residual_blocked = residualMotionBlocked(
+                input, out, sent.sent_vx_mps, sent.sent_wz_rps);
+            const bool preserve_angular_tuning = out.phase != TaskPhase::Transport;
+            link->submit(out.motion,
+                         hard_stop || residual_blocked || out.immediate_motion_stop,
+                         preserve_angular_tuning);
             if (stale_count != last_stale_count) {
                 async_log.submit(
                     "[WATCHDOG] timestamp_us=" + std::to_string(input.now_us) +
@@ -834,7 +842,9 @@ int Runtime::run() {
                     << " geometry_reason=" << geometry_result.reason
                     << " region=" << input.target_region_valid
                     << " in_zone=" << input.target_in_zone << " path=" << input.path_safe
-                    << " retreat=" << input.retreat_safe << " turn_safe=" << input.turn_safe
+                    << " retreat=" << input.retreat_safe
+                    << " jaw_release_retreat=" << out.jaw_release_retreat
+                    << " turn_safe=" << input.turn_safe
                     << " arc=" << input.arc_safe << " jaw_open=" << input.jaw_open_safe
                     << " dir_clear_valid=" << input.directional_clearance_valid << " blockers=["
                     << controlled_field.blockers()
@@ -850,25 +860,52 @@ int Runtime::run() {
                     << " range_inside=" << input.target_grasp_range_inside
                     << " grasp_ready=" << input.pixel_grasp_ready
                     << " align_stage=" << out.pixel_align_state
+                    << " carry_align=" << out.carry_align_active
+                    << " carry_error_px=" << out.carry_align_error_px
+                    << " carry_center_px=" << out.carry_align_center_x << ","
+                    << out.carry_align_center_y
+                    << " carry_sample_us=" << out.carry_align_sample_us
+                    << " zone_sight=" << input.zone_sight_valid
+                    << " zone_enemy=" << input.zone_sight_enemy
+                    << " zone_bearing=" << input.zone_sight_bearing
+                    << " zone_sample_us=" << input.zone_sight_sample_us
+                    << " zone_source=" << (!input.zone_sight_valid ? "none" :
+                        input.zone_sight_box.empty() ? "pose" : "box")
+                    << " carry_tolerance_px=" << out.carry_align_tolerance_px
+                    << " carry_acceptance_px=" << out.carry_align_acceptance_px
+                    << " carry_brake_reason=" << out.carry_align_brake_reason
+                    << " carry_stable_frames=" << out.pixel_align_stable_frames
                     << " failure_source=" << out.failure_source
                     << " original_reason=" << out.original_reason
                     << " exit_reason=" << out.exit_reason
                     << " review_stage=" << out.capture_review_stage
                     << " scene_status=" << out.capture_scene_status
                     << " scene_detail=" << out.capture_scene_detail
+                    << " scene_blocker_id=" << out.capture_scene_blocker_id
+                    << " scene_blocker_box=" << out.capture_scene_blocker_box
+                    << " scene_association=" << out.capture_scene_association
                     << " scene_us=" << input.capture_scene_us
                     << " final_validation=" << out.final_validation
                     << " split_runs=" << out.capture_split_runs
+                    << " score_supply=" << out.capture_supply_score
+                    << " score_injured=" << out.capture_injured_score
+                    << " keep_ordinary=" << out.capture_keep_inventory.ordinary
+                    << " keep_core=" << out.capture_keep_inventory.core
+                    << " keep_injured=" << out.capture_keep_inventory.injured
                     << " preclose_ordinary=" << input.split_ordinary_count
                     << " held_ordinary=" << input.held.ordinary
                     << " hold_observable=" << input.hold_observable
                     << " held_complete=" << input.held_complete
                     << " layout_ordinary=" << input.split_ordinary_count
                     << " visible_ordinary=" << input.split_ordinary_visible_count
+                    << " membership_feature="
+                    << (input.capture_center_membership ? "bbox_center_xy" : "bbox_overlap")
                     << " count_region=" << input.layout_count_region_px
                     << " capture_region=" << input.capture_area_px
                     << " forward_path=" << input.capture_path_px
+                    << " dangerous_front_region=" << input.capture_dangerous_front_region_px
                     << " target_box=" << input.target_box;
+        stop_detail << " phase=" << phaseName(out.phase);
         for (const auto& object : input.capture_image_objects)
             stop_detail << " scene_box=" << object.label << "#" << object.id
                         << ":" << object.box << ":complete=" << object.complete;
@@ -881,12 +918,23 @@ int Runtime::run() {
                         << " split_center_x=" << out.split_align_center_x
                         << " split_target_x=" << out.split_align_target_x
                         << " split_error_px=" << out.split_align_error_px
-                        << " split_stage=" << out.split_align_stage;
+                        << " split_stage=" << out.split_align_stage
+                        << " split_retreat_reference_id=" << out.split_retreat_reference_id
+                        << " split_retreat_reference_y=" << out.split_retreat_reference_y
+                        << " split_margin_stage=" << out.split_margin_stage
+                        << " split_margin_used_us=" << out.split_margin_used_us
+                        << " split_margin_budget_us=" << out.split_margin_budget_us
+                        << " split_margin_complete=" << out.split_margin_complete
+                        << " split_imu_ready=" << out.split_imu_ready
+                        << " split_imu_distance_m=" << out.split_imu_distance_m
+                        << " split_imu_velocity_mps=" << out.split_imu_velocity_mps;
         }
         if (link) {
             const auto velocity = link->stats();
             stop_detail << " sent_vx=" << velocity.sent_vx_mps
-                        << " sent_wz=" << velocity.sent_wz_rps;
+                        << " sent_wz=" << velocity.sent_wz_rps
+                        << " precomp_wz=" << velocity.precomp_wz_rps
+                        << " wire_wz=" << velocity.wire_wz_rps;
         }
         if (feedback) {
             const auto fb = feedback->latestActuatorFeedback();
@@ -920,13 +968,36 @@ int Runtime::run() {
                     << " identity=own_zone_only "
                     << "inventory=" << controlled_field.reason()
                     << " translation_watchdog=disabled phase_budgets=enabled\n";
-            if (config.controlled_empty_field)
+            if (config.controlled_empty_field) {
+                const auto& floor = input.pushboard_floor;
+                log << "[PUSHBOARD_FLOOR] active=" << out.pushboard_floor_active
+                    << " sample_us=" << floor.sample_us << " valid=" << floor.valid
+                    << " inside=" << floor.inside;
+                for (int side = 0; side < 2; ++side) {
+                    const auto& w = floor.windows[side];
+                    log << (side ? " R=" : " L=") << w.own << ",white=" << w.white
+                        << ",purple=" << w.purple << ",enemy=" << w.enemy
+                        << ",visible=" << w.visible;
+                }
+                log << "\n";
                 log << "[SAFETY] path=" << input.path_safe << " retreat=" << input.retreat_safe
                     << " turn=" << input.turn_safe << " arc=" << input.arc_safe
                     << " jaw=" << input.jaw_open_safe
                     << " dir_valid=" << input.directional_clearance_valid
                     << " state=" << PushTask::name(out.state) << " blockers=["
                     << controlled_field.blockers() << "]\n";
+            }
+            if (input.transport_floor.sample_us) {
+                const auto& f=input.transport_floor;
+                log << "[TRANSPORT_REGION] sample_us=" << f.sample_us
+                    << " valid=" << f.valid << " found=" << f.region_valid
+                    << " inside=" << f.inside << " width=" << f.width_fraction
+                    << " height=" << f.height_fraction << " bottom=" << f.bottom_fraction
+                    << " box=" << f.region_box << " own_fraction_diagnostic=" << f.own_fraction
+                    << " min_width=" << resolved.pushboard_floor.transport_region.min_width_fraction
+                    << " min_height=" << resolved.pushboard_floor.transport_region.min_height_fraction
+                    << " min_bottom=" << resolved.pushboard_floor.transport_region.min_bottom_fraction << "\n";
+            }
             for (const auto& d : detections)
                 log << "[TARGET] id=" << d.track_id << " label=" << d.label
                     << " position=" << d.ground_position_valid
@@ -995,6 +1066,7 @@ int Runtime::run() {
                     << " residual_m=" << input.zone_estimate.residual_m << "\n";
             if (geometry)
                 log << "[PNP] frame=" << frame_sequence
+                    << " primary=" << geometry_result.pnp_primary
                     << " attempted=" << geometry_result.pnp_attempted
                     << " solution_valid=" << geometry_result.pnp_solution_valid
                     << " delta_valid=" << geometry_result.pnp_delta_valid
@@ -1042,8 +1114,9 @@ int Runtime::run() {
                 log << "[MCU] healthy=" << link->healthy() << " sent=" << st.sent
                     << " failed=" << st.failed << " stale_zero=" << st.stale
                     << " requested_vx=" << st.requested_vx_mps
-                    << " requested_wz=" << st.requested_wz_rps
-                    << " sent_vx=" << st.sent_vx_mps << " sent_wz=" << st.sent_wz_rps
+                    << " requested_wz=" << st.requested_wz_rps << " sent_vx=" << st.sent_vx_mps
+                    << " sent_wz=" << st.sent_wz_rps << " precomp_wz=" << st.precomp_wz_rps
+                    << " wire_wz=" << st.wire_wz_rps
                     << " gripper_id=" << int(feedback->gripperActionId())
                     << " target=" << gripper_ack.target
                     << " ack=" << ack_names[int(gripper_ack.result)] << " fb_valid=" << fb.valid
@@ -1059,17 +1132,35 @@ int Runtime::run() {
             last_report = now;
         }
         vision.drawDetections(frame, detections);
-        if (vref_ready)
-            drawZoneProjection(frame,
-                               zone_points,
-                               vref_calibration,
-                               zone_geometry,
-                               frame_sensors.actuator.camera_pitch_cdeg,
-                               observation.geometry_sensor,
-                               config.pose_keypoint_confidence,
-                               geometry_result.mapping_valid,
-                               geometry_result.reason);
         drawZone(frame, zone_points);
+        if (resolved.pushboard_floor.enabled && input.pushboard_floor.sample_us) {
+            const auto& f = input.pushboard_floor;
+            for (int i = 0; i < 2; ++i) {
+                const auto& w = f.windows[i];
+                if (w.roi.empty())
+                    continue;
+                const cv::Scalar color = !w.valid ? cv::Scalar(0, 180, 255)
+                    : w.own >= resolved.pushboard_floor.min_own ? cv::Scalar(0, 255, 0)
+                                                               : cv::Scalar(255, 255, 0);
+                cv::rectangle(frame, w.roi, color, 2);
+                const std::string text = std::string(i ? "FLOOR R " : "FLOOR L ") +
+                    std::to_string(int(w.own * 100)) + "% vis=" +
+                    std::to_string(int(w.visible * 100)) + "%";
+                cv::putText(frame, text, {w.roi.x, w.roi.y - 8},
+                            cv::FONT_HERSHEY_SIMPLEX, .45, color, 1);
+            }
+        }
+
+        if (input.transport_floor.region_valid) {
+            const auto& f=input.transport_floor;
+            const cv::Scalar color=f.inside ? cv::Scalar(0,255,0) : cv::Scalar(0,180,255);
+            cv::polylines(frame,std::vector<std::vector<cv::Point>>{f.region_contour},true,color,3);
+            const std::string text="UI120 HALF W="+std::to_string(int(f.width_fraction*100))+
+                "% H="+std::to_string(int(f.height_fraction*100))+
+                "% B="+std::to_string(int(f.bottom_fraction*100))+"%"+
+                (f.inside ? " STOP/CONFIRM" : " APPROACH");
+            cv::putText(frame,text,{20,frame.rows-20},cv::FONT_HERSHEY_SIMPLEX,.6,color,2);
+        }
         const char* output_label = !link ? "PREVIEW - NO MCU LINK"
                                    : out.hardware_output_enabled
                                        ? "MCU LINK OPEN - MOTION PERMITTED"

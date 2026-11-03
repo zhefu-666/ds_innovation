@@ -8,63 +8,6 @@ void CarrySearchStage::reset() {
     *this = CarrySearchStage{};
 }
 
-CarrySearchResult CarrySearchStage::enemyEvade(const TaskTuning& t, const CarrySearchContext& c) {
-    CarrySearchResult result;
-    const bool heading_ok = c.heading_valid && std::isfinite(c.heading_rad);
-    float travel = c.travel_m;
-    if (evade_phase_ == 0) {
-        if (!t.enemy_evade || c.now_us < evade_cool_until_us_ || !c.enemy_zone_seen) {
-            seen_frames_ = 0;
-            return result;
-        }
-        if (++seen_frames_ < t.enemy_evade_frames || !heading_ok)
-            return result;
-        evade_phase_ = 1;
-        evade_turned_ = 0;
-        evade_last_yaw_ = c.heading_rad;
-        evade_start_us_ = c.now_us;
-        seen_frames_ = 0;
-    }
-    if (evade_phase_ == 1) {
-        if (heading_ok) {
-            evade_turned_ += std::abs(wrapAngle(c.heading_rad - evade_last_yaw_));
-            evade_last_yaw_ = c.heading_rad;
-        }
-        if (!heading_ok || c.now_us - evade_start_us_ > t.enemy_evade_turn_budget_us) {
-            evade_phase_ = 0;
-            evade_cool_until_us_ = c.now_us + t.enemy_evade_cool_us;
-            result.reset_zone_search = true;
-            result.zone_search_us = c.now_us;
-            return result;
-        }
-        if (evade_turned_ < t.enemy_evade_turn_rad) {
-            result.action = CarrySearchAction::TurnAway;
-            result.reason = "enemy_zone_turn_away";
-            return result;
-        }
-        evade_phase_ = 2;
-        evade_yaw_ = c.heading_rad;
-        evade_start_us_ = c.now_us;
-        result.reset_travel = true;
-        // The legacy code cleared travel_ here, so this tick's distance check reads zero.
-        travel = 0;
-    }
-    if (travel >= t.enemy_evade_m * c.motion_ratio ||
-        c.now_us - evade_start_us_ > t.enemy_evade_drive_budget_us) {
-        evade_phase_ = 0;
-        evade_cool_until_us_ = c.now_us + t.enemy_evade_cool_us;
-        result.reset_zone_search = true;
-        result.zone_search_us = c.now_us;
-        return result;
-    }
-    const float err = heading_ok ? wrapAngle(evade_yaw_ - c.heading_rad) : 0.f;
-    result.action = CarrySearchAction::DriveAway;
-    result.reason = "enemy_zone_drive_away";
-    result.speed = t.enemy_evade_speed;
-    result.heading = std::clamp(t.heading_gain * err, -t.max_wz, t.max_wz);
-    return result;
-}
-
 CarrySearchResult CarrySearchStage::search(const TaskTuning& t, const CarrySearchContext& c) {
     CarrySearchResult result;
     const bool heading_ok = c.heading_valid && std::isfinite(c.heading_rad);
@@ -130,19 +73,7 @@ CarrySearchResult CarrySearchStage::search(const TaskTuning& t, const CarrySearc
     return result;
 }
 
-CarrySearchResult CarrySearchStage::evade(const TaskTuning& t, const CarrySearchContext& c) {
-    return enemyEvade(t, c);
-}
-
 CarrySearchResult CarrySearchStage::update(const TaskTuning& t, const CarrySearchContext& c) {
-    const auto evade = enemyEvade(t, c);
-    // A live evasion owns the tick; a finished one still lets the search run on the same tick,
-    // exactly as the inline pair did.
-    if (evade.action != CarrySearchAction::None)
-        return evade;
-    auto search_result = search(t, c);
-    search_result.reset_zone_search = evade.reset_zone_search;
-    search_result.zone_search_us = evade.zone_search_us;
-    return search_result;
+    return search(t, c);
 }
 } // namespace rescue

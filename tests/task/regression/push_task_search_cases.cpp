@@ -1288,9 +1288,9 @@ void approachCases() {
             s.tick();
         assert(s.out.state == PushState::SCAN);
     }
-    { // Deferred startup ignores legacy motion settings; search angular cap still applies.
+    { // Disabled startup ignores legacy motion settings; search angular cap still applies.
         TaskTuning t;
-        t.startup_advance_us = 15000000;
+        t.startup_advance_us = 0;
         t.startup_advance_speed = 1.f;
         t.max_speed = 1.f;
         t.scan_wz = t.turn_wz = t.max_wz = 3.f;
@@ -1363,9 +1363,9 @@ void approachCases() {
 }
 
 // Recorded-run regression: a 26px ordinary block at 1280x720 must survive both
-// area ranking and task-level scatter arbitration, including reselecting in SCATTER.
+// area ranking and task discovery on both first and later trips, despite old sweep flags.
 void ordinarySelectionRegressionTests() {
-    for (bool scatter : {false, true}) {
+    for (bool later_trip : {false, true}) {
         TaskTuning t;
         t.enable_search_cues = false;
         t.dense_no_lock = true;
@@ -1376,17 +1376,9 @@ void ordinarySelectionRegressionTests() {
         Sim s(t);
         s.in.target_valid = false;
         assert(s.until(PushState::SCAN, 100));
-        if (scatter) {
-            s.task.enter(PushState::SCATTER, s.in.now_us, "test");
-            s.task.search_phase_.scatter_far_ = s.task.search_phase_.scatter_commit_ = true;
-            s.task.search_phase_.sweep_phase_ = 7;
-            s.task.search_phase_.sweep_pitch_ = 500;
-            s.task.search_phase_.sweep_start_us_ = s.in.now_us;
-            s.task.search_phase_.scatter_approach_m_ = 2.f;
-            s.task.search_phase_.scatter_range_ = 2.f;
-        }
+        s.task.first_ = later_trip;
         PixelSelector selector;
-        bool acquired = false, stopped_for_target = false, approach = false;
+        bool acquired = false, approach = false;
         for (int i = 0; i < 100; ++i) {
             SegDetection d;
             d.track_id = 13;
@@ -1398,7 +1390,7 @@ void ordinarySelectionRegressionTests() {
             d.timestamp_us = s.in.now_us + 50000;
             selector.syncTaskState(s.task.state_, s.task.trip_context_.target_id_, s.task.targetLabel());
             const auto chosen = selector.update({d}, {1280, 720}, 500, true,
-                                                d.timestamp_us, false, .5f);
+                                                d.timestamp_us, later_trip, .5f);
             acquired = acquired || chosen.locked;
             s.in.target_valid = chosen.locked;
             s.in.target_id = chosen.id;
@@ -1414,20 +1406,14 @@ void ordinarySelectionRegressionTests() {
             s.in.clutter_ts_us = d.timestamp_us;
             assert(!s.task.weakCandidate(s.in));
             s.tick();
-            if (s.out.reason == "blind_scatter_target_seen") {
-                stopped_for_target = true;
-                assert(stopped(s.out.motion) && s.out.immediate_motion_stop);
-            }
             if (s.out.state == PushState::APPROACH) {
                 approach = true;
                 break;
             }
-            if (!scatter)
-                assert(s.out.state != PushState::SCATTER);
+            assert(s.out.state != PushState::SCATTER && s.out.state != PushState::PILE &&
+                   s.out.state != PushState::CUE_APPROACH);
         }
         assert(acquired && approach);
-        if (scatter)
-            assert(stopped_for_target);
     }
 }
 

@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <set>
+#include <sstream>
 #include <opencv2/imgproc.hpp>
 
 namespace rescue {
@@ -43,9 +45,15 @@ void CaptureMonitor::update(PushObservation& in,
     in.split_layout_us = 0;
     in.capture_scene_valid = in.capture_path_valid = false;
     in.capture_path_lateral_measured = false;
+    in.capture_center_membership = false;
     in.capture_scene_us = 0;
     in.capture_area_px = in.capture_path_px = in.layout_count_region_px = {};
+    in.capture_dangerous_front_region_px = {};
     in.capture_image_objects.clear();
+    in.capture_dangerous_side_pending = false;
+    in.capture_dangerous_pending_ids.clear();
+    in.capture_dangerous_side_detail.clear();
+    in.capture_class_regions_px.clear();
     in.pixel_grasp_view = in.pixel_grasp_near_view = false;
     in.pixel_grasp_target_valid = in.pixel_grasp_ready = in.pixel_grasp_aligned = false;
     in.pixel_grasp_steering = in.pixel_grasp_error_px = 0;
@@ -81,7 +89,14 @@ void CaptureMonitor::update(PushObservation& in,
             in.target_grasp_range_applicable = true;
     // Image positions are only comparable at one fixed, settled camera pitch.
     if (!in.camera_pitch_stable || in.camera_pitch_cdeg == kCameraPitchInvalid) {
-        reset();
+        history_.clear();
+        view_ = -1;
+        for (auto& entry : dangerous_side_) {
+            entry.second.clear_frames = 0;
+            entry.second.clear_us = 0;
+            entry.second.pending = true;
+            entry.second.pitch = kCameraPitchInvalid;
+        }
         return;
     }
     std::vector<const SegDetection*> fresh;
@@ -139,8 +154,7 @@ void CaptureMonitor::update(PushObservation& in,
             in.target_grasp_range_lateral_measured = range.lateral_measured;
             in.target_grasp_range_lateral = center.x >= range.area.x1 && center.x <= range.area.x2;
             in.target_grasp_range_past_rear = center.y > range.area.y2;
-            in.target_grasp_range_inside = in.target_grasp_range_lateral &&
-                                           center.y >= range.area.y1 && center.y <= range.area.y2;
+            in.target_grasp_range_inside = range.containsCenter(d->box);
             // Unmeasured lateral bounds span the image only for inventory bookkeeping;
             // they must never authorize off-centre closure.
             in.pixel_grasp_ready = in.pixel_grasp_near_view &&
@@ -158,12 +172,15 @@ void CaptureMonitor::update(PushObservation& in,
         const auto& ref = c_.grasp_center_ranges.front();
         in.capture_scene_valid = true;
         in.capture_scene_us = now; // observation_builder replaces this with source image time
-        for (const auto* d : fresh)
-            in.capture_image_objects.push_back({
-                d->track_id, labelOf(*d), d->box,
-                d->track_id >= 0 && d->confidence >= c_.min_confidence &&
-                d->box.x > 0 && d->box.y > 0 &&
-                d->box.br().x < ref.image_width_px && d->box.br().y < ref.image_height_px});
+        for (const auto* d : fresh) {
+            in.capture_image_objects.push_back(
+                {d->track_id,
+                 labelOf(*d),
+                 d->box,
+                 d->track_id >= 0 && d->confidence >= c_.min_confidence &&
+                     captureBoxComplete(d->box, {ref.image_width_px, ref.image_height_px})});
+            in.capture_image_objects.back().selectable = !d->injured_upright_rejected;
+        }
         if (in.pixel_grasp_near_view && in.target_grasp_range_valid)
             for (const auto& range : c_.grasp_center_ranges) {
                 if (range.label != range_label)
@@ -184,14 +201,18 @@ void CaptureMonitor::update(PushObservation& in,
     // At UI140 the supplied box-centre limits replace ground projection for both
     // the capture inventory and post-close image evidence. UI120 never borrows them.
     if (in.pixel_grasp_near_view) {
+        in.capture_center_membership = c_.pixel_center_membership;
+        if (in.capture_center_membership) {
+            dangerous_side_.clear(); // Old bbox-edge history cannot override centre calibration.
+            in.capture_dangerous_front_region_px = c_.dangerous_front_risk_region_px;
+        }
         const auto& ref = c_.grasp_center_ranges.front();
-        float left = float(ref.image_width_px), right = 0, front = float(ref.image_height_px);
+        float left = float(ref.image_width_px), right = 0;
         for (const auto& range : c_.grasp_center_ranges) {
             if (range.lateral_measured) {
                 left = std::min(left, range.area.x1);
                 right = std::max(right, range.area.x2);
             }
-            front = std::min(front, range.area.y1);
         }
         for (const auto& range : c_.grasp_center_ranges)
             if (range.label == "ordinary_supply") {
@@ -200,8 +221,175 @@ void CaptureMonitor::update(PushObservation& in,
                 in.layout_count_region_px =
                     {ordinary_left, 180.f, ordinary_right - ordinary_left, range.area.y2 - 180.f};
             }
-        const float corridor_front = in.pixel_grasp_target_valid
-                                         ? std::min(front, in.target_center_px.y) : front;
+        for (const auto& range : c_.grasp_center_ranges)
+                in.capture_class_regions_px[range.label] = {range.area.x1,
+                                                            range.area.y1,
+                                                            range.area.x2 - range.area.x1,
+                                                            range.area.y2 - range.area.y1};
+        // Boundary evidence is shared by inventory, path and held review. Every
+        // region suppressed by dangerous_side_clear must agree on the entering edge.
+        std::vector<cv::Rect2f> dangerous_regions = {in.layout_count_region_px, in.capture_path_px};
+        if (const auto region = in.capture_class_regions_px.find("dangerous_object");
+            region != in.capture_class_regions_px.end())
+            dangerous_regions.push_back(region->second);
+        if (dangerous_side_target_id_ != in.target_id) {
+            for (auto it = dangerous_side_.begin(); it != dangerous_side_.end();) {
+                if (!it->second.pending && !it->second.risk)
+                    it = dangerous_side_.erase(it);
+                else {
+                    it->second.clear_frames = 0;
+                    it->second.clear_us = 0;
+                    ++it;
+                }
+            }
+            dangerous_side_target_id_ = in.target_id;
+        }
+        std::set<int> seen_side_ids;
+        std::map<int, int> identity_count;
+        for (const auto* d : fresh)
+            ++identity_count[d->track_id];
+        const bool stopped = in.sent_velocity_valid && std::isfinite(in.sent_vx_mps) &&
+                             std::isfinite(in.sent_wz_rps) &&
+                             std::abs(in.sent_vx_mps) <= .001f &&
+                             std::abs(in.sent_wz_rps) <= .001f;
+        for (const auto* d : fresh) {
+            if (in.capture_center_membership || labelOf(*d) != "dangerous_object")
+                continue;
+            const auto& region = in.layout_count_region_px;
+            const bool overlap = std::any_of(dangerous_regions.begin(), dangerous_regions.end(),
+                [&](const auto& area) { return PushObservation::imageBoxOverlapsRegion(d->box, area); });
+            const float cx = d->center().x;
+            const bool right = cx > region.x + region.width;
+            const bool left = cx < region.x;
+            const float penetration = right ? region.x + region.width - d->box.x
+                                    : left ? d->box.br().x - region.x : d->box.width;
+            const float ratio = std::max(0.f, penetration / d->box.width);
+            const bool entering_edge_visible = right ? d->box.x > 0 && d->box.x < ref.image_width_px
+                                             : left ? d->box.br().x > 0 &&
+                                                      d->box.br().x < ref.image_width_px : false;
+            const bool valid_identity = d->track_id >= 0 && identity_count[d->track_id] == 1;
+            const bool calibrated = in.capture_path_lateral_measured && !region.empty() &&
+                region.x == in.capture_path_px.x && region.width == in.capture_path_px.width;
+            // The edge toward regions below the object is its bottom. Clipping the
+            // opposite top at Y0 does not obscure this entering edge. Take the nearest
+            // upper bound of every horizontally relevant review region, including a
+            // configured dangerous class region, rather than clearing one region only.
+            float upper_front = std::numeric_limits<float>::infinity();
+            for (const auto& area : dangerous_regions)
+                if (!area.empty() && d->box.x <= area.x + area.width && d->box.br().x >= area.x)
+                    upper_front = std::min(upper_front, area.y);
+            const bool upper_geometry = std::isfinite(upper_front) && d->center().y < upper_front;
+            const float upper_penetration = d->box.br().y - upper_front;
+            const float upper_jitter_px = c_.dangerous_upper_jitter_px * ref.image_height_px / 720.f;
+            const bool bottom_visible = d->box.y >= 0 && d->box.br().y > 0 &&
+                d->box.br().y < ref.image_height_px && d->box.x > 0 &&
+                d->box.br().x < ref.image_width_px;
+            const bool upper_shallow = overlap && upper_geometry && bottom_visible &&
+                upper_penetration <= upper_jitter_px;
+            const bool side_shallow = overlap && (right || left) && entering_edge_visible &&
+                ratio <= c_.dangerous_side_overlap_ratio;
+            const bool shallow = calibrated && valid_identity && (side_shallow || upper_shallow);
+            auto found = dangerous_side_.find(d->track_id);
+            if (!upper_geometry && !shallow && !overlap && found == dangerous_side_.end())
+                continue;
+            if (!valid_identity || !calibrated) {
+                // Invalid objects keep the conservative whole-box rule.
+                continue;
+            }
+            auto& side = dangerous_side_[d->track_id];
+            const bool was_upper = side.upper;
+            if (upper_geometry && !was_upper) {
+                side.upper = true;
+                side.pending = true;
+                side.clear_frames = 0;
+                side.clear_us = 0;
+            }
+            seen_side_ids.insert(d->track_id);
+            const float scale = side.box.empty() ? 1.f : float(d->box.area()) / side.box.area();
+            const bool continuous = side.box.empty() || (scale >= .5f && scale <= 2.f &&
+                cv::norm(d->center() - cv::Point2f(side.box.x + .5f * side.box.width,
+                    side.box.y + .5f * side.box.height)) <=
+                    .5f * std::max({side.box.width, side.box.height, d->box.width, d->box.height}));
+            const bool ordered = !side.sample_us || d->timestamp_us > side.sample_us;
+            const bool complete_box = d->box.x > 0 && d->box.y > 0 &&
+                d->box.br().x < ref.image_width_px && d->box.br().y < ref.image_height_px;
+            const bool clear_edge_visible = side.upper ? upper_geometry && bottom_visible
+                : entering_edge_visible || (!overlap && complete_box);
+            const bool target_context = !side.upper || (in.target_valid && in.target_id >= 0 &&
+                in.capture_path_valid && in.target_grasp_range_valid);
+            const bool context = stopped && target_context && clear_edge_visible && continuous &&
+                (side.pitch == kCameraPitchInvalid || side.pitch == in.camera_pitch_cdeg) &&
+                (!side.now_us || now >= side.now_us) &&
+                (!side.sample_us || (d->timestamp_us >= side.sample_us &&
+                  d->timestamp_us - side.sample_us <= c_.max_age_us));
+            // A shallow upper touch can retain, but cannot create, outside evidence.
+            // Any invalid current observation revokes that retention immediately.
+            const bool keep_upper_outside = was_upper && upper_shallow && !side.pending &&
+                !side.risk && context && ordered;
+            if (!context || !ordered || (overlap && !keep_upper_outside)) {
+                side.clear_frames = 0;
+                side.clear_us = 0;
+                side.pending = true;
+            }
+            if (overlap && !shallow) {
+                side.risk = true; // A single shallow frame cannot erase definite intrusion.
+                side.pending = false;
+            } else if (!overlap && context && ordered) {
+                if (!side.clear_us)
+                    side.clear_us = d->timestamp_us;
+                ++side.clear_frames;
+                if (side.clear_frames >= c_.dangerous_side_clear_frames &&
+                    d->timestamp_us >= side.clear_us &&
+                    d->timestamp_us - side.clear_us >= c_.dangerous_side_clear_us) {
+                    side.risk = side.pending = false;
+                }
+            }
+            side.sample_us = d->timestamp_us;
+            side.now_us = now;
+            side.box = d->box;
+            side.pitch = in.camera_pitch_cdeg;
+            for (auto& object : in.capture_image_objects)
+                if (object.id == d->track_id && object.label == "dangerous_object") {
+                    object.dangerous_side_pending = side.pending && (!side.risk || !overlap);
+                    object.dangerous_side_clear = !side.pending && !side.risk;
+                    object.dangerous_side_ratio = ratio;
+                }
+            if (side.pending && (!side.risk || !overlap)) {
+                in.capture_dangerous_side_pending = true;
+                in.capture_dangerous_pending_ids.push_back(d->track_id);
+            }
+            std::ostringstream detail;
+            detail << "dangerous_id=" << d->track_id << ",side_ratio=" << ratio
+                   << ",boundary=" << (side.upper ? "upper" : "side")
+                   << ",bottom_y=" << d->box.br().y
+                   << ",upper_penetration_px=" << upper_penetration
+                   << ",upper_jitter=" << keep_upper_outside
+                   << ",reset=" << (!stopped ? "sent_velocity_not_stopped"
+                       : !target_context ? "target_invalid"
+                       : !clear_edge_visible ? "entering_edge_unavailable"
+                       : !continuous ? "identity_geometry_discontinuous"
+                       : !ordered ? "image_not_new"
+                       : !context ? "view_or_time_discontinuous"
+                       : overlap && !keep_upper_outside ? "overlap" : "none")
+                   << ",side_state=" << (side.risk ? "risk" : side.pending ? "pending" : "outside")
+                   << ",clear_frames=" << side.clear_frames;
+            in.capture_dangerous_side_detail += detail.str() + ";";
+        }
+        for (auto it = dangerous_side_.begin(); it != dangerous_side_.end();) {
+            auto& side = it->second;
+            if (!seen_side_ids.count(it->first)) {
+                if (!side.pending && !side.risk && !side.upper) {
+                    it = dangerous_side_.erase(it);
+                    continue; // Preserve the existing lateral outside-neighbour lifetime.
+                }
+                side.clear_frames = 0;
+                side.clear_us = 0;
+                side.pending = true;
+                in.capture_dangerous_side_pending = true;
+                in.capture_dangerous_pending_ids.push_back(it->first);
+            }
+            ++it;
+        }
         bool complete = in.pixel_grasp_target_valid, occlusion_free = true, followed = true;
         bool ambiguous = false;
         std::vector<const SegDetection*> frame_members;
@@ -213,18 +401,13 @@ void CaptureMonitor::update(PushObservation& in,
         bool layout_complete = true;
         for (const auto* d : fresh) {
             const auto center = d->center();
-            // Open-frame review, splitting and held counts use full ordinary boxes.
-            // A partly overlapping neighbour remains a conservative inventory candidate.
+            // Split layout uses its own region; held evidence keeps the jaw calibration.
             const bool split_ordinary = labelOf(*d) == "ordinary_supply";
             if (split_ordinary)
                 ++in.split_ordinary_visible_count;
             const auto range = std::find_if(c_.grasp_center_ranges.begin(), c_.grasp_center_ranges.end(),
                 [&](const GraspCenterRange& r) { return r.label == labelOf(*d); });
-            const bool layout_member = split_ordinary
-                ? in.ordinaryInventoryOverlaps(d->box)
-                : center.x >= left && center.x <= right && center.y >= front &&
-                      (range == c_.grasp_center_ranges.end() ||
-                       (center.y >= range->area.y1 && center.y <= range->area.y2));
+            const bool layout_member = in.splitInventoryOverlaps(d->box, labelOf(*d));
             if (layout_member) {
                 frame_members.push_back(d);
                 if (split_ordinary)
@@ -234,8 +417,10 @@ void CaptureMonitor::update(PushObservation& in,
                     layout_complete = false;
             }
             const bool primary = d->track_id == in.target_id && d->label == in.label;
-            const bool swept = primary || (center.x >= left && center.x <= right &&
-                                           center.y >= corridor_front);
+            // Use the same bounded regions and feature as review and split selection.
+            // A neighbour below the calibrated rear bound must not start an empty retreat.
+            const bool swept = primary || layout_member ||
+                               in.capturePathOverlaps(d->box, labelOf(*d));
             if (swept) {
                 in.corridor.add(labelOf(*d));
                 members.push_back(d);
@@ -249,17 +434,9 @@ void CaptureMonitor::update(PushObservation& in,
             }
             if (!in.gripper_closed_observed)
                 continue;
-            bool held = false;
-            if (split_ordinary) {
-                held = in.ordinaryInventoryOverlaps(d->box);
-            } else if (range != c_.grasp_center_ranges.end()) {
-                held = center.y >= range->area.y1 && center.y <= range->area.y2 &&
-                       (range->lateral_measured
-                            ? center.x >= range->area.x1 && center.x <= range->area.x2
-                            : center.x >= left && center.x <= right);
-            } else if (swept) {
-                held = true; // unknown / forbidden neighbours remain visible to trip rules
-            }
+            // Separation candidates outside the jaw must never become held cargo.
+            const bool held = in.captureInventoryOverlaps(d->box, labelOf(*d)) ||
+                              (range == c_.grasp_center_ranges.end() && swept);
             if (!held)
                 continue;
             if (d->box.x < 0 || d->box.y < 0 || d->box.br().x >= ref.image_width_px ||
@@ -302,11 +479,14 @@ void CaptureMonitor::update(PushObservation& in,
         history_ = std::move(next);
         in.hold_observable = in.gripper_closed_observed;
         in.captured = in.hold_observable && in.held.total() > 0 && followed;
-        in.held_complete = in.captured && !ambiguous && occlusion_free;
-        in.corridor_complete = complete;
-        in.corridor_occlusion_free = complete && occlusion_free;
+        in.held_complete = in.captured && !ambiguous && occlusion_free &&
+                           (!in.capture_dangerous_side_pending || in.held.dangerous > 0);
+        in.corridor_complete = complete && !in.capture_dangerous_side_pending;
+        in.corridor_occlusion_free = in.corridor_complete && occlusion_free;
         return;
     }
+    dangerous_side_.clear();
+    dangerous_side_target_id_ = -1;
     // Holding region.
     const HoldingView* v = view(in.camera_pitch_cdeg, true);
     const int index = v ? int(v - c_.holding.data()) : -1;

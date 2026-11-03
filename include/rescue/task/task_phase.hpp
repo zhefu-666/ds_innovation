@@ -1,6 +1,6 @@
 #pragma once
 namespace rescue {
-// Business phases; Startup intentionally performs no motion until implemented.
+// Business phases; Startup owns the configured launch and visual approach maneuver.
 enum class TaskPhase {
     Startup,
     Search,
@@ -20,15 +20,9 @@ enum class SearchAction {
     MidApproach,
     NearReacquire,
     SelectCargo,
-    CueApproach,
-    CuePrepare,
-    ClearPile,
-    ClearPause,
     Approach,
     Prepare,
     TurnAway,
-    Scatter,
-    Pile,
     Recover
 };
 // Public search status. Detailed motion phases remain internal implementation steps.
@@ -38,10 +32,7 @@ enum class SearchStatusAction {
     Reacquire,
     Approach,
     Prepare,
-    ClearPush,
     TurnAway,
-    Scatter,
-    Pile,
     Recover
 };
 
@@ -52,13 +43,8 @@ inline SearchStatusAction searchStatusAction(SearchAction action) {
             return SearchStatusAction::Reacquire;
         case SearchAction::MidApproach:
         case SearchAction::SelectCargo:
-        case SearchAction::CueApproach:
         case SearchAction::Approach:
             return SearchStatusAction::Approach;
-        case SearchAction::CuePrepare:
-        case SearchAction::ClearPile:
-        case SearchAction::ClearPause:
-            return SearchStatusAction::ClearPush;
         case SearchAction::Scan:
             return SearchStatusAction::Scan;
         case SearchAction::LostSearch:
@@ -67,10 +53,6 @@ inline SearchStatusAction searchStatusAction(SearchAction action) {
             return SearchStatusAction::Prepare;
         case SearchAction::TurnAway:
             return SearchStatusAction::TurnAway;
-        case SearchAction::Scatter:
-            return SearchStatusAction::Scatter;
-        case SearchAction::Pile:
-            return SearchStatusAction::Pile;
         case SearchAction::Recover:
             return SearchStatusAction::Recover;
     }
@@ -84,12 +66,11 @@ enum class CaptureAction {
 };
 enum class TransportAction {
     Carry,
-    Gate,
-    Enter,
     Release,
     BackOut,
     Verify,
-    Recover
+    Recover,
+    TurnAround
 };
 enum class PhaseOutcome {
     Running,

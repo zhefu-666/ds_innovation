@@ -46,6 +46,34 @@ int main() {
         }
         field.update(in, objects, halves, {1280, 720}, previous, mapping);
     };
+    in.camera_pitch_stable = in.pixel_grasp_view = true;
+    previous.phase = TaskPhase::Startup;
+    tick({}, false);
+    assert(in.path_safe && in.turn_safe);
+    in.pixel_grasp_view = false;
+    tick({}, false);
+    assert(!in.path_safe);
+    field.update(in, {}, halves, {1280, 720}, previous, false, false, true);
+    assert(in.path_safe && in.turn_safe && in.arc_safe);
+    // A phase handoff immediately restores the normal unmapped-motion restriction.
+    previous.phase = TaskPhase::Search;
+    field.update(in, {}, halves, {1280, 720}, previous, false, false, true);
+    assert(!in.path_safe && !in.turn_safe);
+    previous.phase = TaskPhase::Transport;
+    previous.run_status = RunStatus::Running;
+    previous.pushboard_floor_active = true;
+    in.pushboard_floor.valid = true;
+    tick({}, false);
+    assert(in.path_safe && in.arc_safe && !in.retreat_safe && !in.turn_safe &&
+           !in.jaw_open_safe && !in.geometry_valid);
+    in.pushboard_floor.valid = false;
+    tick({}, false);
+    assert(!in.path_safe);
+    in.pushboard_floor.valid = true;
+    previous.pushboard_floor_active = false;
+    tick({}, false);
+    assert(!in.path_safe);
+    previous.phase = TaskPhase::Startup;
     tick();
     tick();
     tick();
@@ -95,6 +123,47 @@ int main() {
     previous.phase = TaskPhase::Transport;
     tick({}, false);
     assert(!in.path_safe); // pixel capture does not replace navigation geometry
+    // FAR/UI90 transport uses the same operator-attested image corridor.
+    // It grants approach/turn permission, without inventing geometry or release clearance.
+    previous.state = PushState::CARRY;
+    previous.navigation_approach = true;
+    in.camera_pitch_cdeg = -3000;
+    tick({}, false);
+    assert(in.path_safe && in.turn_safe && in.arc_safe);
+    assert(!in.geometry_valid && !in.zone_counts_valid && !in.retreat_safe && !in.jaw_open_safe);
+    in.camera_pitch_stable = false;
+    tick({}, false);
+    assert(!in.path_safe && !in.turn_safe);
+    in.camera_pitch_stable = true;
+    previous.run_status = RunStatus::Paused;
+    tick({}, false);
+    assert(!in.path_safe && !in.turn_safe);
+    previous.run_status = RunStatus::Running;
+    previous.state = PushState::BACK_OUT;
+    tick({}, false);
+    assert(!in.path_safe && !in.turn_safe && !in.retreat_safe);
+    previous.state = PushState::CARRY;
+    in.pixel_grasp_view = false;
+    tick({}, false);
+    assert(in.path_safe && in.turn_safe && in.arc_safe);
+    assert(!in.retreat_safe && !in.jaw_open_safe && !in.geometry_valid);
+    in.camera_pitch_cdeg = kCameraPitchInvalid;
+    tick({}, false);
+    assert(!in.path_safe && !in.turn_safe);
+    in.camera_pitch_cdeg = -3000;
+    in.pixel_grasp_view = true;
+    previous.navigation_approach = false;
+    previous.pushboard_floor_active = true;
+    in.pushboard_floor.valid = true;
+    tick({}, false);
+    assert(in.path_safe && in.arc_safe && !in.turn_safe && !in.retreat_safe && !in.jaw_open_safe);
+    previous.pushboard_floor_active = false;
+    previous.navigation_approach = true;
+    SegDetection unknown;
+    unknown.label = "unknown";
+    unknown.box = {10, 10, 20, 20};
+    tick({unknown}, false);
+    assert(!in.path_safe && !in.turn_safe && !in.arc_safe);
     in.pixel_grasp_view = false;
     // dangerous_object never restricts motion (only carrying it is forbidden): in the body, ahead,
     // or unlocated.

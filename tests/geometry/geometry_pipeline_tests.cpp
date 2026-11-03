@@ -20,7 +20,7 @@ struct Scene {
     ZoneGeometry geometry;
     GeometryFrame frame;
     cv::Mat K, D, R, t;
-    explicit Scene(const char* geometry_path = ZONE_GEOMETRY_PATH) {
+    explicit Scene(const char* geometry_path = ZONE_GEOMETRY_PATH, bool primary = false) {
         geometry = ZoneGeometry::load(geometry_path, "red_safe_zone");
         K = (cv::Mat_<double>(3, 3) << 800, 0, 640, 0, 800, 360, 0, 0, 1);
         D = cv::Mat::zeros(1, 5, CV_64F);
@@ -46,7 +46,8 @@ struct Scene {
               << "image_height" << 720 << "ground_pixel_domain" << "undistorted_pixels"
               << "T_camera_from_robot" << T << "extrinsics_validated" << 1
               << "pitch_model_reference_cdeg" << 2000 << "pitch_model_min_cdeg" << 1000
-              << "pitch_model_max_cdeg" << 2500;
+              << "pitch_model_max_cdeg" << 2500
+              << "enable_zone_pnp_primary" << int(primary);
         }
         assert(camera.load(path));
         std::remove(path.c_str());
@@ -112,6 +113,45 @@ struct Scene {
     }
 };
 int main() {
+    { // PnP must work without ground-ray spacing consensus at close range.
+        Scene s(ZONE_GEOMETRY_PATH, true);
+        GeometryPipeline pipeline(s.camera, s.geometry);
+        auto k = s.points(.15f, {0,.60f});
+        auto out = pipeline.process(s.frame, k, {});
+        assert(out.pnp_attempted && out.pnp_solution_valid);
+        assert(out.zone.trusted(s.frame.now_us));
+        assert(cv::norm(out.zone.origin_body_m-cv::Point2f(0,.60f)) < .001);
+        // A single bad landmark is rejected in image space.
+        s.advance(); k=s.points(.15f,{0,.60f});
+        k.points[0].pixel += cv::Point2f(70,40);
+        out=pipeline.process(s.frame,k,{});
+        assert(out.zone.trusted(s.frame.now_us) && out.zone.inlier_ids.size()==5);
+        assert(std::find(out.zone.inlier_ids.begin(),out.zone.inlier_ids.end(),0)==out.zone.inlier_ids.end());
+        assert(out.pnp_primary && !out.zone_camera_rvec.empty() &&
+               !out.zone_camera_tvec.empty());
+        // A complete single compartment is sufficient (four non-collinear landmarks).
+        s.advance();
+        out=pipeline.process(s.frame,s.points(.15f,{0,.60f},{0,1,3,4}),{});
+        assert(out.zone.trusted(s.frame.now_us) && out.zone.inlier_ids.size()==4);
+        // Three points cannot yield a new PnP pose.
+        s.advance();
+        out=pipeline.process(s.frame,s.points(.15f,{0,.60f},{0,1,3}),{});
+        assert(!out.zone.valid && !out.pnp_solution_valid);
+        s.advance();
+        auto bad=s.points(); bad.frame_id+=1;
+        out=pipeline.process(s.frame,bad,{});
+        assert(!out.zone.valid && out.reason=="keypoint_frame_mismatch");
+        s.advance();
+        bad=s.points(); bad.points[0].id=bad.points[1].id;
+        out=pipeline.process(s.frame,bad,{});
+        assert(!out.zone.valid && out.reason=="invalid_or_duplicate_id");
+        s.advance(); bad=s.points(.15f,{0,.60f},{0,1,3,4});
+        bad.points[0].pixel={1280,400};
+        out=pipeline.process(s.frame,bad,{});
+        assert(!out.zone.valid && out.reason=="pnp_insufficient_points");
+
+    }
+
     { // Rejected PnP candidates remain inspectable; diagnostics never change acceptance.
         Scene s;
         SafeZoneObservation observation;
@@ -831,7 +871,8 @@ int main() {
         h.add(future);
         assert(h.at(1010000).actuator.camera_pitch_cdeg == 2000);
         assert(!h.at(1100000).pitch_stable);
-        assert(!h.at(1200000).actuator.valid);
+        assert(h.at(1400000).actuator.valid); // 300ms boundary
+        assert(!h.at(1400001).actuator.valid);
         assert(!h.at(700000).actuator.valid);
     }
     {

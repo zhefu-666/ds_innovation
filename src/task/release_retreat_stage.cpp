@@ -1,5 +1,6 @@
 #include "rescue/task/release_retreat_stage.hpp"
 #include "rescue/task/push_task.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace rescue {
@@ -26,6 +27,22 @@ ReleaseRetreatResult ReleaseRetreatStage::update(const TaskTuning& t,
         result.reason = reason;
         return result;
     };
+    if (t.pixel_grasp_enabled && (t.field_carry || t.assume_all_safe)) {
+        // Use the existing speed-integrated travel in metres; jaw retreat needs no IMU calibration.
+        // Do not apply the legacy visual dead-reckoning ratio.
+        // Mouth clearance or early delivery sightings must not shorten this leg.
+        const float target = .15f;
+        // Retain the field preset's 85% travel-budget allowance for ramping/stops.
+        const uint64_t budget = std::max(t.retreat_budget_us,
+            static_cast<uint64_t>(std::ceil(target / (.85f * t.back_speed) * 1e6f)));
+        if (context.travel_m >= target)
+            return finish(ReleaseRetreatOutcome::VerifyDelivery, "jaw_backed_out_015m");
+        if (context.elapsed_us > budget)
+            return finish(ReleaseRetreatOutcome::Fault, "retreat_blocked");
+        result.reverse = true;
+        result.reason = "jaw_back_out_015m";
+        return result;
+    }
     if (prepush_) {
         const bool inside = context.repush_count == 0 && cargo.visible && cargo.fixed &&
                             !cargo.clipped && cargo.rear_y >= t.assume_cargo_done_y_m &&

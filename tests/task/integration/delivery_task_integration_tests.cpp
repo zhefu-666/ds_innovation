@@ -350,7 +350,7 @@ void cargoHistoryTests() {
         rig.tick();
         assert(rig.output.state == PushState::VERIFY_DELIVERY);
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_verify_repush");
         assert(rig.task.transport_phase_.repush_n_ == 1 &&
                rig.task.transport_phase_.cargo_ref_us_ == 0);

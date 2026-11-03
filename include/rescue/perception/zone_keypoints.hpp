@@ -36,7 +36,8 @@ ZoneHalves decodeZonePose(const cv::Mat& output,
 // rear_right=R.far_right. A divider point needs both halves, both keypoints visible and agreeing;
 // otherwise it is omitted (the divider width is not dimensioned, one side alone would bias it).
 std::vector<ZoneKeypoint> zoneHalvesToKeypoints(const ZoneHalves& halves,
-                                                float keypoint_confidence);
+                                                float keypoint_confidence,
+                                                cv::Size image_size = {});
 
 class RknnModel;
 class SafeZoneKeypointRknn {

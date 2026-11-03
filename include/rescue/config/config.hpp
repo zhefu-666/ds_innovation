@@ -42,6 +42,7 @@ struct Config {
     std::string uart_port = "/dev/ttyACM0"; // 下位机MCU（USB CDC）；IMU见imu_port
     std::string team = "blue"; // 暂定蓝色己方、红色对方；比赛时 --team red 可切换。
     int baudrate = 115200;
+    float angular_command_scale = 1.f; // MCU yaw response compensation, (0,1]; site config supplies it
     int camera_index = 0;
     int frame_width = 1280;
     int frame_height = 720;
@@ -49,6 +50,12 @@ struct Config {
     int detect_interval = 1;
     int input_size = 640;
     float confidence = 0.5f;
+    float ui140_core_confidence = 1.f; // UI140 core_supply override; other views use confidence
+    float coreConfidenceAtPitch(int pitch, bool valid, bool stable, int tolerance = 100) const {
+        return valid && stable && pitch >= 2000 - tolerance && pitch <= 2000 + tolerance &&
+                       ui140_core_confidence < confidence
+                   ? ui140_core_confidence : confidence;
+    }
     float injured_confidence =
         0.25f; // injured_person only: close-range scores drop below `confidence`; kept as obstacle
                // evidence (needs an orange blob, never a target)
@@ -80,6 +87,7 @@ struct Config {
     std::string telemetry_file = "/dev/shm/rescue-telemetry.bin";
     bool auto_run = false;
     std::string single_phase; // startup/search/capture/transport; empty = full match
+    bool capture_after_first = false; // capture-only test: seed first ordinary delivery history
     bool step_phases = false; // explicit four-phase debugging checkpoints
     bool allow_mechanical_pitch_model = false;
     // TEMP_ASSUMPTION done-flag A6: operator-supplied frame angle/action id from this session's
@@ -87,8 +95,9 @@ struct Config {
     int known_frame_angle = -1, known_frame_id = 0;
     bool no_match_time_limit = false;    // explicit debugging override
     uint32_t match_seconds = 180;        // confirmed competition duration: 3 minutes
-    uint32_t startup_advance_ms = 15000; // CLI startup duration: 1.0 m/s for 15 s by default
-    float startup_speed_mps = 1.0f, scan_wz_rps = .25f, turn_wz_rps = .3f;
+    uint32_t startup_advance_ms = 2000; // commanded forward time before visual startup
+    int start_zone = 0; // 1..4 required when startup is enabled; site config supplies it
+    float startup_speed_mps = .1f, scan_wz_rps = .25f, turn_wz_rps = .3f;
     std::string task_calibration_file, zone_color_file;
     std::string vision_log_dir =
         "telemetry_logs/vision"; // saved images + [VISION_JUDGE] log lines; "none" disables
@@ -96,7 +105,7 @@ struct Config {
     bool require_instance_masks = false;
 
     // Safety and timing limits used by the non-blocking rescue pipeline.
-    uint32_t sensor_timeout_ms = 200;
+    uint32_t sensor_timeout_ms = 300;
 
     uint32_t tracker_max_age_ms = 350;
     float tof_stop_distance_m = 0.18f;

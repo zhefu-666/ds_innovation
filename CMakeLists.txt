@@ -48,7 +48,7 @@ set(RESCUE_TASK_SOURCES src/task/push_task.cpp src/task/first_trip_capture.cpp
     src/task/sweep_ledger.cpp src/task/disperse_turn_stage.cpp src/task/disperse_swing_stage.cpp
     src/task/disperse_rush_stage.cpp src/task/recovery_stage.cpp src/task/search_stage.cpp
     src/task/enter_stage.cpp src/task/disperse_cluster_stage.cpp src/task/carry_approach_stage.cpp
-    src/task/carry_search_stage.cpp src/task/sweep_trigger_stage.cpp src/task/sweep_stage.cpp)
+    src/task/carry_search_stage.cpp src/task/sweep_trigger_stage.cpp)
 
 add_library(rescue_app_config STATIC
     src/app/config_loader.cpp
@@ -88,6 +88,7 @@ add_executable(rescue_upper_host
     src/control/match_control.cpp
     src/control/match_server.cpp
     src/geometry/navigation_adapter.cpp
+    src/perception/pushboard_floor.cpp
     src/perception/zone_color.cpp
     src/geometry/zone_estimate.cpp
     src/geometry/zone_geometry.cpp

@@ -744,9 +744,9 @@ void sweepTriggerCases() {
             }
         }
     }
-    { // Deferred startup never commands motion even with legacy high-speed settings.
+    { // Disabled startup never commands motion even with legacy high-speed settings.
         TaskTuning t;
-        t.startup_advance_us = 3000000;
+        t.startup_advance_us = 0;
         t.startup_advance_speed = 1.f;
         t.max_speed = .4f;
         PushTask task(t);

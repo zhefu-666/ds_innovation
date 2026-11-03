@@ -35,9 +35,13 @@ def load_reference(project):
         centers = item['reference_center_px']
         expected = [centers['left'][0], centers['front'][1],
                     centers['right'][0], centers['rear'][1]]
-        if bounds != expected or not (0 <= bounds[0] < bounds[2] < reference['image_size'][0]
-                                     and 0 <= bounds[1] < bounds[3] < reference['image_size'][1]):
-            raise ValueError('Class bounds differ from boundary centres')
+        # User-adjusted lateral bounds can contain the original measured samples.
+        # Keep their source coordinates and the longitudinal reference unchanged.
+        if (bounds[1] != expected[1] or bounds[3] != expected[3] or
+                not bounds[0] <= expected[0] < expected[2] <= bounds[2] or
+                not (0 <= bounds[0] < bounds[2] < reference['image_size'][0] and
+                     0 <= bounds[1] < bounds[3] < reference['image_size'][1])):
+            raise ValueError('Class bounds do not contain the measured boundary centres')
         for sample in item['samples']:
             x, y, w, h = sample['bbox_xywh_px']
             if [x + w / 2, y + h / 2] != centers[sample['role']]:

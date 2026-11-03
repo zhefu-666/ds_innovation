@@ -20,6 +20,9 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
 #define F(name) visit(#name, t.name)
     F(require_multi_view);
     F(pixel_grasp_enabled);
+    F(pushboard_floor_enabled);
+    F(pushboard_floor_confirm_us);
+    F(pushboard_floor_speed);
     F(pixel_align_gain_rps_per_px);
     F(pixel_align_max_wz);
     F(pixel_align_tolerance_px);
@@ -304,6 +307,8 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
     F(back_speed);
     F(max_speed);
     F(min_turn_wz);
+    F(transport_scan_wz);
+    F(transport_align_min_wz);
     F(heading_gain);
     F(lateral_gain);
     F(heading_deadband_rad);
@@ -324,6 +329,7 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
     F(scan_hold_lost_us);
     F(scan_hold_cool_us);
     F(inplace_turn_boost);
+    F(start_zone);
     F(startup_advance_speed);
     F(startup_hold_gain);
     F(startup_hold_deadband_rad);
@@ -380,14 +386,6 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
     F(carry_sight_fresh_us);
     F(carry_sight_mem_us);
     F(zone_search_budget_us);
-    F(enemy_evade);
-    F(enemy_evade_frames);
-    F(enemy_evade_turn_rad);
-    F(enemy_evade_m);
-    F(enemy_evade_speed);
-    F(enemy_evade_turn_budget_us);
-    F(enemy_evade_drive_budget_us);
-    F(enemy_evade_cool_us);
     F(enter_budget_us);
     F(retreat_budget_us);
     F(delivery_budget_us);
@@ -413,6 +411,7 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
 
 template <class Visit> void visitCapture(const CaptureConfig& c, Visit visit) {
 #define F(name) visit(#name, c.name)
+    F(pixel_center_membership);
     F(pitch_tolerance_cdeg);
     F(edge_margin_px);
     F(pixel_align_tolerance_px);
@@ -439,6 +438,7 @@ template <class Visit> void visitCapture(const CaptureConfig& c, Visit visit) {
 template <class Visit> void visitGround(const GroundContactConfig& c, Visit visit) {
 #define F(name) visit(#name, c.name)
     F(min_confidence);
+    F(ui140_core_confidence);
     F(edge_margin_px);
     F(max_range_m);
     F(size_tolerance);
@@ -482,6 +482,7 @@ template <class Visit> void visitRequest(const Config& c, Visit visit) {
     F(pose_core_mask);
     F(parallel_inference);
     F(uart_port);
+    F(angular_command_scale);
     F(team);
     F(baudrate);
     F(camera_index);
@@ -492,6 +493,7 @@ template <class Visit> void visitRequest(const Config& c, Visit visit) {
     F(input_size);
     F(confidence);
     F(injured_confidence);
+    F(ui140_core_confidence);
     F(nms);
     F(use_cuda);
     F(show);
@@ -515,11 +517,13 @@ template <class Visit> void visitRequest(const Config& c, Visit visit) {
     F(auto_run);
     F(step_phases);
     F(single_phase);
+    F(capture_after_first);
     F(allow_mechanical_pitch_model);
     F(known_frame_angle);
     F(known_frame_id);
     F(no_match_time_limit);
     F(match_seconds);
+    F(start_zone);
     F(startup_advance_ms);
     F(startup_speed_mps);
     F(scan_wz_rps);
@@ -621,6 +625,11 @@ void addAssumptions(ResolvedRuntimeConfig& r) {
             "capture_zone_clearance_delivery",
             "Treat missing safety, zone, capture and delivery evidence as true",
             "--assume-all-safe; bounded carry_once; NOT_ACCEPTANCE");
+    if (c.capture_after_first)
+        add("capture_first_delivery_seeded",
+            "task_history",
+            "Capture-only test starts after first ordinary delivery; capture evidence remains required",
+            "--capture-after-first with --phase capture");
     if (c.assume_injured_trip)
         add("first_delivery_assumed",
             "task_history_target_priority",
@@ -837,6 +846,101 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
             if (pitch < -3000 || pitch > 3000)
                 throw std::runtime_error("Invalid class grasp reference pitch");
             capture_config.pixel_grasp_enabled = reference.value("runtime_enabled", false);
+            const auto membership = reference.value("membership_feature", std::string("bbox_overlap"));
+            if (membership != "bbox_overlap" && membership != "bbox_center_xy")
+                throw std::runtime_error("Invalid capture membership feature");
+            capture_config.pixel_center_membership = membership == "bbox_center_xy";
+            if (reference.contains("dangerous_front_risk_region_xyxy_px")) {
+                const auto& bounds = reference.at("dangerous_front_risk_region_xyxy_px");
+                if (!bounds.is_array() || bounds.size() != 4)
+                    throw std::runtime_error("Invalid dangerous front risk region");
+                const RectArea area{bounds.at(0).get<float>(), bounds.at(1).get<float>(),
+                                    bounds.at(2).get<float>(), bounds.at(3).get<float>()};
+                if (!capture_config.pixel_center_membership ||
+                    !std::isfinite(area.x1) || !std::isfinite(area.y1) ||
+                    !std::isfinite(area.x2) || !std::isfinite(area.y2) ||
+                    area.x1 < 0 || area.y1 < 0 || area.x1 >= area.x2 || area.y1 >= area.y2 ||
+                    area.x2 >= config.frame_width || area.y2 >= config.frame_height)
+                    throw std::runtime_error("Dangerous front risk region outside original image or centre mode");
+                capture_config.dangerous_front_risk_region_px =
+                    {area.x1, area.y1, area.x2 - area.x1, area.y2 - area.y1};
+                diagnostics << "[CAPTURE_RISK] dangerous_front_region="
+                            << capture_config.dangerous_front_risk_region_px
+                            << " feature=bbox_center_xy reference=" << file.string() << '\n';
+                mark(r, "dangerous front risk reference: " + file.string(),
+                     {"capture.dangerous_front_risk_region_xyxy_px"});
+            }
+            if (reference.contains("pushboard_floor")) {
+                const auto& p = reference.at("pushboard_floor");
+                auto& floor = r.pushboard_floor;
+                floor.enabled = p.at("enabled").get<bool>();
+                floor.image_size = {config.frame_width, config.frame_height};
+                floor.pitch_cdeg = int16_t(pitch);
+                const auto& windows = p.at("windows_xywh");
+                if (!windows.is_array() || windows.size() != 2)
+                    throw std::runtime_error("Pushboard floor needs two windows");
+                for (int i = 0; i < 2; ++i) {
+                    const auto& w = windows.at(i);
+                    if (!w.is_array() || w.size() != 4)
+                        throw std::runtime_error("Invalid pushboard floor window");
+                    floor.windows[i] = {w.at(0).get<int>(), w.at(1).get<int>(),
+                                        w.at(2).get<int>(), w.at(3).get<int>()};
+                    const cv::Rect image(0, 0, config.frame_width, config.frame_height);
+                    if (floor.windows[i].empty() || (floor.windows[i] & image) != floor.windows[i])
+                        throw std::runtime_error("Pushboard floor window outside image");
+                }
+                floor.min_visible = p.at("min_visible").get<float>();
+                floor.min_own = p.at("min_own").get<float>();
+                floor.min_ground = p.at("min_ground").get<float>();
+                for (float value : {floor.min_visible, floor.min_own, floor.min_ground})
+                    if (!std::isfinite(value) || value <= .5f || value > 1.f)
+                        throw std::runtime_error("Invalid pushboard floor fraction");
+                const auto ranges = [&](const nlohmann::json& hsv, const char* key, auto& target) {
+                    target.clear();
+                    for (const auto& item : hsv.at(key)) {
+                        if (!item.is_array() || item.size() != 6)
+                            throw std::runtime_error("Invalid pushboard HSV range");
+                        FloorHsvRange range;
+                        for (int k = 0; k < 3; ++k) {
+                            range.low[k] = item.at(k).get<int>();
+                            range.high[k] = item.at(k + 3).get<int>();
+                            if (range.low[k] < 0 || range.high[k] > (k ? 255 : 179) ||
+                                range.low[k] > range.high[k])
+                                throw std::runtime_error("Pushboard HSV range outside limits");
+                        }
+                        target.push_back(range);
+                    }
+                    if (target.empty())
+                        throw std::runtime_error("Empty pushboard HSV ranges");
+                };
+                ranges(p.at("hsv"), "blue", floor.blue); ranges(p.at("hsv"), "red", floor.red);
+                ranges(p.at("hsv"), "purple", floor.purple); ranges(p.at("hsv"), "white", floor.white);
+                ranges(p.at("hsv"), "cargo", floor.cargo);
+                if (p.contains("transport_region")) {
+                    const auto& raw=p.at("transport_region");
+                    auto& region=floor.transport_region;
+                    region.min_width_fraction=raw.at("min_width_fraction").get<float>();
+                    region.min_height_fraction=raw.at("min_height_fraction").get<float>();
+                    region.min_bottom_fraction=raw.at("min_bottom_fraction").get<float>();
+                    for (float value : {region.min_width_fraction, region.min_height_fraction,
+                                        region.min_bottom_fraction})
+                        if (!std::isfinite(value) || value<=0 || value>1)
+                            throw std::runtime_error("Invalid transport region threshold");
+                    ranges(raw.at("hsv"), "blue", region.blue);
+                    ranges(raw.at("hsv"), "red", region.red);
+                }
+                tuning.pushboard_floor_enabled = floor.enabled;
+                tuning.pushboard_floor_confirm_us = p.at("confirm_us").get<uint64_t>();
+                tuning.pushboard_floor_speed = p.at("speed_mps").get<float>();
+                if (tuning.pushboard_floor_confirm_us < 100000 ||
+                    tuning.pushboard_floor_confirm_us > 1000000 ||
+                    !std::isfinite(tuning.pushboard_floor_speed) ||
+                    tuning.pushboard_floor_speed <= 0 || tuning.pushboard_floor_speed > .05f)
+                    throw std::runtime_error("Invalid pushboard floor confirmation/speed");
+                mark(r, "UI140 pushboard floor reference: " + file.string(),
+                     {"task.pushboard_floor_enabled", "task.pushboard_floor_confirm_us",
+                      "task.pushboard_floor_speed"});
+            }
             if (reference.contains("pixel_alignment")) {
                 const auto& alignment = reference.at("pixel_alignment");
                 visitTask(tuning, [&](const char* name, auto value) {
@@ -978,6 +1082,8 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
               "task.scan_wz",
               "task.attempt_budget_us"});
     }
+    tuning.start_zone = config.start_zone;
+    mark(r, "parsed startup zone", {"task.start_zone"});
     configureDemo(config, tuning);
     if (config.demo_mode != "none")
         mark(r,
@@ -1021,15 +1127,6 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
         tuning.first_burst_slow_m = .35f;
         tuning.first_burst_min_drive_m = .60f;
         tuning.first_burst_swing_wz = 5.0f;
-        if (tuning.startup_advance_us > 0 && tuning.startup_advance_speed > 0.f &&
-            tuning.startup_advance_speed < 1.f) {
-            tuning.startup_advance_us =
-                uint64_t(double(tuning.startup_advance_us) * double(tuning.startup_advance_speed));
-            tuning.startup_advance_speed = 1.0f;
-            mark(r,
-                 "legacy field startup: duration *= requested speed; speed = 1",
-                 {"task.startup_advance_us", "task.startup_advance_speed"});
-        }
         tuning.demo_capture_motion = true;
         tuning.precise_rush = false;
         tuning.rush_stall_us = 0;
@@ -1061,7 +1158,9 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
         tuning.disperse_passes = 1;
         tuning.blind_scatter_passes = 1;
         tuning.enter_speed = .05f;
-        tuning.back_speed = .05f;
+        tuning.transport_scan_wz = .90f;
+        tuning.transport_align_min_wz = .60f;
+        tuning.back_speed = .40f; // Operator-requested retreat speed: 0.4 m/s.
         tuning.assume_repush_speed_gain = 0.f; // keep repeated pushes at 0.05 m/s too
         tuning.turn_wz = .55f;
         tuning.max_wz = std::max(.55f, std::min(tuning.scan_wz, .8f));
@@ -1191,6 +1290,10 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
     }
     // Pixel control is installed after all legacy pitch overrides.
     if (capture_config.pixel_grasp_enabled) {
+        if (capture_config.pixel_center_membership &&
+            std::any_of(capture_config.grasp_center_ranges.begin(), capture_config.grasp_center_ranges.end(),
+                        [](const auto& range) { return !range.lateral_measured; }))
+            throw std::runtime_error("Centre membership requires measured lateral bounds for every class");
         if (capture_config.grasp_center_ranges.size() != 3 ||
             capture_config.pixel_approach_pitch_cdeg != 0 ||
             capture_config.grasp_center_ranges.front().pitch_cdeg != 2000)
@@ -1226,6 +1329,7 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
                                      : "New frame requires accepted schema 2 calibration and A6 "
                                        "mapping before hardware output");
     r.ground_contact.min_confidence = config.confidence;
+    r.ground_contact.ui140_core_confidence = config.ui140_core_confidence;
     r.ground_contact.accept_size_mismatch = true;
     r.ground_contact.injured_lying_only = true;
     r.ground_contact.lying_confirm_diff = -.06f;
@@ -1251,6 +1355,8 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
          {"motion_link.period_ms", "motion_link.command_timeout_ms",
           "motion_link.linear_accel_mps2", "motion_link.linear_decel_mps2",
           "motion_link.angular_accel_rps2", "motion_link.angular_decel_rps2"});
+    r.motion_link.angular_command_scale = config.angular_command_scale;
+    mark(r, "parsed Config angular_command_scale", {"motion_link.angular_command_scale"});
     addAssumptions(r);
     return r;
 }
@@ -1259,6 +1365,9 @@ void printRuntimeTuning(const ResolvedRuntimeConfig& r, std::ostream& diagnostic
     const auto& tuning = r.task;
     const auto& capture_config = r.capture;
     diagnostics << "[CONTROL_TUNING] demo_capture_motion=" << tuning.demo_capture_motion
+                << " angular_command_scale=" << r.motion_link.angular_command_scale
+                << " legacy_phase_angular_gain=" << 1.f / r.motion_link.angular_command_scale
+                << " legacy_angular_phases=startup,search,capture"
                 << " rush_speed=" << tuning.rush_speed << " rush_stall_us=" << tuning.rush_stall_us
                 << " precise_rush=" << tuning.precise_rush
                 << " sweep_frame_open=" << tuning.sweep_frame_open
@@ -1372,6 +1481,7 @@ void writeEffectiveConfig(const ResolvedRuntimeConfig& r, std::ostream& output) 
       << "release_angle" << "[:" << r.request.release_angle[0] << r.request.release_angle[1] << "]"
       << "}";
     f << "startup" << "{";
+    scalar(f, "start_zone", r.task.start_zone);
     scalar(f, "requested_advance_ms", r.request.startup_advance_ms);
     scalar(f, "requested_speed_mps", r.request.startup_speed_mps);
     scalar(f, "effective_advance_us", r.task.startup_advance_us);
@@ -1384,12 +1494,41 @@ void writeEffectiveConfig(const ResolvedRuntimeConfig& r, std::ostream& output) 
     visitTask(r.task, [&](const char* name, const auto& value) {
         scalar(f, name, value);
     });
-    f << "}" << "capture" << "{";
+    f << "}";
+    f << "pushboard_floor" << "{";
+    scalar(f, "enabled", r.pushboard_floor.enabled);
+    scalar(f, "pitch_cdeg", r.pushboard_floor.pitch_cdeg);
+    scalar(f, "min_visible", r.pushboard_floor.min_visible);
+    scalar(f, "min_own", r.pushboard_floor.min_own);
+    scalar(f, "min_ground", r.pushboard_floor.min_ground);
+    f << "windows_xywh" << "[";
+    for (const auto& w : r.pushboard_floor.windows)
+        f << "[" << w.x << w.y << w.width << w.height << "]";
+    f << "]" << "transport_region" << "{";
+    const auto& region=r.pushboard_floor.transport_region;
+    scalar(f, "min_width_fraction", region.min_width_fraction);
+    scalar(f, "min_height_fraction", region.min_height_fraction);
+    scalar(f, "min_bottom_fraction", region.min_bottom_fraction);
+    f << "hsv" << "{";
+    const auto write_ranges=[&](const char* key, const auto& ranges) {
+        f << key << "[";
+        for (const auto& range : ranges)
+            f << "[" << range.low[0] << range.low[1] << range.low[2]
+              << range.high[0] << range.high[1] << range.high[2] << "]";
+        f << "]";
+    };
+    write_ranges("blue",region.blue); write_ranges("red",region.red);
+    f << "}" << "}" << "}";
+    f << "capture" << "{";
     visitCapture(r.capture, [&](const char* name, const auto& value) {
         scalar(f, name, value);
     });
     scalar(f, "pixel_grasp_enabled", r.capture.pixel_grasp_enabled);
     scalar(f, "pixel_approach_pitch_cdeg", r.capture.pixel_approach_pitch_cdeg);
+    const auto& danger_front = r.capture.dangerous_front_risk_region_px;
+    area(f, "dangerous_front_risk_region_xyxy_px",
+         {danger_front.x, danger_front.y, danger_front.x + danger_front.width,
+          danger_front.y + danger_front.height});
     if (!r.capture.grasp_center_ranges.empty()) {
         f << "grasp_center_ranges" << "[";
         for (const auto& range : r.capture.grasp_center_ranges) {
@@ -1429,6 +1568,7 @@ void writeEffectiveConfig(const ResolvedRuntimeConfig& r, std::ostream& output) 
     scalar(f, "linear_decel_mps2", r.motion_link.linear_decel_mps2);
     scalar(f, "angular_accel_rps2", r.motion_link.angular_accel_rps2);
     scalar(f, "angular_decel_rps2", r.motion_link.angular_decel_rps2);
+    scalar(f, "angular_command_scale", r.motion_link.angular_command_scale);
     f << "}" << "hardware" << "{";
     scalar(f, "output_enabled", r.request.hardware);
     scalar(f, "feedback_only", r.request.pitch_feedback);

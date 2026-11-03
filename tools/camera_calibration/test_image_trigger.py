@@ -1,4 +1,5 @@
 import unittest
+import hashlib
 import image_trigger
 
 
@@ -20,7 +21,7 @@ class ImageTriggerTests(unittest.TestCase):
                 self.assertEqual((result['position'],result['bbox_center_px'][1]),
                                  expected[sample['role']])
                 self.assertTrue(result['observation_only'])
-                self.assertEqual(result['lateral_fit'],'unmeasured')
+                self.assertEqual(result['lateral_fit'],'inside')
 
     def test_reference_boundaries_and_crossing(self):
         for center_y, position, reached, inside in [
@@ -35,7 +36,8 @@ class ImageTriggerTests(unittest.TestCase):
                 self.assertEqual(result['within_longitudinal_reference'],inside)
 
     def test_new_class_samples_and_center_bounds(self):
-        expected = {'injured_person': [395,236,906,479],
+        expected = {'ordinary_supply': [209,226,1071,489],
+                    'injured_person': [395,236,906,479],
                     'core_supply': [268.5,236,1017,555]}
         for label, bounds in expected.items():
             for sample in self.reference['classes'][label]['samples']:
@@ -54,20 +56,59 @@ class ImageTriggerTests(unittest.TestCase):
             self.assertEqual(result['position'],'at_target')
             self.assertTrue(result['target_line_reached'])
 
+    def test_ordinary_symmetric_region_covers_latest_split_and_mirror(self):
+        bounds = self.reference['classes']['ordinary_supply']['center_bounds_px']
+        self.assertEqual(bounds, [209,226,1071,489])
+        self.assertEqual(bounds[0] + bounds[2], self.reference['image_size'][0])
+        # Complete UI140 boxes from the 18:59:02 split, then their left mirrors.
+        for box in [[925,280,292,311], [935,340,272,291],
+                    [935,325,272,301], [925,335,272,301]]:
+            x,y,w,h = box
+            for candidate in [box, [1280-x-w,y,w,h]]:
+                with self.subTest(box=candidate):
+                    result = self.evaluate(candidate)
+                    self.assertTrue(result['within_grasp_center_range'])
+        for cx in [208.5,1071.5]:
+            self.assertFalse(self.evaluate([cx-50,350,100,100])['within_grasp_center_range'])
+
+    def test_user_confirmed_outside_positions_for_every_cargo_kind(self):
+        self.assertEqual(self.reference['membership_feature'], 'bbox_center_xy')
+        samples = self.reference['non_graspable_samples']
+        self.assertEqual(len(samples), 8)
+        for sample in samples:
+            path = image_trigger.PROJECT.parent.parent / sample['screenshot']
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), sample['sha256'])
+            self.assertFalse(sample['graspable'])
+            x,y,w,h = sample['bbox_xywh_px']
+            self.assertEqual([x+w/2,y+h/2], sample['bbox_center_px'])
+            for label in self.reference['classes']:
+                with self.subTest(sample=sample['role'], label=label):
+                    result = self.evaluate(sample['bbox_xywh_px'], label=label)
+                    self.assertFalse(result['within_grasp_center_range'])
+            self.assertIn('dangerous_object', sample['applies_to'])
+            # Forbidden targets stay forbidden; occupancy does not make them selectable.
+            with self.assertRaises(ValueError):
+                self.evaluate(sample['bbox_xywh_px'], label='dangerous_object')
+
     def test_no_resolution_pitch_or_class_substitution(self):
         for change in [dict(image_size=[640,360]),dict(pitch_ui_deg=120),
                        dict(label='dangerous_object')]:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.evaluate([541,210,213,254],**change)
 
-    def test_invalid_box_and_unmeasured_lateral_position(self):
+    def test_invalid_box_and_lateral_position(self):
         for box in [[0,0,0,10],[0,0,float('nan'),10],[1200,600,200,200]]:
             with self.subTest(box=box),self.assertRaises(ValueError):
                 self.evaluate(box)
         result=self.evaluate([0,210,213,254])
         self.assertEqual(result['position'],'at_target')
-        self.assertEqual(result['lateral_fit'],'unmeasured')
+        self.assertEqual(result['lateral_fit'],'outside')
+        self.assertFalse(result['within_grasp_center_range'])
         self.assertTrue(result['observation_only'])
+        self.reference['classes']['ordinary_supply']['center_bounds_px'] = None
+        result=self.evaluate([0,210,213,254])
+        self.assertEqual(result['lateral_fit'],'unmeasured')
+        self.assertIsNone(result['within_grasp_center_range'])
 
 
 if __name__=='__main__':

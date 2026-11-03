@@ -54,7 +54,10 @@
       "confidence": 0.897
     }
   ],
-  "lateral_bounds_px": null,
+  "lateral_bounds_px": [
+    209.0,
+    1071.0
+  ],
   "multi_object_examples": [],
   "runtime_enabled": true,
   "pixel_alignment": {
@@ -77,7 +80,10 @@
     "三张均为单个居中绿色物块；不能由检测框宽度推定夹爪左右容许范围。",
     "前后区间依据检测框中心Y；正确参考点同时记录中心X/Y。",
     "2026-10-28: 用户提供伤员/核心前后左右最大可夹取边界。按同一UI140视角解释，使用原图检测框中心建立各类别轴向边界，角点组合未单独采样。",
-    "UI90与UI120均在检测框中心进入画面下四分之一（720高时Y≥540）后停车切下一视角，这是视角交接策略、不是夹取边界实测；UI120像素对准后以近距速度接近，UI140以中心Y=337作为停车闭爪线，保留各类前后/左右边界。无需120/140地面投影参数；普通物块未测横向最大边界，沿用中心对准要求。"
+    "UI90与UI120均在检测框中心进入画面下四分之一（720高时Y≥540）后停车切下一视角，这是视角交接策略、不是夹取边界实测；UI120像素对准后以近距速度接近，UI140以中心Y=337作为停车闭爪线，保留各类前后/左右边界。无需120/140地面投影参数；2026-10-30补齐普通物块横向最大边界，按各类已测范围判断。",
+    "2026-10-30: 用户确认普通物资左右边界，沿用UI140、1280×720原图检测框中心口径；左框[206,253,272,262]中心(342,384)，右框[895,263,272,282]中心(1031,404)。普通物资中心范围X342–1031、Y226–489，含边界；目标参考点仍为(647.5,337)，前后与左右轴向样本未单独验证角点组合。",
+    "2026-10-31: Added eight user-confirmed non-graspable positions, applicable to all cargo kinds. Existing positive centre ranges unchanged: all eight centres are outside all three recorded class ranges. Pixel inventory/held membership uses centre coordinates consistently; approach corridor remains a separate centre region, unknown boxes stay conservative. Outside a class grasp range is not permission to move or close.",
+    "2026-10-31: 用户确认切分后框内普通物资仍应计入，并要求左右一致。以1280宽原图中线X640对称，采用该轮普通#16最右中心X1071及其镜像X209，运行普通区域更新为X209–1071、Y226–489（含边界）。原始左右截图、检测框和reference_center_px继续保留历史实测值，不伪造新标定样本；伤员、核心及闭爪对准线保持原值。"
   ],
   "reference_center_px": {
     "front": [
@@ -137,6 +143,34 @@
             224
           ],
           "confidence": 0.897
+        },
+        {
+          "role": "left",
+          "screenshot": "calibration_runs/gripper_image_20261030/reference_screenshots/ordinary_left.png",
+          "original_filename": "截图 2026-10-30 14-32-48.png",
+          "sha256": "f11dd713222ae541e26f79235587d0bd843886fea69c4222c14a1ada8a0c3f47",
+          "label": "ordinary_supply",
+          "bbox_xywh_px": [
+            206,
+            253,
+            272,
+            262
+          ],
+          "confidence": 0.885
+        },
+        {
+          "role": "right",
+          "screenshot": "calibration_runs/gripper_image_20261030/reference_screenshots/ordinary_right.png",
+          "original_filename": "截图 2026-10-30 14-32-59.png",
+          "sha256": "f8c2bddc0aac9eec91addf4cffff64e0e4e16ddeacf598a7b91fefcae7cb9d49",
+          "label": "ordinary_supply",
+          "bbox_xywh_px": [
+            895,
+            263,
+            272,
+            282
+          ],
+          "confidence": 0.831
         }
       ],
       "reference_center_px": {
@@ -151,14 +185,28 @@
         "rear": [
           668.0,
           489.0
+        ],
+        "left": [
+          342.0,
+          384.0
+        ],
+        "right": [
+          1031.0,
+          404.0
         ]
       },
-      "center_bounds_px": null,
+      "center_bounds_px": [
+        209.0,
+        226.0,
+        1071.0,
+        500.0
+      ],
       "target_center_px": [
         647.5,
         337.0
       ],
-      "target_source": "ordinary correct-position sample"
+      "target_source": "ordinary correct-position sample",
+      "center_bounds_source": "User 2026-10-31: ordinary #16 remains inside after split; include logged centre X1071 and mirror about original-image centre X640 to X209. Original measured sample centres are preserved."
     },
     "injured_person": {
       "samples": [
@@ -340,5 +388,352 @@
     }
   },
   "approach_camera_ui_deg": 120,
-  "approach_camera_pitch_cdeg": 0
+  "approach_camera_pitch_cdeg": 0,
+  "membership_feature": "bbox_center_xy",
+  "dangerous_front_risk_region_xyxy_px": [209, 160, 1071, 180],
+  "dangerous_front_risk_source": "2026-11-04 engineering risk extension: logged dangerous box [394,38,264,275] centre [526,175.5] was physically retained but omitted by Y180. Additional centre band only; keep existing cargo union and eight confirmed outside samples. This is a risk gate, not a newly measured grasp boundary.",
+  "membership_source": "User 2026-10-31: eight outside jaw positions apply to every cargo kind; ordinary runtime centre region widened symmetrically to X209..1071 after confirmed in-frame split target; dangerous occupancy uses the union of current cargo ranges, never a selectable target.",
+  "non_graspable_samples": [
+    {
+      "role": "left",
+      "screenshot": "calibration_runs/gripper_image_20261031/reference_screenshots/ordinary_ungraspable_01.png",
+      "sha256": "dc2d483014a751740211ab110bc8794669ccefe675db4372b838bd9720fbff3c",
+      "label": "ordinary_supply",
+      "applies_to": [
+        "ordinary_supply",
+        "core_supply",
+        "injured_person",
+        "dangerous_object"
+      ],
+      "bbox_xywh_px": [
+        0,
+        240,
+        186,
+        251
+      ],
+      "bbox_center_px": [
+        93.0,
+        365.5
+      ],
+      "confidence": 0.923,
+      "graspable": false,
+      "source": "User-confirmed outside jaw contact; detector table uses original 1280x720 pixels; preview startup pitch status is not a calibrated servo readback."
+    },
+    {
+      "role": "upper_left",
+      "screenshot": "calibration_runs/gripper_image_20261031/reference_screenshots/ordinary_ungraspable_02.png",
+      "sha256": "8906f1181bc3012ef76f986e4f00f7091734835e0ca37196df64f7a92d275e46",
+      "label": "ordinary_supply",
+      "applies_to": [
+        "ordinary_supply",
+        "core_supply",
+        "injured_person",
+        "dangerous_object"
+      ],
+      "bbox_xywh_px": [
+        120,
+        15,
+        261,
+        261
+      ],
+      "bbox_center_px": [
+        250.5,
+        145.5
+      ],
+      "confidence": 0.862,
+      "graspable": false,
+      "source": "User-confirmed outside jaw contact; detector table uses original 1280x720 pixels; preview startup pitch status is not a calibrated servo readback."
+    },
+    {
+      "role": "upper_left_tip",
+      "screenshot": "calibration_runs/gripper_image_20261031/reference_screenshots/ordinary_ungraspable_03.png",
+      "sha256": "3ca5248b2ee42faf6a07d99f3e37d602eb23211da453985360e4568c73e0fb24",
+      "label": "ordinary_supply",
+      "applies_to": [
+        "ordinary_supply",
+        "core_supply",
+        "injured_person",
+        "dangerous_object"
+      ],
+      "bbox_xywh_px": [
+        335,
+        0,
+        201,
+        171
+      ],
+      "bbox_center_px": [
+        435.5,
+        85.5
+      ],
+      "confidence": 0.785,
+      "graspable": false,
+      "source": "User-confirmed outside jaw contact; detector table uses original 1280x720 pixels; preview startup pitch status is not a calibrated servo readback."
+    },
+    {
+      "role": "upper_middle_left",
+      "screenshot": "calibration_runs/gripper_image_20261031/reference_screenshots/ordinary_ungraspable_04.png",
+      "sha256": "c545f4ea7f7b7c65e12140184078ea670d23014f8db8435fe0d3aff61ce15821",
+      "label": "ordinary_supply",
+      "applies_to": [
+        "ordinary_supply",
+        "core_supply",
+        "injured_person",
+        "dangerous_object"
+      ],
+      "bbox_xywh_px": [
+        520,
+        10,
+        151,
+        151
+      ],
+      "bbox_center_px": [
+        595.5,
+        85.5
+      ],
+      "confidence": 0.869,
+      "graspable": false,
+      "source": "User-confirmed outside jaw contact; detector table uses original 1280x720 pixels; preview startup pitch status is not a calibrated servo readback."
+    },
+    {
+      "role": "upper_middle_right",
+      "screenshot": "calibration_runs/gripper_image_20261031/reference_screenshots/ordinary_ungraspable_05.png",
+      "sha256": "930596cf9f1d87b828b53c268983ffa237b01e6409beffd10cbefa8eb0f97eac",
+      "label": "ordinary_supply",
+      "applies_to": [
+        "ordinary_supply",
+        "core_supply",
+        "injured_person",
+        "dangerous_object"
+      ],
+      "bbox_xywh_px": [
+        640,
+        15,
+        171,
+        181
+      ],
+      "bbox_center_px": [
+        725.5,
+        105.5
+      ],
+      "confidence": 0.869,
+      "graspable": false,
+      "source": "User-confirmed outside jaw contact; detector table uses original 1280x720 pixels; preview startup pitch status is not a calibrated servo readback."
+    },
+    {
+      "role": "upper_right_tip",
+      "screenshot": "calibration_runs/gripper_image_20261031/reference_screenshots/ordinary_ungraspable_06.png",
+      "sha256": "b268e57ac55eb569e80c58a08878f707aab022910196fe48408d908327e3bfdb",
+      "label": "ordinary_supply",
+      "applies_to": [
+        "ordinary_supply",
+        "core_supply",
+        "injured_person",
+        "dangerous_object"
+      ],
+      "bbox_xywh_px": [
+        820,
+        0,
+        211,
+        156
+      ],
+      "bbox_center_px": [
+        925.5,
+        78.0
+      ],
+      "confidence": 0.777,
+      "graspable": false,
+      "source": "User-confirmed outside jaw contact; detector table uses original 1280x720 pixels; preview startup pitch status is not a calibrated servo readback."
+    },
+    {
+      "role": "right",
+      "screenshot": "calibration_runs/gripper_image_20261031/reference_screenshots/ordinary_ungraspable_07.png",
+      "sha256": "33f06d12c6a019f51735ff9c0d9c6b49e5f5f9a04946226e94c0cfb27b3d4623",
+      "label": "ordinary_supply",
+      "applies_to": [
+        "ordinary_supply",
+        "core_supply",
+        "injured_person",
+        "dangerous_object"
+      ],
+      "bbox_xywh_px": [
+        1141,
+        185,
+        139,
+        241
+      ],
+      "bbox_center_px": [
+        1210.5,
+        305.5
+      ],
+      "confidence": 0.869,
+      "graspable": false,
+      "source": "User-confirmed outside jaw contact; detector table uses original 1280x720 pixels; preview startup pitch status is not a calibrated servo readback."
+    },
+    {
+      "role": "upper_right",
+      "screenshot": "calibration_runs/gripper_image_20261031/reference_screenshots/ordinary_ungraspable_08.png",
+      "sha256": "7e81bb6725b57ad03aab9352d53aaf77052364fdb79daec68bf504e532cd7d26",
+      "label": "ordinary_supply",
+      "applies_to": [
+        "ordinary_supply",
+        "core_supply",
+        "injured_person",
+        "dangerous_object"
+      ],
+      "bbox_xywh_px": [
+        985,
+        45,
+        252,
+        201
+      ],
+      "bbox_center_px": [
+        1111.0,
+        145.5
+      ],
+      "confidence": 0.896,
+      "graspable": false,
+      "source": "User-confirmed outside jaw contact; detector table uses original 1280x720 pixels; preview startup pitch status is not a calibrated servo readback."
+    }
+  ],
+  "pushboard_floor": {
+    "enabled": true,
+    "windows_xywh": [
+      [
+        410,
+        530,
+        75,
+        45
+      ],
+      [
+        790,
+        530,
+        75,
+        45
+      ]
+    ],
+    "min_visible": 0.6,
+    "min_own": 0.75,
+    "min_ground": 0.6,
+    "confirm_us": 200000,
+    "speed_mps": 0.04,
+    "hsv": {
+      "blue": [
+        [
+          90,
+          65,
+          40,
+          125,
+          255,
+          255
+        ]
+      ],
+      "red": [
+        [
+          0,
+          80,
+          40,
+          10,
+          255,
+          255
+        ],
+        [
+          170,
+          80,
+          40,
+          179,
+          255,
+          255
+        ]
+      ],
+      "purple": [
+        [
+          126,
+          55,
+          35,
+          165,
+          255,
+          255
+        ]
+      ],
+      "white": [
+        [
+          0,
+          0,
+          65,
+          179,
+          60,
+          255
+        ]
+      ],
+      "cargo": [
+        [
+          35,
+          65,
+          30,
+          85,
+          255,
+          255
+        ],
+        [
+          5,
+          90,
+          40,
+          25,
+          255,
+          255
+        ],
+        [
+          0,
+          0,
+          0,
+          179,
+          255,
+          35
+        ]
+      ]
+    },
+    "calibration_status": "initial_from_user_inside_outside_screenshots_not_motion_validated",
+    "notes": [
+      "UI140 only; side purple is ignored. Ground samples beside pushboard front.",
+      "Cargo veto ranges: green ordinary_supply, orange injured_person, dark core_supply. All non-zone boxes also mask foreground.",
+      "Both windows must have sufficient visible floor; first own-colour hit stops, then fresh stationary confirmation permits release.",
+      "Initial windows/HSV verified on user white-floor and blue-floor screenshots; red and full physical entry require field validation."
+    ],
+    "transport_region": {
+      "min_width_fraction": 0.65,
+      "min_height_fraction": 0.55,
+      "min_bottom_fraction": 0.95,
+      "hsv": {
+        "blue": [
+          [
+            90,
+            65,
+            65,
+            115,
+            255,
+            255
+          ]
+        ],
+        "red": [
+          [
+            0,
+            80,
+            65,
+            10,
+            255,
+            255
+          ],
+          [
+            170,
+            80,
+            65,
+            179,
+            255,
+            255
+          ]
+        ]
+      },
+      "source": "Initial UI120 thresholds from operator-accepted left-half view (2026-11-03); width AND height AND bottom; tune with field replay."
+    }
+  }
 }

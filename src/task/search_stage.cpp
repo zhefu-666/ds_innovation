@@ -5,36 +5,7 @@
 #include <limits>
 
 namespace rescue {
-namespace {
-// Only overlap connected to the selected target can divert its approach.
-// The target occupies the final point/box; unrelated groups are ignored.
-std::vector<cv::Point2f> targetOverlappingComponent(const std::vector<cv::Point2f>& points,
-                                                  const std::vector<cv::Rect>& boxes) {
-    if (points.empty() || points.size() != boxes.size())
-        return {};
-    const size_t target = points.size() - 1;
-    if (boxes[target].empty())
-        return {};
-    std::vector<char> seen(points.size(), 0);
-    std::vector<size_t> pending{target};
-    std::vector<cv::Point2f> group;
-    seen[target] = 1;
-    while (!pending.empty()) {
-        const size_t i = pending.back();
-        pending.pop_back();
-        group.push_back(points[i]);
-        for (size_t j = 0; j < points.size(); ++j)
-            if (!seen[j] && !boxes[j].empty() && (boxes[i] & boxes[j]).area() > 0) {
-                seen[j] = 1;
-                pending.push_back(j);
-            }
-    }
-    return group.size() >= 2 ? group : std::vector<cv::Point2f>{};
-}
-} // namespace
-
 void SearchStage::resetScanTracking() {
-    confirm_since_us_ = 0;
     vis_hits_ = vis_miss_ = 0;
     vis_chase_t0_ = 0;
     scan_hold_t0_ = scan_hold_cool_until_us_ = 0;
@@ -42,10 +13,6 @@ void SearchStage::resetScanTracking() {
 
 void SearchStage::resetScanHeading() {
     scan_last_valid_ = false;
-}
-
-void SearchStage::resetConfirmSince() {
-    confirm_since_us_ = 0;
 }
 
 void SearchStage::update(SearchAction state,
@@ -87,20 +54,14 @@ void SearchStage::scan(const TaskTuning& t,
     int& target_id = c.trip_data.target_id_;
     std::string& label = c.trip_data.label_;
     int& confirmations = c.progress.confirmations;
-    bool& cue_mode = c.search.cue_mode_;
-    int& search_cue_id = c.search.search_cue_id_;
     int& capture_target_id = c.trip_data.capture_target_id_;
     float& scan_turn_acc = c.search.scan_turn_acc_;
-    uint64_t& scatter_idle_since_us = c.search.scatter_idle_since_us_;
-    bool& burst_drive_used = c.search.burst_drive_used_;
-    bool& burst_swing_armed = c.search.burst_swing_armed_;
     float& approach_forward = c.trip_data.approach_forward_;
     std::string& reason = c.reason;
     const uint64_t now = c.now_us;
 
     s.command_frame(0, now);
     approach_forward = 0; // scans turn in place: the retreat bound restarts at the lock
-    const bool cue = s.cue_candidate();
     const bool cand = s.candidate(in, now);
     if (in.heading_valid && std::isfinite(in.heading_rad)) {
         if (scan_last_valid_)
@@ -109,133 +70,14 @@ void SearchStage::scan(const TaskTuning& t,
         scan_last_valid_ = true;
     } else
         scan_last_valid_ = false;
-    cv::Point2f weak_pt(0.f, 0.f);
-    bool weak_hold = false;
-    if (cand && !cue && c.scatter_ok && s.weak_candidate(in)) {
-        weak_pt = s.target_body();
-        weak_hold = weak_pt.y >= t.blind_scatter_min_y_m && weak_pt.y <= c.far_y &&
-                    std::abs(weak_pt.x) <= t.blind_scatter_half_x_m &&
-                    std::abs(std::atan2(-weak_pt.x, weak_pt.y)) <= t.blind_scatter_max_bearing_rad;
-    }
-    // A lock this far out is not trusted (class / position are off at this range): a group
-    // of several objects is enough to drive toward; once it is within
-    // blind_scatter_far_chase_m the normal decision takes over.
-    const bool metric_target = std::isfinite(in.distance_m) &&
-                                in.distance_m > 0 && std::isfinite(in.heading_error);
-    const bool ordinary_candidate = cand && !cue && targetKind(in.label) == TargetKind::ORDINARY;
-    const auto corridor_verdict = checkCorridor(in.corridor, in.corridor_complete,
-                                               in.corridor_occlusion_free, in.label,
-                                               c.first_ordinary);
-    const bool corridor_blocked = metric_target && in.corridor_complete &&
-                                  corridor_verdict != RuleVerdict::OK &&
-                                  corridor_verdict != RuleVerdict::INCOMPLETE;
-    if (cand && !cue && !weak_hold && !ordinary_candidate && c.scatter_ok && c.approach_ok &&
-        metric_target && in.distance_m > t.blind_scatter_far_chase_m) {
-        std::vector<cv::Point2f> pts = in.clutter_body;
-        pts.emplace_back(s.target_body());
-        s.add_ordinary_extra(pts.back());
-        if (!c.clutter_fresh) {
-            const cv::Point2f lock_pt = pts.back();
-            pts.assign(1, lock_pt);
-        }
-        const BestGroup best = s.find_best(pts, c.far_y, t.blind_scatter_far_radius_m);
-        // An ordinary supply that is being confirmed (confirm_frames) is not pre-empted by
-        // the shorter cluster count. The hold starts at the first held tick and ends after
-        // sweep_confirm_wait_us whatever the lock does (an id that flips every frame cannot
-        // hold the cluster back for ever); the opening burst drive is never held back.
-        const bool pending =
-            t.sweep_confirm_wait_us > 0 && confirmations > 0 && confirmations < t.confirm_frames &&
-            targetKind(in.label) == TargetKind::ORDINARY && !(t.first_burst && !burst_drive_used);
-        if (best.n >= t.blind_scatter_far_lock_min && best.d > t.blind_scatter_max_y_m) {
-            bool hold = false;
-            if (pending) {
-                if (!confirm_since_us_)
-                    confirm_since_us_ = now;
-                hold = now - confirm_since_us_ < t.sweep_confirm_wait_us;
-            }
-            if (hold) {
-                far_seen_ = 0;
-                reason = "sweep_defer_target_confirm";
-            } else if (++far_seen_ >= t.sweep_confirm) {
-                far_seen_ = 0;
-                confirm_since_us_ = 0;
-                s.begin_scatter(true, false, "blind_scatter_far_group");
-                return;
-            }
-        } else {
-            far_seen_ = 0;
-            confirm_since_us_ = 0;
-        }
-    } else if (t.dense_no_lock && cand && !cue && !weak_hold && corridor_blocked &&
-               (c.scatter_ok || c.scatter_multi_ok) && c.clutter_fresh) {
-        // A clean or unobserved corridor is not evidence for scattering. For an
-        // actually blocked target, consider only its neighbours and approach lane.
-        far_seen_ = 0;
-        confirm_since_us_ = 0;
-        const cv::Point2f target = s.target_body();
-        const float distance = cv::norm(target);
-        std::vector<cv::Point2f> pts;
-        std::vector<cv::Rect> boxes;
-        for (size_t i = 0; i < in.clutter_body.size(); ++i) {
-            const auto& q = in.clutter_body[i];
-            if (!std::isfinite(q.x) || !std::isfinite(q.y) || distance <= 0.f)
-                continue;
-            const float along = q.dot(target) / distance;
-            const float across = std::abs(q.x * target.y - q.y * target.x) / distance;
-            const bool neighbour = cv::norm(q - target) <= t.disperse_radius_m;
-            const bool in_lane = along >= 0.f && along <= distance + t.sweep_extra_m &&
-                                 across <= t.sweep_corridor_half_m;
-            if (!neighbour && !in_lane)
-                continue;
-            pts.push_back(q);
-            boxes.push_back(i < in.clutter_boxes.size() ? in.clutter_boxes[i] : cv::Rect{});
-        }
-        pts.push_back(target);
-        boxes.push_back(in.target_box);
-        s.add_ordinary_extra(target);
-        int g = 0;
-        if (t.lock_max_visible > 0 && int(pts.size()) > t.lock_max_visible && c.scatter_multi_ok) {
-            const auto overlap_group = targetOverlappingComponent(pts, boxes);
-            if (!overlap_group.empty())
-                g = s.eval_group(overlap_group,
-                                 t.lock_multi_group_min,
-                                 t.lock_multi_group_min,
-                                 t.lock_multi_radius_m);
-        }
-        const bool multi_hit = g != 0;
-        if (!g && c.scatter_ok && pts.size() > 1)
-            g = s.eval_group(pts, t.blind_scatter_min, t.blind_scatter_far_min, -1.f);
-        if (g) {
-            if (++dense_seen_ < t.sweep_confirm) {
-                reason = "dense_group_confirm";
-                return;
-            }
-            dense_seen_ = 0;
-            s.begin_scatter(g == 2,
-                            true,
-                            multi_hit ? (g == 2 ? "multi_visible_far" : "multi_visible_split")
-                                      : (g == 2 ? "dense_group_far" : "dense_group_split"));
-            return;
-        }
-        dense_seen_ = 0;
-    } else {
-        far_seen_ = 0;
-        confirm_since_us_ = 0;
-        dense_seen_ = 0;
-    }
-    if ((!cand && !cue) || weak_hold) {
+    if (!cand) {
         confirmations = 0;
         target_id = -1;
-        cue_mode = false;
+
         reason = c.scan_ok ? "searching_target" : "scan_path_blocked";
-        if (c.scan_ok && in.target_is_search_cue &&
-            c.search.clear_attempts_ >= t.max_clear_attempts)
-            reason = "cue_attempt_limit";
-        if (weak_hold)
-            reason = "weak_target_scatter_wait";
         if (s.unstick())
             return;
-        if (t.visual_chase && !cue) {
+        if (t.visual_chase) {
             const bool seen = in.target_valid && in.target_id >= 0 && in.pixel_bearing_valid &&
                               std::isfinite(in.pixel_bearing) &&
                               in.pixel_confidence >= t.visual_chase_min_conf &&
@@ -272,42 +114,7 @@ void SearchStage::scan(const TaskTuning& t,
                 }
             }
         }
-        // No selectable cargo: a fresh group can still guide scattering. Small ordinary
-        // targets use normal confirmation/approach; only other weak classes join this fallback.
-        if (c.scatter_ok) {
-            if (!scatter_idle_since_us)
-                scatter_idle_since_us = now;
-            const bool looked = weak_hold || c.search.scatter_count_ > 0 ||
-                                scan_turn_acc >= t.blind_scatter_first_turn_rad;
-            const bool fresh =
-                weak_hold || (looked && in.clutter_ts_us && now >= in.clutter_ts_us &&
-                              now - in.clutter_ts_us <= t.sweep_fresh_us);
-            if (fresh && now - scatter_idle_since_us >=
-                             (weak_hold ? t.weak_scatter_wait_us : t.blind_scatter_wait_us)) {
-                std::vector<cv::Point2f> pts = in.clutter_body;
-                if (weak_hold) {
-                    pts.push_back(weak_pt);
-                    s.add_ordinary_extra(weak_pt);
-                }
-                const int need_n = weak_hold ? 1 : t.blind_scatter_min;
-                const int g =
-                    s.eval_group(pts, need_n, weak_hold ? 1 : t.blind_scatter_far_min, -1.f);
-                if (g) {
-                    if (++c.search.scatter_seen_ < t.sweep_confirm) {
-                        reason = "blind_scatter_confirm";
-                        return;
-                    }
-                    c.search.scatter_seen_ = 0;
-                    // far: too far for the rush budget, drive closer first, then the normal
-                    // trigger fires from the short range
-                    s.begin_scatter(
-                        g == 2, false, g == 2 ? "blind_scatter_far_start" : "blind_scatter_start");
-                    return;
-                }
-                c.search.scatter_seen_ = 0;
-            }
-        }
-        if (t.scan_sighting_hold && !cue && now >= vis_cool_until_us_) {
+        if (t.scan_sighting_hold && now >= vis_cool_until_us_) {
             const bool sighted =
                 in.pixel_reason == "confirming_three_frames" ||
                 in.pixel_reason == "pixel_ratio_locked" ||
@@ -331,32 +138,16 @@ void SearchStage::scan(const TaskTuning& t,
         s.scan_spin();
         return;
     }
-    scatter_idle_since_us = 0;
-    c.search.scatter_seen_ = 0;
-    if (confirmations + 1 >= t.confirm_frames)
-        c.search.scatter_approach_n_ = 0;
-    if (target_id != in.target_id || label != in.label || cue_mode != cue) {
-        target_id = in.target_id;
+    if (target_id != in.target_id || label != in.label) {
+        target_id = capture_target_id = in.target_id;
         label = in.label;
         confirmations = 0;
-        cue_mode = cue;
-        if (cue) {
-            search_cue_id = target_id;
-            capture_target_id = -1;
-        } else {
-            capture_target_id = target_id;
-            search_cue_id = -1;
-        }
     }
     if (++confirmations >= t.confirm_frames) {
-        burst_swing_armed =
-            false; // a normal lock ends the opening: no fast swing later in the match
         if (t.demo_search_only) {
             s.fail_stop("demo_target_found");
         } else
-            s.enter(cue ? SearchAction::CueApproach : SearchAction::Approach,
-                    now,
-                    cue ? "search_cue_locked" : "target_locked");
+            s.enter(SearchAction::Approach, now, "target_locked");
     }
 }
 
@@ -367,8 +158,6 @@ void SearchStage::lostSearch(const TaskTuning& t,
     int& target_id = c.trip_data.target_id_;
     std::string& label = c.trip_data.label_;
     int& confirmations = c.progress.confirmations;
-    bool& cue_mode = c.search.cue_mode_;
-    int& search_cue_id = c.search.search_cue_id_;
     int& capture_target_id = c.trip_data.capture_target_id_;
     int& step = c.progress.step;
     uint64_t& phase_us = c.progress.started_us;
@@ -403,8 +192,7 @@ void SearchStage::lostSearch(const TaskTuning& t,
             return;
         }
         if (t.lost_search_rescan && c.frame_raised == 0 && c.trip_empty) {
-            // Nothing found in two sweeps: go back to the normal SCAN (far pitch, blind
-            // scatter) instead of idling for the rest of the match.
+            // Nothing found in two views: return to normal far-view scanning.
             lost_round = 0;
             target_id = -1;
             confirmations = 0;
@@ -429,42 +217,17 @@ void SearchStage::lostSearch(const TaskTuning& t,
                 // Close cargo found at 20deg: keep this view instead of tilting back to
                 // FAR.
                 target_id = capture_target_id = -1;
-                cue_mode = false;
+
                 s.enter(SearchAction::MidReacquire, now, "lost_target_reacquired_mid");
                 return;
             }
-            if (!t.enable_search_cues) {
-                // 搜索线索关闭（演示模式）：CUE_APPROACH永远不会成立，重新找回后直接回到APPROACH。
-                capture_target_id = target_id;
-                search_cue_id = -1;
-                cue_mode = false;
-                s.enter(SearchAction::Approach, now, "lost_target_reacquired");
-                return;
-            }
-            search_cue_id = target_id;
-            capture_target_id = -1;
-            cue_mode = true;
-            s.enter(SearchAction::CueApproach, now, "lost_target_reacquired");
+            capture_target_id = target_id;
+            s.enter(SearchAction::Approach, now, "lost_target_reacquired");
         }
         return; // stop while confirming a newly seen cargo candidate
     }
     target_id = -1;
     confirmations = 0;
-    if (c.frame_raised == 0 && c.trip_empty && c.scatter_ok &&
-        c.clutter_fresh) { // a group in view needs a sweep, not more spinning
-        const int g =
-            s.eval_group(in.clutter_body, t.blind_scatter_min, t.blind_scatter_far_min, -1.f);
-        if (g) {
-            if (++c.search.scatter_seen_ < t.sweep_confirm) {
-                reason = "lost_group_confirm";
-                return;
-            }
-            c.search.scatter_seen_ = 0;
-            s.begin_scatter(g == 2, true, g == 2 ? "lost_group_far" : "lost_group_sweep");
-            return;
-        }
-    }
-    c.search.scatter_seen_ = 0;
     if (s.unstick())
         return;
     reason = c.scan_ok ? (lost_round ? "rotating_for_lost_target_mid" : "rotating_for_lost_target")
@@ -553,7 +316,7 @@ void SearchStage::selectCargo(const TaskTuning& t,
 
     s.command_frame(0, now);
     if (c.elapsed_us > t.prepare_budget_us) {
-        s.reject_search_cue(now);
+        s.blacklist(now);
         s.scan_after_clear("no_eligible_cargo");
         return;
     }
@@ -581,47 +344,19 @@ void SearchStage::midApproach(const TaskTuning& t,
     const uint64_t elapsed = c.elapsed_us;
     const TaskTuning& t_ = t;
     const bool forward_ok = c.forward_ok;
-    const bool clutter_fresh = c.clutter_fresh;
-    const bool sweepOver = c.sweep_over;
-    const bool sweepTimeOk = c.sweep_time_ok;
-    const bool sweepLedgerOk = c.sweep_ledger_ok;
-    const float target_forward_m = c.target_forward_m;
     const int frame_raised_ = c.frame_raised;
     const bool first_ = c.first_ordinary;
     auto& pending_ = c.trip_data.pending_;
     auto& misses_ = c.progress.misses;
-    auto& travel_ = c.progress.travel;
     auto& target_id_ = c.trip_data.target_id_;
     auto& label_ = c.trip_data.label_;
     auto& confirmations_ = c.progress.confirmations;
     auto& capture_target_id_ = c.trip_data.capture_target_id_;
     auto& near_failures_ = c.search.near_failures_;
-    auto& scan_turn_acc_ = c.search.scan_turn_acc_;
-    auto& clear_attempts_ = c.search.clear_attempts_;
     auto& reason_ = c.reason;
-    auto& sweep_phase_ = c.search.sweep_phase_;
-    auto& mid_clear_n_ = c.search.mid_clear_n_;
-    auto& sweep_travel0_ = c.search.sweep_travel0_;
     auto& last_range_ = c.progress.last_range;
-    auto& disperse_sign_ = c.search.disperse_sign_;
-    auto& disperse_rush_m_ = c.search.disperse_rush_m_;
-    auto& scan_mid_limit_ = c.search.scan_mid_limit_;
-    auto& sweep_start_us_ = c.search.sweep_start_us_;
-    auto& sweep_t0_us_ = c.search.sweep_t0_us_;
-    auto& disperse_cool_until_us_ = c.search.disperse_cool_until_us_;
-    auto& sweep_non_supply_active_ = c.search.sweep_non_supply_active_;
-    auto& post_disperse_mid_ = c.search.post_disperse_mid_;
-    auto& disperse_small_ = c.search.disperse_small_;
     auto& verdict_ = c.trip_data.verdict_;
     auto& seen_ = c.trip_data.seen_;
-    auto& sweep_ledger_ = c.ledger;
-    auto& disperse_swing_ = c.search.disperse_swing_;
-    const auto candidate = [&](const PushObservation& o, uint64_t at) {
-        return s.candidate(o, at);
-    };
-    const auto targetBody = [&] {
-        return s.target_body();
-    };
     const auto drive = [&](float vx, float wz) {
         s.drive(vx, wz);
     };
@@ -640,17 +375,8 @@ void SearchStage::midApproach(const TaskTuning& t,
     const auto frameWait = [&](const PushObservation& o, uint8_t open, uint64_t at) {
         return s.frame_wait(o, open, at);
     };
-    const auto clearTrip = [&] {
-        s.clear_trip();
-    };
     const auto blacklist = [&](uint64_t at) {
         s.blacklist(at);
-    };
-    const auto disperseStep = [&] {
-        return s.disperse_step();
-    };
-    const auto beginPileFromSweep = [&](const char* why) {
-        return s.begin_pile_from_sweep(why);
     };
     const auto lostTarget = [&] {
         return s.lost_target();
@@ -665,47 +391,6 @@ void SearchStage::midApproach(const TaskTuning& t,
         s.steer(speed, heading);
     };
     do {
-        if (sweep_phase_ >= 4) {
-            if (t_.sweep_observation_guard && !clutter_fresh && !candidate(in, now)) {
-                sweep_ledger_.close(t_, now);
-                sweep_phase_ = 0;
-                disperse_small_ = false;
-                clearTrip();
-                enter(SearchAction::MidReacquire, now, "sweep_observation_lost");
-                break;
-            }
-            if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
-                sweep_ledger_.close(t_, now);
-                sweep_phase_ = 0;
-                disperse_small_ = false;
-                reason_ = "mid_clear_no_heading";
-                break;
-            }
-            if (sweepOver || disperseStep()) {
-                const bool swung = sweep_ledger_.close(t_, now);
-                if (sweep_non_supply_active_) { // swept aside, not grabbed: veto it and search
-                                                // again at the close view
-                    disperse_small_ = false;
-                    blacklist(now);
-                    clearTrip();
-                    scan_mid_limit_ = scan_turn_acc_ + 2.f * float(CV_PI);
-                    disperse_cool_until_us_ = now + t_.disperse_cooldown_us;
-                    sweep_ledger_.setGapUntil(now + t_.sweep_gap_us);
-                    if (!sweepOver && swung && beginPileFromSweep("pile_chain_non_supply"))
-                        break;
-                    enter(SearchAction::Scan, now, "non_supply_swept");
-                    break;
-                }
-                sweep_phase_ = 0;
-                disperse_small_ = false;
-                s.clear_rejected();
-                s.clear_rejected_bearings();
-                post_disperse_mid_ = t_.post_clear_mid_view;
-                target_id_ = capture_target_id_ = -1;
-                enter(SearchAction::MidReacquire, now, "mid_neighbour_clear_done");
-            }
-            break;
-        }
         if (!tracking(in)) {
             reason_ = trackingReason();
             if (frame_raised_ == 1 && last_range_ <= t_.open_jaw_handoff_m) {
@@ -731,11 +416,7 @@ void SearchStage::midApproach(const TaskTuning& t,
         }
         misses_ = 0;
         last_range_ = in.distance_m;
-        if (!forward_ok && frame_raised_ == 0 && t_.enable_short_push && clear_attempts_ < 2 &&
-            in.clear_push_safe && std::abs(in.heading_error) <= t_.rush_heading_rad) {
-            enter(SearchAction::CuePrepare, now, "closed_push_prepare");
-            break;
-        }
+
         if (!forward_ok) {
             if (frame_raised_ == 1) {
                 failStop("open_jaw_path_blocked");
@@ -755,76 +436,11 @@ void SearchStage::midApproach(const TaskTuning& t,
                 drive(0, t_.heading_gain * in.heading_error);
                 break;
             }
-            if (t_.sweep_non_supply && t_.disperse && sweepTimeOk &&
-                targetKind(label_) != TargetKind::ORDINARY && in.heading_valid &&
-                std::isfinite(in.heading_rad)) {
-                if (++confirmations_ < t_.confirm_frames) {
-                    reason_ = "non_supply_sweep_confirm";
-                    break;
-                }
-                confirmations_ = 0;
-                sweep_non_supply_active_ = true;
-                disperse_small_ = false;
-                disperse_sign_ = 1.f;
-                disperse_rush_m_ =
-                    std::clamp(target_forward_m - t_.sweep_frame_front_m + t_.disperse_depth_m,
-                               0.f,
-                               t_.disperse_max_m);
-                disperse_swing_.configure(t_.disperse_passes, t_.disperse_swings);
-                sweep_phase_ = 4;
-                sweep_start_us_ = sweep_t0_us_ = now;
-                sweep_travel0_ = travel_;
-                sweep_ledger_.begin(t_, now);
-                reason_ = "non_supply_rush";
-                break;
-            }
+
             verdict_ = checkCorridor(
                 in.corridor, in.corridor_complete, in.corridor_occlusion_free, label_, first_);
             if (verdict_ != RuleVerdict::OK) {
-                if (t_.enable_short_push && clear_attempts_ < 2 && in.clear_push_safe &&
-                    in.corridor_complete && in.corridor.unknown == 0 &&
-                    (in.corridor.dangerous > 0 || in.corridor.injured > 0 ||
-                     in.corridor.core > 0)) {
-                    enter(SearchAction::CuePrepare, now, "closed_push_prepare");
-                    break;
-                }
-                const bool neighbour_verdict =
-                    verdict_ == RuleVerdict::TOO_MANY_SUPPLIES ||
-                    verdict_ == RuleVerdict::DANGEROUS || verdict_ == RuleVerdict::UNKNOWN_OBJECT ||
-                    verdict_ == RuleVerdict::CORE_BEFORE_FIRST ||
-                    verdict_ == RuleVerdict::INJURED_BEFORE_FIRST ||
-                    verdict_ == RuleVerdict::INJURED_NOT_ALONE || verdict_ == RuleVerdict::OCCLUDED;
-                if (t_.mid_neighbour_clear && t_.disperse && sweepLedgerOk && neighbour_verdict &&
-                    mid_clear_n_ < t_.mid_neighbour_clear_max && in.heading_valid &&
-                    std::isfinite(in.heading_rad)) {
-                    const cv::Point2f tp = targetBody();
-                    float sum_x = 0;
-                    if (in.clutter_ts_us && now >= in.clutter_ts_us &&
-                        now - in.clutter_ts_us <= t_.sweep_fresh_us)
-                        for (const auto& u : in.clutter_body) {
-                            if (!std::isfinite(u.x) || !std::isfinite(u.y))
-                                continue;
-                            const float r = float(cv::norm(u - tp));
-                            if (r < t_.sweep_min_sep_m || r > t_.disperse_radius_m)
-                                continue;
-                            sum_x += u.x - tp.x;
-                        }
-                    ++mid_clear_n_;
-                    disperse_small_ = true;
-                    disperse_sign_ = sum_x > 0 ? -1.f : 1.f;
-                    disperse_rush_m_ = std::clamp(target_forward_m - t_.sweep_frame_front_m -
-                                                      t_.mid_neighbour_clear_gap_m,
-                                                  0.f,
-                                                  t_.mid_neighbour_clear_max_rush_m);
-                    disperse_swing_.configure(1, t_.mid_neighbour_clear_swings);
-                    sweep_phase_ = 4;
-                    sweep_start_us_ = sweep_t0_us_ = now;
-                    sweep_travel0_ = travel_;
-                    confirmations_ = 0;
-                    sweep_ledger_.begin(t_, now);
-                    reason_ = "mid_neighbour_clear";
-                    break;
-                }
+
                 blacklist(now);
                 target_id_ = capture_target_id_ = -1;
                 if (++near_failures_ >= 2) {
@@ -896,60 +512,31 @@ void SearchStage::approach(const TaskTuning& t,
     const uint64_t now = c.now_us;
     const uint64_t elapsed = c.elapsed_us;
     const TaskTuning& t_ = t;
-    const bool clutter_fresh = c.clutter_fresh;
-    const bool sweepOver = c.sweep_over;
-    const bool sweepTimeOk = c.sweep_time_ok;
-    const bool sweepLedgerOk = c.sweep_ledger_ok;
-    const bool sweep_open_disabled_ = c.sweep_open_disabled;
-    const int sweep_esc = c.sweep_esc;
-    const float target_forward_m = c.target_forward_m;
     const bool first_ = c.first_ordinary;
     const int16_t pitch_cmd_ = c.pitch_cmd;
     float& motion_wz = c.motion.wz_rps;
     auto& misses_ = c.progress.misses;
     auto& track_close_ = c.progress.track_close;
-    auto& travel_ = c.progress.travel;
     auto& target_id_ = c.trip_data.target_id_;
     auto& label_ = c.trip_data.label_;
-    auto& cue_mode_ = c.search.cue_mode_;
     auto& capture_target_id_ = c.trip_data.capture_target_id_;
     auto& phase_us_ = c.progress.started_us;
     auto& near_failures_ = c.search.near_failures_;
-    auto& scan_turn_acc_ = c.search.scan_turn_acc_;
     auto& reason_ = c.reason;
-    auto& sweep_phase_ = c.search.sweep_phase_;
-    auto& sweep_attempts_ = c.search.sweep_attempts_;
-    auto& sweep_seen_ = c.search.sweep_seen_;
     auto& approach_last_id_ = c.search.approach_last_id_;
     auto& rush_pulse_phase_ = c.search.rush_pulse_phase_;
     auto& rush_pulse_count_ = c.search.rush_pulse_count_;
     auto& precheck_seen_ = c.search.precheck_seen_;
     auto& precheck_rejects_ = c.search.precheck_rejects_;
-    auto& sweep_travel0_ = c.search.sweep_travel0_;
-    auto& sweep_yaw0_ = c.search.sweep_yaw0_;
     auto& approach_last_heading_ = c.search.approach_last_heading_;
     auto& approach_last_distance_ = c.search.approach_last_distance_;
     auto& approach_last_world_yaw_ = c.search.approach_last_world_yaw_;
-    auto& disperse_sign_ = c.search.disperse_sign_;
-    auto& disperse_rush_m_ = c.search.disperse_rush_m_;
-    auto& scan_mid_limit_ = c.search.scan_mid_limit_;
-    auto& sweep_start_us_ = c.search.sweep_start_us_;
-    auto& sweep_t0_us_ = c.search.sweep_t0_us_;
-    auto& disperse_cool_until_us_ = c.search.disperse_cool_until_us_;
-    auto& sweep_non_supply_active_ = c.search.sweep_non_supply_active_;
-    auto& post_disperse_mid_ = c.search.post_disperse_mid_;
     auto& approach_rebind_ = c.search.approach_rebind_;
     auto& approach_last_world_valid_ = c.search.approach_last_world_valid_;
     auto& approach_pitch_ = c.search.approach_pitch_;
     auto& verdict_ = c.trip_data.verdict_;
-    auto& sweep_ledger_ = c.ledger;
-    auto& disperse_turn_ = c.search.disperse_turn_;
-    auto& disperse_swing_ = c.search.disperse_swing_;
     const auto candidate = [&](const PushObservation& o, uint64_t at) {
         return s.candidate(o, at);
-    };
-    const auto targetBody = [&] {
-        return s.target_body();
     };
     const auto drive = [&](float vx, float wz) {
         s.drive(vx, wz);
@@ -975,15 +562,6 @@ void SearchStage::approach(const TaskTuning& t,
     const auto blacklist = [&](uint64_t at) {
         s.blacklist(at);
     };
-    const auto sweepFrameReady = [&] {
-        return s.sweep_frame_ready();
-    };
-    const auto disperseStep = [&] {
-        return s.disperse_step();
-    };
-    const auto beginPileFromSweep = [&](const char* why) {
-        return s.begin_pile_from_sweep(why);
-    };
     const auto lostTarget = [&] {
         return s.lost_target();
     };
@@ -996,14 +574,6 @@ void SearchStage::approach(const TaskTuning& t,
     const auto approachHeadingShift = [&](const PushObservation& o) {
         return s.approach_heading_shift(o);
     };
-    const auto uprightInCorridor =
-        [&](const PushObservation& o, uint64_t at, float& lat, float* along) {
-            return s.upright_in_corridor(o, at, lat, along);
-        };
-    const auto neighbourInCorridor =
-        [&](const PushObservation& o, uint64_t at, float& lat, float* along) {
-            return s.neighbour_in_corridor(o, at, lat, along);
-        };
     const auto desiredPitch = [&]() -> int16_t {
         return s.desired_pitch();
     };
@@ -1013,115 +583,8 @@ void SearchStage::approach(const TaskTuning& t,
     const auto steer = [&](float speed, float heading) {
         s.steer(speed, heading);
     };
-    const auto motionRatio = [&] {
-        return s.motion_ratio();
-    };
     do {
         // Keep jaw state from MID_APPROACH; a camera change must not close on unseen cargo.
-        if (sweep_phase_) {
-            if (t_.sweep_observation_guard && !clutter_fresh && !candidate(in, now) &&
-                !(disperse_turn_.active() && sweep_phase_ == 5)) {
-                sweep_ledger_.close(t_, now);
-                sweep_phase_ = 0;
-                scanAfterClear("sweep_observation_lost");
-                break;
-            }
-            // In-place sweep of an on-end block beside the target: turn out by IMU angle, then
-            // back. Tracking may drop meanwhile. The base turns at roughly a quarter of the
-            // command, so sweep_wz bypasses max_wz and the sweep time is not charged to the
-            // approach budget.
-            const auto sweepDrive = [&](float wz) {
-                drive(0, wz);
-                if (motion_wz != 0)
-                    motion_wz = std::copysign(t_.sweep_wz, wz);
-            };
-            const auto sweepEnd = [&](const char* why) {
-                sweep_ledger_.close(t_, now);
-                phase_us_ += now - sweep_t0_us_;
-                sweep_phase_ = 0;
-                ++sweep_attempts_;
-                sweep_seen_ = 0;
-                if (t_.sweep_observation_guard)
-                    sweep_ledger_.setGapUntil(now + t_.sweep_gap_us);
-                reason_ = why;
-            };
-            if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
-                sweepEnd("sweep_upright_no_heading");
-                break;
-            }
-            if (sweep_phase_ >= 4) {
-                const bool cut = sweepOver;
-                if (cut || disperseStep()) {
-                    const bool swung = sweep_ledger_.close(t_, now);
-                    if (sweep_non_supply_active_) { // swept aside, not grabbed: veto it and
-                                                    // search again at the close view
-                        blacklist(now);
-                        clearTrip();
-                        scan_mid_limit_ = scan_turn_acc_ + 2.f * float(CV_PI);
-                        disperse_cool_until_us_ = now + t_.disperse_cooldown_us;
-                        sweep_ledger_.setGapUntil(now + t_.sweep_gap_us);
-                        if (!cut && swung && beginPileFromSweep("pile_chain_non_supply"))
-                            break;
-                        enter(SearchAction::Scan, now, "non_supply_swept");
-                        break;
-                    }
-                    phase_us_ += now - sweep_t0_us_;
-                    sweep_phase_ = 0;
-                    sweep_seen_ = 0;
-                    reason_ = cut ? "sweep_budget_exhausted" : "disperse_done";
-                    disperse_cool_until_us_ = now + t_.disperse_cooldown_us;
-                    sweep_ledger_.setGapUntil(now + t_.sweep_gap_us);
-                    s.clear_rejected();
-                    s.clear_rejected_bearings(); // the pile has moved: earlier vetoes no longer
-                                                 // apply
-                    post_disperse_mid_ =
-                        t_.post_clear_mid_view; // if the target is lost after the sweep, search
-                                                // at 20deg first (cargo is close)
-                    if (!cut && swung)
-                        beginPileFromSweep("pile_chain_disperse");
-                }
-                break;
-            }
-            if (sweep_phase_ < 4 && sweepOver) {
-                sweepEnd("sweep_budget_exhausted");
-                break;
-            }
-            if (!sweepFrameReady())
-                break;
-            if (sweep_phase_ == 3) {
-                if (travel_ - sweep_travel0_ >= sweep_creep_m_ * motionRatio() ||
-                    now - sweep_start_us_ > t_.sweep_creep_budget_us) {
-                    sweep_phase_ = 1;
-                    sweep_yaw0_ = in.heading_rad;
-                    sweep_start_us_ = now;
-                    sweep_ledger_.setSwung(true);
-                } else {
-                    reason_ = "sweep_creep";
-                    drive(t_.sweep_creep_speed, 0);
-                    break;
-                }
-            }
-            const float dyaw = wrapAngle(in.heading_rad - sweep_yaw0_);
-            const uint64_t se = now - sweep_start_us_;
-            if (sweep_phase_ == 1 &&
-                (std::abs(dyaw) >= t_.sweep_turn_rad || se > t_.sweep_budget_us)) {
-                sweep_phase_ = 2;
-                sweep_start_us_ = now;
-            }
-            if (sweep_phase_ == 1) {
-                reason_ = "sweep_upright_out";
-                sweepDrive(sweep_sign_ * t_.sweep_wz);
-                break;
-            }
-            if (std::abs(dyaw) <= t_.sweep_return_tol_rad ||
-                now - sweep_start_us_ > t_.sweep_budget_us) {
-                sweepEnd("sweep_upright_done");
-                break;
-            }
-            reason_ = "sweep_upright_back";
-            sweepDrive(dyaw > 0 ? -t_.sweep_wz : t_.sweep_wz);
-            break;
-        }
         if (rush_pulse_phase_) {
             // IMU-angle pulse then a short stop; vision re-checks the bearing afterwards. Pulse
             // time is not charged to the approach budget.
@@ -1206,7 +669,7 @@ void SearchStage::approach(const TaskTuning& t,
                         failStop("near_tracking_failed_stop");
                     } else {
                         target_id_ = capture_target_id_ = -1;
-                        cue_mode_ = false;
+
                         enter(SearchAction::NearReacquire, now, "near_target_lost_reacquire");
                     }
                 } else {
@@ -1256,96 +719,6 @@ void SearchStage::approach(const TaskTuning& t,
         reason_ = "approach_target";
         if (in.distance_m <= t_.rush_start_m) {
             if (std::abs(in.heading_error) <= t_.rush_heading_rad) {
-                const bool non_supply = t_.sweep_non_supply && t_.disperse &&
-                                        targetKind(label_) != TargetKind::ORDINARY;
-                if (t_.disperse &&
-                    (non_supply ? sweepTimeOk
-                                : (now >= disperse_cool_until_us_ && sweepLedgerOk)) &&
-                    in.heading_valid && std::isfinite(in.heading_rad) &&
-                    std::isfinite(in.distance_m)) {
-                    // Count everything else around the target (any class); a dense pile is
-                    // scattered, not picked at.
-                    const bool use_clutter = in.clutter_ts_us && now >= in.clutter_ts_us &&
-                                             now - in.clutter_ts_us <= t_.sweep_fresh_us;
-                    const auto& pts = use_clutter ? in.clutter_body : in.upright_body;
-                    const uint64_t pts_ts = use_clutter ? in.clutter_ts_us : in.upright_ts_us;
-                    const cv::Point2f tp = targetBody();
-                    int near_n = 0;
-                    float sum_x = 0;
-                    if (pts_ts && now >= pts_ts && now - pts_ts <= t_.sweep_fresh_us)
-                        for (const auto& u : pts) {
-                            if (!std::isfinite(u.x) || !std::isfinite(u.y))
-                                continue;
-                            const float r = float(cv::norm(u - tp));
-                            if (r < t_.sweep_min_sep_m || r > t_.disperse_radius_m)
-                                continue;
-                            ++near_n;
-                            sum_x += u.x - tp.x;
-                        }
-                    if (non_supply || near_n >= t_.disperse_dense_min + sweep_esc) {
-                        if (++sweep_seen_ < t_.sweep_confirm) {
-                            reason_ = non_supply ? "non_supply_sweep_confirm" : "disperse_confirm";
-                            break;
-                        }
-                        sweep_seen_ = 0;
-                        sweep_non_supply_active_ = non_supply;
-                        disperse_sign_ =
-                            sum_x > 0 ? -1.f : 1.f; // first swing toward the heavier side
-                        disperse_rush_m_ = std::clamp(target_forward_m - t_.sweep_frame_front_m +
-                                                          t_.disperse_depth_m,
-                                                      0.f,
-                                                      t_.disperse_max_m);
-                        disperse_swing_.configure(t_.disperse_passes, t_.disperse_swings);
-                        sweep_phase_ = 4;
-                        sweep_start_us_ = sweep_t0_us_ = now;
-                        sweep_travel0_ = travel_;
-                        sweep_ledger_.begin(t_, now);
-                        reason_ = "disperse_rush";
-                        break;
-                    }
-                }
-                float lat = 0, nearest_y = 0;
-                const bool upright_hit =
-                    t_.sweep_upright && uprightInCorridor(in, now, lat, &nearest_y);
-                const bool neighbour_hit =
-                    !upright_hit && neighbourInCorridor(in, now, lat, &nearest_y);
-                if ((upright_hit || neighbour_hit) && sweepLedgerOk &&
-                    sweep_attempts_ < t_.sweep_max_attempts && in.heading_valid &&
-                    std::isfinite(in.heading_rad)) {
-                    if (++sweep_seen_ < t_.sweep_confirm) {
-                        reason_ =
-                            neighbour_hit ? "sweep_neighbour_confirm" : "sweep_upright_confirm";
-                        break;
-                    }
-                    sweep_yaw0_ = in.heading_rad;
-                    sweep_sign_ = lat > 0 ? -1.f : 1.f;
-                    sweep_start_us_ = sweep_t0_us_ = now;
-                    sweep_seen_ = 0;
-                    sweep_ledger_.begin(t_, now);
-                    sweep_creep_m_ = t_.sweep_creep
-                                         ? std::clamp(nearest_y - (t_.sweep_frame_front_m +
-                                                                   t_.sweep_creep_gap_m),
-                                                      0.f,
-                                                      t_.sweep_creep_max_m)
-                                         : 0.f;
-                    if (sweep_creep_m_ >= .02f) {
-                        sweep_phase_ = 3;
-                        sweep_travel0_ = travel_;
-                        reason_ = "sweep_creep";
-                        break;
-                    }
-                    sweep_phase_ = 1;
-                    sweep_ledger_.setSwung(true);
-                    reason_ = neighbour_hit ? "sweep_neighbour_out" : "sweep_upright_out";
-                    if ((t_.sweep_frame_open || t_.frame_open_default) && !sweep_open_disabled_)
-                        break; // open the frame first; the next tick turns
-                    drive(0, sweep_sign_ * t_.sweep_wz);
-                    if (motion_wz != 0)
-                        motion_wz = sweep_sign_ * t_.sweep_wz;
-                    break;
-                }
-                if (sweep_seen_ > 0)
-                    --sweep_seen_;
                 if (t_.corridor_precheck && !t_.assume_all_safe &&
                     precheck_rejects_ < t_.corridor_precheck_max && in.corridor_complete) {
                     const auto v = checkCorridor(

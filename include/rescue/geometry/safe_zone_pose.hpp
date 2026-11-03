@@ -15,6 +15,7 @@ struct SafeZoneObservation {
     std::vector<cv::Point3f> object_points;
     bool has_divider = false;               // legacy diagnostic, never a validity gate
     cv::Mat reference_rvec, reference_tvec; // optional independent ground-fit cross-check reference
+    cv::Mat expected_normal_camera; // optional calibrated up direction; resolves planar branches
 };
 
 // Optional diagnostic candidate, including rejected solutions; never implies a valid pose.

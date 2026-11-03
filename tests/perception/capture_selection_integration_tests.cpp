@@ -16,6 +16,121 @@ SegDetection object(int id, cv::Rect box, std::string label = "ordinary_supply")
     d.body_xy_m = {0, .13f};
     return d;
 }
+void startupTrackerRebind() {
+    PushObservation in;
+    in.camera_pitch_stable = true;
+    in.camera_pitch_cdeg = 0;
+    in.pixel_grasp_view = true;
+    const uint64_t now = 1000000;
+    StartupSightReference ref{7, "injured_person", {600,200,100,100}, 0, now - 30000};
+    auto same = object(8, {604,202,100,100}, "injured_person");
+    auto other = object(9, {850,450,100,100}, "injured_person");
+    same.timestamp_us = other.timestamp_us = now;
+    applyStartupSight(in, {same, other}, {1280,720}, now, .5f, 7, false, -1, ref);
+    assert(in.target_valid && in.target_id == 8 && in.startup_rebound_from == 7);
+    auto ambiguous = same;
+    ambiguous.track_id = 10;
+    applyStartupSight(in, {same, ambiguous}, {1280,720}, now, .5f, 7, false, -1, ref);
+    assert(!in.target_valid && in.startup_rebound_from == -1);
+    same.label = "ordinary_supply";
+    applyStartupSight(in, {same}, {1280,720}, now, .5f, 7, false, -1, ref);
+    assert(!in.target_valid);
+    same.label = ref.label;
+    in.camera_pitch_cdeg = 2000;
+    applyStartupSight(in, {same}, {1280,720}, now, .5f, 7, false, -1, ref);
+    assert(!in.target_valid);
+    in.camera_pitch_cdeg = 0;
+    ref.sample_us = 1;
+    const uint64_t expired_now = now + kStartupTargetLossHoldUs;
+    same.timestamp_us = expired_now;
+    applyStartupSight(in, {same}, {1280,720}, expired_now, .5f, 7, false, -1, ref);
+    assert(!in.target_valid);
+    same.timestamp_us = now;
+    ref.sample_us = now - 30000;
+    // Logged UI140 loss: ID120 changes to ID124 with a resized box. The lower
+    // IoU caused a target release although this is the unique nearby match.
+    StartupSightReference logged{120, "ordinary_supply", {976,13,203,224}, 2000, now-30000};
+    auto resized = object(124, {1012,3,254,244});
+    auto neighbour = object(125, {865,8,244,193});
+    resized.timestamp_us = neighbour.timestamp_us = now;
+    in.camera_pitch_cdeg = 2000;
+    applyStartupSight(in, {resized,neighbour}, {1280,720}, now, .5f, 120, true, -1, logged);
+    assert(in.target_valid && in.target_id == 124 && in.startup_rebound_from == 120);
+    in.camera_pitch_cdeg = 0;
+    auto original = same;
+    original.track_id = 7;
+    applyStartupSight(in, {original, same}, {1280,720}, now, .5f, 7, false, -1, ref);
+    assert(in.target_id == 7 && in.startup_rebound_from == -1);
+}
+
+void startupSightEvidence() {
+    const uint64_t now = 1000000;
+    PushObservation in;
+    in.camera_pitch_stable = true;
+    in.pixel_grasp_view = true;
+    auto ordinary = object(1, {600, 510, 80, 80});
+    auto danger = object(2, {100, 100, 80, 80}, "dangerous_object");
+    ordinary.timestamp_us = danger.timestamp_us = now;
+    ordinary.ground_position_valid = danger.ground_position_valid = false;
+    applyStartupSight(in, {ordinary, ordinary}, {1280, 720}, now, .5f, -1);
+    assert(in.startup_visible_classes == 1);
+    applyStartupSight(in, {ordinary, danger}, {1280, 720}, now, .5f, -1);
+    assert(in.startup_visible_classes == 9 && in.startup_scene_us == now);
+    assert(in.startup_visible_count == 2);
+    assert(in.target_id == 1 && in.pixel_view_handoff_ready && in.pixel_grasp_error_px == 0);
+    assert(!in.geometry_valid);
+    applyStartupSight(in, {ordinary, danger}, {1280, 720}, now, .5f, 2);
+    assert(in.target_id == 2 && in.label == "dangerous_object");
+    for (const char* label : {"injured_person", "core_supply", "dangerous_object"}) {
+        danger.label = label;
+        applyStartupSight(in, {danger}, {1280, 720}, now, .5f, 2);
+        assert(in.startup_visible_classes != 0 && in.target_valid && in.label == label);
+    }
+    // Unlocked selection compares all classes; locked selection ignores neighbour jitter.
+    danger.label = "dangerous_object";
+    danger.box = {600, 620, 80, 80};
+    auto lower_ordinary = ordinary;
+    lower_ordinary.track_id = 3;
+    lower_ordinary.box.y = 580;
+    applyStartupSight(in, {ordinary, lower_ordinary, danger}, {1280, 720}, now, .5f, 2);
+    assert(in.target_id == 2 && in.label == "dangerous_object");
+    applyStartupSight(in, {ordinary, lower_ordinary, danger}, {1280, 720}, now, .5f, 1);
+    assert(in.target_id == 1);
+    applyStartupSight(in, {lower_ordinary, danger}, {1280, 720}, now, .5f, 1);
+    assert(!in.target_valid && in.startup_visible_count == 2);
+    applyStartupSight(in, {danger}, {1280, 720}, now, .5f, 3);
+    assert(!in.target_valid);
+    applyStartupSight(in, {lower_ordinary, danger}, {1280, 720}, now, .5f, -1);
+    assert(in.target_id == 2);
+    // UI140 must select an ordinary even when a non-ordinary is lower/nearer.
+    applyStartupSight(in, {lower_ordinary, danger}, {1280, 720}, now, .5f, -1, true);
+    assert(in.target_id == 3 && in.label == "ordinary_supply");
+    applyStartupSight(in, {ordinary, lower_ordinary, danger}, {1280, 720}, now, .5f, -1, true, 3);
+    assert(in.target_id == 1 && in.startup_visible_count == 3);
+    applyStartupSight(in, {danger}, {1280, 720}, now, .5f, -1, true);
+    assert(!in.target_valid && in.startup_visible_count == 1);
+    for (bool near : {false, true}) {
+        in.pixel_grasp_near_view = near;
+        for (int jitter = -15; jitter <= 15; ++jitter) {
+            danger.box.y = ordinary.box.y + jitter;
+            applyStartupSight(in, {ordinary, danger}, {1280, 720}, now, .5f, 1);
+            assert(in.target_id == 1 && in.target_valid);
+        }
+    }
+    for (int bad = 0; bad < 5; ++bad) {
+        auto d = ordinary;
+        if (bad == 0) d.timestamp_us = now - 200001;
+        if (bad == 1) d.timestamp_us = now + 1;
+        if (bad == 2) d.confidence = .49f;
+        if (bad == 3) d.label = "blue_safe_zone";
+        if (bad == 4) d.box = {1400, 0, 80, 80};
+        applyStartupSight(in, {d}, {1280, 720}, now, .5f, -1);
+        assert(in.startup_visible_classes == 0 && !in.target_valid);
+    }
+    in.camera_pitch_stable = false;
+    applyStartupSight(in, {ordinary, danger}, {1280, 720}, now, .5f, -1);
+    assert(!in.startup_visible_classes && !in.target_valid);
+}
 void splitRetreatBoxEvidence() {
     constexpr uint64_t now = 1000000;
     auto original = object(7, {300, 80, 60, 60});
@@ -307,7 +422,52 @@ void scatterSelectionLifecycle() {
     assert(!selected.locked);
 }
 
+void rushContinuousIdentity() {
+    for (int scenario = 0; scenario < 5; ++scenario) {
+        PixelSelector selector;
+        uint64_t now = 8000000;
+        auto target = object(1, {300, 300, 100, 100});
+        auto neighbour = object(2, {700, 300, 60, 60});
+        auto step = [&](std::vector<SegDetection> ds, bool stable = true) {
+            now += 30000;
+            for (auto& d : ds) d.timestamp_us = now;
+            return selector.update(ds, {1000, 800}, 2000, stable, now, false, .25f);
+        };
+        step({target, neighbour});
+        step({target, neighbour});
+        assert(step({target, neighbour}).id == 1);
+        selector.syncTaskState(PushState::RUSH, 1, target.label);
+        auto rebound = target;
+        rebound.track_id = 9;
+        rebound.box.x += 2;
+        if (scenario == 0) {
+            neighbour.box = {650, 250, 250, 250};
+            assert(step({target, neighbour}).id == 1); // no area-based target switch
+            auto out = step({rebound, neighbour});
+            assert(out.locked && out.id == 9 && out.rebound_from == 1);
+        } else if (scenario == 1) {
+            auto duplicate = rebound;
+            duplicate.track_id = 10;
+            auto out = step({rebound, duplicate, neighbour});
+            assert(!out.locked && out.event == "rebind_ambiguous");
+        } else if (scenario == 2) {
+            auto out = step({neighbour});
+            assert(!out.locked && out.held_id == 1 && out.id != 2);
+            for (int i = 0; i < 10; ++i) out = step({neighbour});
+            assert(out.released_id == 1 && out.event == "target_lost_timeout");
+        } else if (scenario == 3) {
+            step({target, neighbour}, false);
+            assert(!step({rebound, neighbour}).locked); // view change still needs confirmation
+        } else {
+            rebound.box.width = rebound.box.height = 180; // weak overlap keeps three frames
+            assert(!step({rebound, neighbour}).locked);
+        }
+    }
+}
 int main() {
+    rushContinuousIdentity();
+    startupSightEvidence();
+    startupTrackerRebind();
     splitRetreatBoxEvidence();
     scatterSelectionLifecycle();
     persistentTargetTests();

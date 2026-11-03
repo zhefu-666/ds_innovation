@@ -70,6 +70,11 @@ bool CameraCalibration::load(const std::string& path, bool allow_mechanical_assu
         if (!node.isInt() || (int(node) != 0 && int(node) != 1)) return false;
         pnp_crosscheck_enabled_ = int(node) == 1;
     }
+    if (!file["enable_zone_pnp_primary"].empty()) {
+        const auto n = file["enable_zone_pnp_primary"];
+        if (!n.isInt() || (int(n) != 0 && int(n) != 1)) return false;
+        zone_pnp_primary_enabled_ = int(n) == 1;
+    }
     const auto overlap = file["overlap_ground_views"];
     if (!overlap.empty()) {
         if (!overlap.isSeq() || domain != "undistorted_pixels") return false;

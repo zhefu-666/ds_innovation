@@ -186,13 +186,13 @@ std::array<int, 2> UARTController::servoAngles() const {
 }
 
 namespace {
-// 超过200ms无有效帧，返回无效快照；保留原始值但不将其当成新动作确认。
+// 超过300ms无有效帧，返回无效快照；保留原始值但不将其当成新动作确认。
 ActuatorFeedback freshFeedback(ActuatorFeedback state) {
     const auto now_us = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch())
             .count());
     if (state.timestamp_us == 0 || now_us < state.timestamp_us ||
-        now_us - state.timestamp_us > 200000)
+        now_us - state.timestamp_us > 300000)
         state.valid = false;
     return state;
 }

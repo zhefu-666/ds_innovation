@@ -77,6 +77,7 @@ void printUsage(const char* program) {
         << "  --port PATH         MCU serial port, default /dev/ttyACM0\n"
         << "  --baud N            Baudrate, default 115200\n"
         << "  --team red|blue     Own zone color, default blue (opponent red)\n"
+        << "  --start-zone N      Startup zone 1..4: 2/3 clockwise, 1/4 counterclockwise\n"
         << "  --camera N          Camera index, default 0\n"
         << "  --width N           Capture width, default 1280\n"
         << "  --height N          Capture height, default 720\n"
@@ -105,6 +106,8 @@ void printUsage(const char* program) {
         << "  --auto-run          Request START once after live preflight; never auto-resume "
            "faults\n"
         << "  --phase NAME        Run only startup|search|capture|transport, then exit\n"
+        << "  --capture-after-first  With --phase capture: start with first ordinary delivery "
+           "history set; capture checks remain enabled\n"
         << "  --step-phases       Pause at each phase boundary; match_ctl.py next continues\n"
         << "  --no-match-time-limit Disable total duration limit for debugging; phase/health gates "
            "remain\n"
@@ -114,6 +117,7 @@ void printUsage(const char* program) {
         << "  --vision-log-dir DIR     Save raw/annotated JPEGs with [VISION_JUDGE] log at "
            "startup, default telemetry_logs/vision; 'none' disables\n"
         << "  --startup-speed V        Startup forward speed in m/s (0 < V <= 1.0)\n"
+        << "  --angular-command-scale K  MCU yaw response compensation (0 < K <= 1; default 1)\n"
         << "  --scan-wz W              Target/zone search rotation in rad/s (0 < W <= 3)\n"
         << "  --turn-wz W              Post-delivery rotation in rad/s (0 < W <= 3)\n"
         << "  --clear-neighbours       Sweep aside (never carry) neighbours that make the rush "
@@ -184,6 +188,13 @@ Config parseArgs(int argc, char** argv) {
             if (used != text.size() || value < 1 || value > 60)
                 throw std::runtime_error("--demo-seconds must be 1..60");
             config.demo_seconds = value;
+        } else if (arg == "--angular-command-scale") {
+            const auto value = needValue(arg);
+            size_t used = 0;
+            const float scale = std::stof(value, &used);
+            if (used != value.size() || !std::isfinite(scale) || scale <= 0 || scale > 1)
+                throw std::runtime_error("--angular-command-scale must be finite and in (0,1]");
+            config.angular_command_scale = scale;
         } else if (arg == "--startup-speed" || arg == "--scan-wz" || arg == "--turn-wz") {
             const auto value = needValue(arg);
             size_t used = 0;
@@ -266,6 +277,8 @@ Config parseArgs(int argc, char** argv) {
             config.input_size = std::stoi(needValue(arg));
         } else if (arg == "--conf") {
             config.confidence = std::stof(needValue(arg));
+        } else if (arg == "--ui140-core-conf") {
+            config.ui140_core_confidence = std::stof(needValue(arg));
         } else if (arg == "--injured-conf") {
             config.injured_confidence = std::stof(needValue(arg));
         } else if (arg == "--nms") {
@@ -346,6 +359,13 @@ Config parseArgs(int argc, char** argv) {
             if (used != text.size() || v < 1 || v > 86400)
                 throw std::runtime_error("--match-seconds must be 1..86400");
             config.match_seconds = static_cast<uint32_t>(v);
+        } else if (arg == "--start-zone") {
+            const auto text = needValue(arg);
+            size_t used = 0;
+            const int v = std::stoi(text, &used);
+            if (used != text.size() || v < 1 || v > 4)
+                throw std::runtime_error("--start-zone must be 1..4");
+            config.start_zone = v;
         } else if (arg == "--startup-advance-ms") {
             const auto text = needValue(arg);
             size_t used = 0;
@@ -369,6 +389,8 @@ Config parseArgs(int argc, char** argv) {
             if (config.single_phase != "startup" && config.single_phase != "search" &&
                 config.single_phase != "capture" && config.single_phase != "transport")
                 throw std::runtime_error("--phase must be startup|search|capture|transport");
+        } else if (arg == "--capture-after-first") {
+            config.capture_after_first = true;
         } else if (arg == "--step-phases") {
             config.step_phases = true;
         } else if (arg == "--auto-run") {
@@ -383,6 +405,8 @@ Config parseArgs(int argc, char** argv) {
         }
     }
 
+    if (config.capture_after_first && config.single_phase != "capture")
+        throw std::runtime_error("--capture-after-first requires --phase capture");
     if (!config.single_phase.empty() &&
         (config.step_phases || config.demo_mode != "none" || !config.push_replay.empty()))
         throw std::runtime_error("--phase cannot combine with stepping, demo or replay");
@@ -439,7 +463,8 @@ Config parseArgs(int argc, char** argv) {
     if (config.input_size <= 0 || !std::isfinite(config.confidence) || config.confidence < 0 ||
         config.confidence > 1 || !std::isfinite(config.nms) || config.nms < 0 || config.nms > 1 ||
         !std::isfinite(config.injured_confidence) || config.injured_confidence < 0 ||
-        config.injured_confidence > 1)
+        config.injured_confidence > 1 || !std::isfinite(config.ui140_core_confidence) ||
+        config.ui140_core_confidence < 0 || config.ui140_core_confidence > 1)
         throw std::runtime_error("Invalid model size or confidence/NMS thresholds");
     if (config.class_names.empty())
         throw std::runtime_error("--classes must name at least one class");

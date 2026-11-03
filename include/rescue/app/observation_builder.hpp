@@ -73,6 +73,7 @@ class ObservationBuilder {
     SensorFusion& fusion_;
     CaptureMonitor capture_;
     PixelSelector pixel_selector_;
+    uint64_t imu_translation_sequence_ = 0;
     uint64_t progress_ref_us_ = 0;
     int progress_total_ = -1;
     MultiViewCapture multi_view_;

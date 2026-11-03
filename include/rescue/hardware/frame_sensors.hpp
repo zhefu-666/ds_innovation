@@ -26,7 +26,7 @@ class PitchHistory {
             samples_.pop_front();
     }
     FrameSensors at(uint64_t capture_us,
-                    uint64_t max_skew_us = 50000,
+                    uint64_t max_skew_us = 300000,
                     uint64_t stable_us = 150000,
                     int tolerance_cdeg = 50) const {
         FrameSensors out;

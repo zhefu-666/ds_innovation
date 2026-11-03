@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <set>
 namespace rescue {
 namespace {
 std::vector<cv::Point3f> cuboid(float x, float y, float z) {
@@ -100,7 +101,7 @@ std::string GeometryPipeline::groundContact(SegDetection& d, const GeometryFrame
     std::vector<std::vector<cv::Point3f>> poses;
     if (!classSolids(d.label, poses))
         return "unknown_label";
-    if (!std::isfinite(d.confidence) || d.confidence < contact_.min_confidence)
+    if (!std::isfinite(d.confidence) || d.confidence < (d.label == "core_supply" && f.sensors.actuator.valid && f.sensors.pitch_stable && std::abs(int(pitch) - 2000) <= 100 ? std::min(contact_.min_confidence, contact_.ui140_core_confidence) : contact_.min_confidence))
         return "low_confidence";
     const int m = contact_.edge_margin_px;
     if (d.box.x < m || d.box.y < m || d.box.x + d.box.width > f.image_size.width - m ||
@@ -196,11 +197,135 @@ std::string GeometryPipeline::groundContact(SegDetection& d, const GeometryFrame
     d.ground_contact_valid = true;
     return {};
 }
+void GeometryPipeline::estimateZonePnp(GeometryResult& out,
+                                       const GeometryFrame& f,
+                                       const KeypointFrame& k) {
+    out.pnp_primary = true;
+    auto& z = out.zone;
+    z.frame_id=f.frame_id; z.timestamp_us=z.observed_us=f.capture_us;
+    z.zone_label=k.zone_label; z.geometry_id=k.geometry_id;
+    const auto fail = [&](const char* reason) {
+        z.valid=false; z.reason=out.reason=out.pnp_reason=reason;
+    };
+    if (k.frame_id!=f.frame_id || k.capture_us!=f.capture_us ||
+        k.image_size!=f.image_size) { fail("keypoint_frame_mismatch"); return; }
+    if (k.zone_label!=geometry_.label || k.geometry_id!=geometry_.id) {
+        fail("keypoint_schema_mismatch"); return;
+    }
+    cv::Matx34d camera;
+    if (!calibration_.cameraFromGround(f.sensors.actuator.camera_pitch_cdeg,
+                                       f.sensors.imu,camera)) {
+        fail("camera_transform_unavailable"); return;
+    }
+    const auto objects=geometry_.objectPoints();
+    std::vector<cv::Point3f> obj;
+    std::vector<cv::Point2f> img;
+    std::vector<int> ids;
+    std::set<int> seen;
+    for (const auto& p:k.points) {
+        if (p.id<0 || p.id>=6 || !seen.insert(p.id).second) {
+            fail("invalid_or_duplicate_id"); return;
+        }
+        if (!p.visible || !std::isfinite(p.confidence) || p.confidence<.60f ||
+            p.confidence>1 || !std::isfinite(p.pixel.x) || !std::isfinite(p.pixel.y) ||
+            p.pixel.x<=2 || p.pixel.y<=2 || p.pixel.x>=f.image_size.width-2 ||
+            p.pixel.y>=f.image_size.height-2) continue;
+        obj.push_back(objects[p.id]); img.push_back(p.pixel); ids.push_back(p.id);
+    }
+    if (obj.size()<4) { fail("pnp_insufficient_points"); return; }
+    out.pnp_attempted=true;
+    // At most six landmarks: deterministic four-point hypotheses, evaluated in pixels.
+    // No ray/plane intersection or metric spacing filter is used by this path.
+    const cv::Mat rc(camera.get_minor<3,3>(0,0));
+    cv::Mat normal=rc.col(2).clone();
+    std::vector<int> best;
+    double best_rms=1e30;
+    for (size_t a=0;a+3<obj.size();++a)
+    for (size_t b=a+1;b+2<obj.size();++b)
+    for (size_t c=b+1;c+1<obj.size();++c)
+    for (size_t d=c+1;d<obj.size();++d) {
+        std::vector<cv::Point3f> sample{obj[a],obj[b],obj[c],obj[d]};
+        std::vector<cv::Point2f> pixels{img[a],img[b],img[c],img[d]};
+        std::vector<cv::Mat> rv,tv;
+        try {
+            cv::solvePnPGeneric(sample,pixels,calibration_.cameraMatrix(),
+                calibration_.distCoeffs(),rv,tv,false,cv::SOLVEPNP_IPPE);
+        } catch (const cv::Exception&) { continue; }
+        for (size_t n=0;n<rv.size();++n) {
+            if (!cv::checkRange(rv[n]) || !cv::checkRange(tv[n])) continue;
+            cv::Mat r; cv::Rodrigues(rv[n],r);
+            if (r.col(2).dot(normal)<std::cos(25*CV_PI/180)) continue;
+            std::vector<cv::Point2f> projected;
+            cv::projectPoints(obj,rv[n],tv[n],calibration_.cameraMatrix(),
+                              calibration_.distCoeffs(),projected);
+            std::vector<int> inliers;
+            double error=0;
+            for (size_t i=0;i<img.size();++i) {
+                const double depth=r.at<double>(2,0)*obj[i].x+
+                    r.at<double>(2,1)*obj[i].y+tv[n].at<double>(2);
+                const double e=cv::norm(projected[i]-img[i]);
+                if (depth>0 && std::isfinite(e) && e<=4.) {
+                    inliers.push_back(int(i)); error+=e*e;
+                }
+            }
+            const double rms=inliers.empty()?1e30:std::sqrt(error/inliers.size());
+            if (inliers.size()>best.size() ||
+                (inliers.size()==best.size() && rms<best_rms)) {
+                best=inliers; best_rms=rms;
+            }
+        }
+    }
+    if (best.size()<std::max(size_t(4),obj.size()-1)) {
+        fail("pnp_no_consensus"); return;
+    }
+    SafeZoneObservation observation;
+    observation.label=k.zone_label; observation.expected_normal_camera=normal;
+    for (int i:best) {
+        observation.object_points.push_back(obj[i]);
+        observation.image_points.push_back(img[i]);
+    }
+    PnpDiagnostics diag;
+    out.pnp_attempted=true;
+    auto pose=pnp_.estimate(observation,f.capture_us,&diag);
+    out.pnp_solver_reason=pose.reason;
+    out.pnp_reprojection_error_px=diag.reprojection_error_px;
+    out.pnp_solution_valid=pose.valid;
+    if (!pose.valid) { fail(pose.reason.c_str()); return; }
+    cv::Mat r; cv::Rodrigues(pose.rvec,r);
+    const cv::Mat tc=(cv::Mat_<double>(3,1)<<camera(0,3),camera(1,3),camera(2,3));
+    const cv::Mat body_t=rc.t()*(pose.tvec-tc), body_r=rc.t()*r;
+    const double height=body_t.at<double>(2);
+    z.origin_body_m={float(body_t.at<double>(0)),float(body_t.at<double>(1))};
+    z.yaw_body_rad=std::atan2(body_r.at<double>(1,0),body_r.at<double>(0,0));
+    if (!cv::checkRange(body_t) || !cv::checkRange(body_r) ||
+        z.origin_body_m.y<=0 || cv::norm(z.origin_body_m)>4 ||
+        std::abs(height-geometry_.landmark_height_m)>.10) {
+        fail("pnp_body_pose_rejected"); return;
+    }
+    for (int i:best) z.inlier_ids.push_back(ids[i]);
+    // Pixel residual propagated to metres; the existing uncertainty gate still applies.
+    const double fx=calibration_.cameraMatrix().at<double>(0,0);
+    const double sigma=std::max(1.5,double(pose.reprojection_error_px))*pose.distance_m/fx;
+    z.residual_m=pose.reprojection_error_px*pose.distance_m/fx;
+    z.position_sigma_m=std::max(.003,double(sigma));
+    double span=0;
+    for (const auto& a:observation.image_points)
+        for (const auto& b:observation.image_points) span=std::max(span,cv::norm(a-b));
+    z.yaw_sigma_rad=std::max(.005,2*std::max(1.5,double(pose.reprojection_error_px))/std::max(1.,span));
+    z.source=ZoneEstimate::Source::MULTI_POINT;
+    z.valid=true; z.reason=out.reason=out.pnp_reason="pnp_primary_ok";
+    if (!z.trusted(f.now_us)) {
+        fail("pnp_pose_quality_rejected"); return;
+    }
+    out.zone_camera_rvec=pose.rvec.clone(); out.zone_camera_tvec=pose.tvec.clone();
+    out.identity_verified=k.identity_verified;
+}
 GeometryResult GeometryPipeline::process(const GeometryFrame& f,
                                          const KeypointFrame& k,
                                          const std::vector<SegDetection>& detections) {
     GeometryResult out;
     out.detections = detections;
+    out.pnp_primary = calibration_.zonePnpPrimaryEnabled();
     out.reason = filter_.frameRejection(f, calibration_);
     // Inputs never carry contact or position in: both are produced here or stay invalid.
     for (auto& d : out.detections) {
@@ -208,6 +333,7 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,
         d.ground_contact_reason = out.reason;
     }
     if (!out.reason.empty()) {
+        if (out.pnp_primary) { pnp_.reset(); out.zone.reason=out.reason; return out; }
         FilteredKeypoints invalid;
         invalid.reason = out.reason;
         out.zone = fitter_.fit(invalid, k, f);
@@ -216,6 +342,7 @@ GeometryResult GeometryPipeline::process(const GeometryFrame& f,
     out.mapping_valid = true;
     for (auto& d : out.detections)
         d.ground_contact_reason = groundContact(d, f);
+    if (out.pnp_primary) { estimateZonePnp(out,f,k); return out; }
     const auto filtered = filter_.filter(k, f, geometry_, calibration_);
     out.zone = fitter_.fit(filtered, k, f);
     out.reason = out.zone.reason;

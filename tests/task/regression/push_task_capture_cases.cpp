@@ -48,7 +48,7 @@ void rulesTests() {
 }
 
 void captureTests() {
-    // A full ordinary box touching Y180 counts in both split and held inventory.
+    // A full ordinary box touching Y180 counts in split, corridor and held inventory.
     {
         CaptureConfig cfg;
         cfg.pixel_grasp_enabled = true;
@@ -76,7 +76,7 @@ void captureTests() {
             assert(in.split_ordinary_count == (overlaps ? 2 : 1));
             assert(in.image_layout_vertical_dominant == overlaps);
             assert(in.held.ordinary == (overlaps ? 2 : 1));
-            assert(in.corridor.ordinary == 1);
+            assert(in.corridor.ordinary == (overlaps ? 2 : 1));
         }
     }
 
@@ -201,7 +201,10 @@ void captureTests() {
         in.target_id = 11;
         in.pixel_rebound_from = 10;
         out = step();
-        assert(out.target_id == 11 && stopped(out.motion) && out.reason == "pixel_target_rebound");
+        // RUSH accepts the same-object ID without an artificial stop/realignment.
+        // This synthetic observation has no scene evidence, so scene review still stops it.
+        assert(out.target_id == 11 && stopped(out.motion) &&
+               out.reason == "first_trip_stop_review_scene_or_target_missing");
         in.pixel_rebound_from = -1;
         in.pixel_released_id = 11;
         in.target_valid = false;
@@ -238,6 +241,18 @@ void captureTests() {
             in.pixel_grasp_error_px = error;
             in.pixel_grasp_steering = error / 640.f;
             in.pixel_grasp_aligned = std::abs(error) <= 12.f;
+            if (in.pixel_grasp_near_view) {
+                in.target_center_px_valid = true;
+                in.target_center_px = {647.5f - error, 260.f};
+                in.capture_scene_valid = in.capture_path_valid = true;
+                in.capture_scene_us = in.pixel_grasp_sample_us;
+                in.capture_area_px = {268.5f, 236.f, 748.5f, 319.f};
+                in.layout_count_region_px = {268.5f, 180.f, 748.5f, 309.f};
+                in.capture_path_px = {268.5f, 205.f, 748.5f, 350.f};
+                in.capture_path_lateral_measured = true;
+                in.capture_image_objects = {
+                    {in.target_id, in.label, {int(in.target_center_px.x - 30), 230, 60, 60}, true}};
+            }
             out = task.update(in);
             return out;
         };
@@ -356,7 +371,9 @@ void captureTests() {
         assert(out.state==PushState::LOWER_FRAME);
         auto veto=task;
         auto bad=in; bad.now_us+=50000; bad.pixel_grasp_aligned=false;
-        assert(veto.update(bad).state==PushState::CAPTURE_FAIL);
+        const auto rejected = veto.update(bad);
+        assert(rejected.state == PushState::LOWER_FRAME && stopped(rejected.motion) &&
+               veto.frame_raised_ == 1);
     }
 
     // The complete image route works at UI120/UI140 with absent metric geometry.
@@ -389,7 +406,7 @@ void captureTests() {
         CaptureConfig config;
         config.pixel_grasp_enabled = true;
         config.grasp_center_ranges = {
-            {"ordinary_supply",2000,1280,720,{0,226,1279,489},{647.5f,337},false},
+            {"ordinary_supply",2000,1280,720,{342,226,1031,489},{647.5f,337},true},
             {"injured_person",2000,1280,720,{395,236,906,479},{647.5f,337}},
             {"core_supply",2000,1280,720,{268.5f,236,1017,555},{647.5f,337}}};
         CaptureMonitor monitor(config);
@@ -444,56 +461,30 @@ void captureTests() {
         assert(stopped(out.motion) && out.reason == "camera_pitch_wait");
         in.camera_pitch_cdeg = 2000; in.camera_pitch_stable = true;
         d.box.y = 200; // Same object recovered in the new view; centre Y250.
-        d.box.x = 598;
-        for (int i=0;i<20 && out.state!=PushState::PREPARE;++i) step();
-        assert(out.state == PushState::PREPARE && out.motion.gripper_offset == 0);
-        in.gripper_done = true; in.gripper_feedback_open = 1;
-        for (int i=0;i<20 && out.state!=PushState::RUSH;++i) step();
-        assert(out.state == PushState::RUSH);
-        // Unmeasured ordinary cargo retains precise centering.
-        if (label == "ordinary_supply") {
-        for (int i = 0; i < 30; ++i) {
-            d.box.x = i < 15 ? 568 : 618;
-            step();
-            assert(out.motion.vx_mps == 0);
-            if (out.reason == "pixel_center_align") {
-                const float expected = std::clamp(.004f * in.pixel_grasp_error_px, -.2f, .2f);
-                assert(std::abs(out.motion.wz_rps - expected) < 1e-6f);
-            } else assert(out.reason == "pixel_align_brake" && stopped(out.motion));
-        }
-        in.directional_clearance_valid = true;
-        in.turn_safe = false;
-        step();
-        assert(stopped(out.motion) && out.reason == "turn_sweep_blocked");
-        in.directional_clearance_valid = false;
-        }
-        d.box.x = 598;
-        for (int i=0;i<20;++i) step();
-        assert(out.reason == "pixel_center_approach" && out.motion.vx_mps > 0 && out.motion.wz_rps == 0);
+        const auto area = label == "ordinary_supply" ? cv::Rect2f{342,226,689,263}
+                        : label == "injured_person" ? cv::Rect2f{395,236,511,243}
+                                                      : cv::Rect2f{268.5f,236,748.5f,319};
+        d.box.x = int(std::round(area.x + .45f * area.width)) - 50;
+        d.box.y = 150; // centre Y200 is still outside the calibrated front boundary
+        for (int i=0;i<30 && out.motion.vx_mps==0;++i) step();
+        assert(out.state == PushState::APPROACH || out.state == PushState::MID_APPROACH);
+        assert(out.reason == "first_entry_approach" && out.motion.vx_mps > 0);
         step(false);
-        assert(out.state == PushState::RUSH && stopped(out.motion) && !in.pixel_grasp_ready);
-        // A bottom below the stop line is not a centre crossing.
-        d.box.y = 250; // centre Y300, bottom Y350
-        for (int i=0;i<20;++i) step();
-        assert(out.state == PushState::RUSH && out.motion.vx_mps > 0);
-        d.box.y = 287; // centre Y337, exact stop line
-        if (label != "ordinary_supply") d.box.x = 750; // X800 is inside measured bounds
-        for (int i=0;i<20 && out.state!=PushState::LOWER_FRAME;++i) {
+        assert(stopped(out.motion) && !task.search_entry_.confirmed);
+        d.box.y = 200; // centre Y250 enters first; no need to advance to Y337
+        for(int i=0;i<40 && out.state!=PushState::LOWER_FRAME;++i) {
             step();
             assert(stopped(out.motion) && out.immediate_motion_stop);
         }
-        assert(out.state == PushState::LOWER_FRAME && stopped(out.motion));
-        assert(label == "ordinary_supply" ||
-               (in.target_grasp_range_lateral_measured && !in.pixel_grasp_aligned));
+        assert(out.state == PushState::LOWER_FRAME && task.search_entry_.handoff);
+        assert(in.target_grasp_range_lateral_measured && !in.pixel_grasp_ready);
         // A fresh pre-close range failure must veto issuing the close command.
         auto veto = task;
-        auto bad = in; bad.now_us += 50000; bad.pixel_grasp_ready = false;
+        auto bad = in; bad.now_us += 50000; bad.target_center_px.x = 1100;
+        bad.target_grasp_range_inside = false;
         const auto rejected = veto.update(bad);
-        if (label == "ordinary_supply")
-            assert(rejected.state == PushState::LOWER_FRAME && stopped(rejected.motion) &&
-                   rejected.motion.gripper_offset == 0);
-        else
-            assert(rejected.state == PushState::CAPTURE_FAIL && rejected.motion.gripper_offset == 0);
+        assert(rejected.state == PushState::PREPARE && stopped(rejected.motion) &&
+               rejected.motion.gripper_offset == 0);
         for (int i=0;i<30 && task.frame_raised_!=0;++i) step();
         assert(out.motion.gripper_offset == 20);
         in.gripper_feedback_open = 0; in.gripper_closed_observed = true;

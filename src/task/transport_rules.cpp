@@ -1,4 +1,5 @@
 #include "rescue/task/transport_rules.hpp"
+#include <algorithm>
 
 namespace rescue {
 TargetKind targetKind(const std::string& label) {
@@ -102,6 +103,19 @@ RuleVerdict checkTrip(const Inventory& s, bool first) {
     if (s.supplies() > max_supplies)
         return RuleVerdict::TOO_MANY_SUPPLIES;
     return RuleVerdict::OK;
+}
+TripChoice chooseTrip(const Inventory& available, bool first) {
+    TripChoice choice;
+    const int limit = first ? kMaxSuppliesPerTrip : kMaxSuppliesFirstTrip;
+    choice.inventory.core = first ? std::clamp(available.core, 0, limit) : 0;
+    choice.inventory.ordinary = std::clamp(available.ordinary, 0, limit - choice.inventory.core);
+    choice.supply_score = 10 * choice.inventory.core + 5 * choice.inventory.ordinary;
+    choice.injured_score = first && available.injured > 0 ? 15 : 0;
+    if (choice.injured_score > 0 && choice.injured_score >= choice.supply_score) {
+        choice.inventory = {};
+        choice.inventory.injured = 1;
+    }
+    return choice;
 }
 RuleVerdict checkCorridor(const Inventory& c,
                           bool complete,

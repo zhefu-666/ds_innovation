@@ -27,6 +27,9 @@
 #include "rescue/task/push_task.hpp"
 #undef private
 
+#include "rescue/control/motion_readiness.hpp"
+#include "rescue/hardware/motion_link.hpp"
+
 namespace {
 using namespace rescue;
 constexpr uint64_t kStart = 1000000;
@@ -72,7 +75,7 @@ struct Rig {
     ZoneEstimate::Source source = ZoneEstimate::Source::MULTI_POINT;
     uint64_t frame = 0;
 
-    explicit Rig(TaskTuning parameters = tuning(), PushState initial = PushState::RAISE_RELEASE)
+    explicit Rig(TaskTuning parameters = tuning(), PushState initial = PushState::RAISE_RELEASE, bool placement = false)
         : task(parameters) {
         input.now_us = kStart;
         input.run = input.safety_ok = true;
@@ -91,11 +94,14 @@ struct Rig {
         task.wire_last_ = 0;
         task.frame_raised_ = 0;
         task.gripper_us_ = kStart;
-        seed(initial);
+        seed(initial, placement);
     }
 
-    void seed(PushState state) {
-        task.enter(state, input.now_us, "seed_release");
+    void seed(PushState state, bool placement = false) {
+        if (placement)
+            task.beginCarryPlacement(input.now_us, "seed_release");
+        else
+            task.enter(state, input.now_us, "seed_release");
         task.last_us_ = input.now_us;
         task.last_vx_ = task.last_wz_ = 0;
         task.pitch_cmd_ = task.desiredPitch();
@@ -186,21 +192,213 @@ struct Rig {
 };
 
 
+// Device-timed acceleration and sender feedback are independent inputs.
+struct ImuPlant {
+    Rig& rig;
+    uint64_t sequence = 0;
+    float velocity = 0, position = 0;
+
+    PushOutput tick(float physical_vx, float sent_vx, bool samples = true, float drift = 0) {
+        auto& in = rig.input;
+        in.imu_translation_samples.clear();
+        const float acceleration = (physical_vx - velocity) / .05f;
+        for (int i = 1; i <= 5; ++i) {
+            const float next = velocity + acceleration * .01f;
+            position += .5f * (velocity + next) * .01f;
+            velocity = next;
+            if (samples) {
+                ImuTranslationSample sample;
+                sample.sequence = ++sequence;
+                sample.received_us = in.now_us + i * 10000;
+                sample.device_time_ms = sample.received_us / 1000;
+                sample.valid = true;
+                sample.acceleration_mps2 = {acceleration + .01f + drift, 0, 9.8f};
+                sample.quaternion_wxyz = {1, 0, 0, 0};
+                in.imu_translation_samples.push_back(sample);
+            }
+        }
+        in.heading_valid = in.sent_velocity_valid = true;
+        in.heading_rad = 0;
+        in.sent_vx_mps = sent_vx;
+        in.sent_wz_rps = 0;
+        return rig.tick();
+    }
+
+    void ready() {
+        for (int i = 0; i < 30 && rig.output.motion.vx_mps >= 0; ++i)
+            tick(0, 0);
+        assert(rig.output.state == PushState::BACK_OUT);
+        assert(rig.output.motion.vx_mps < 0);
+    }
+};
+
+
+void jawRetreatThroughRuntimeRamp() {
+    auto parameters = tuning(true);
+    parameters.pixel_grasp_enabled = true;
+    parameters.back_speed = .40f;
+    Rig rig(parameters, PushState::BACK_OUT);
+    rig.openFrame();
+    rig.input.retreat_safe = rig.input.path_safe = false;
+    rig.input.turn_safe = rig.input.arc_safe = false;
+    rig.input.geometry_valid = false;
+    rig.fresh_navigation = false;
+    rig.input.sent_velocity_valid = true;
+    MotionVelocityRamp ramp(MotionLinkConfig{});
+    MotionCommand sent;
+    ramp.accept(sent, rig.input.now_us);
+    float peak = 0;
+    int resets = 0;
+    for (int i = 0; i < 60; ++i) {
+        rig.input.sent_vx_mps = sent.vx_mps;
+        rig.tick();
+        const bool blocked = residualMotionBlocked(rig.input, rig.output,
+                                                   sent.vx_mps, sent.wz_rps);
+        const bool stop = blocked || rig.output.immediate_motion_stop ||
+                          !rig.input.run || !rig.input.safety_ok ||
+                          !rig.input.opponent_zone_clear ||
+                          rig.output.state == PushState::SAFE_STOP;
+        auto next = ramp.next(rig.output.motion, rig.input.now_us, stop);
+        if (rig.output.state == PushState::BACK_OUT && sent.vx_mps < 0 && next.vx_mps == 0)
+            ++resets;
+        sent = next;
+        ramp.accept(sent, rig.input.now_us);
+        peak = std::max(peak, -sent.vx_mps);
+        if (rig.output.state != PushState::BACK_OUT)
+            break;
+    }
+    std::cout << "runtime retreat state=" << PushTask::name(rig.output.state)
+              << " peak=" << peak << " resets=" << resets << std::endl;
+    assert(resets == 0);
+    assert(peak > .2f);
+    assert(rig.output.state == PushState::VERIFY_DELIVERY);
+    assert(rig.output.immediate_motion_stop && sent.vx_mps == 0);
+    assert(rig.input.now_us - kStart < 2000000);
+    assert(!rig.output.jaw_release_retreat);
+    assert(residualMotionBlocked(rig.input, rig.output, -.2f, 0));
+
+    // The permission never masks forward/angular residuals or explicit stops.
+    rig.seed(PushState::BACK_OUT);
+    rig.tick();
+    assert(rig.output.jaw_release_retreat);
+    assert(!residualMotionBlocked(rig.input, rig.output, -.2f, 0));
+    assert(residualMotionBlocked(rig.input, rig.output, .2f, 0));
+    rig.input.directional_clearance_valid = true;
+    assert(residualMotionBlocked(rig.input, rig.output, -.2f, .1f));
+    const auto stopped = ramp.next(rig.output.motion, rig.input.now_us, true);
+    assert(stopped.vx_mps == 0 && stopped.wz_rps == 0);
+    rig.input.run = false;
+    rig.tick();
+    assert(!rig.output.jaw_release_retreat && rig.output.motion.vx_mps == 0);
+    assert(residualMotionBlocked(rig.input, rig.output, -.2f, 0));
+
+    auto legacy = tuning(true);
+    legacy.pixel_grasp_enabled = false;
+    Rig other(legacy, PushState::BACK_OUT);
+    other.openFrame();
+    other.tick();
+    other.input.retreat_safe = false;
+    assert(!other.output.jaw_release_retreat);
+    assert(residualMotionBlocked(other.input, other.output, -.2f, 0));
+}
+
+void jawRetreatCompletesAtRequestedSpeed() {
+    auto parameters = tuning(true);
+    parameters.pixel_grasp_enabled = true;
+    parameters.back_speed = .40f;
+    Rig rig(parameters, PushState::BACK_OUT);
+    rig.openFrame();
+    rig.input.sent_velocity_valid = true;
+    rig.input.imu_translation_samples.clear();
+    rig.input.heading_valid = false;
+    rig.tick();
+    assert(rig.output.motion.vx_mps == -.40f);
+    assert(rig.output.reason == "jaw_back_out_015m");
+    for (int i=0; i<80 && rig.output.state==PushState::BACK_OUT; ++i) {
+        rig.input.sent_vx_mps=rig.output.motion.vx_mps;
+        rig.tick();
+    }
+    assert(rig.output.state==PushState::VERIFY_DELIVERY);
+    assert(rig.output.immediate_motion_stop && rig.output.motion.vx_mps==0);
+    assert(rig.input.now_us-kStart>=375000 && rig.input.now_us-kStart<=500000);
+    rig.report("jaw_retreat_without_imu_calibration");
+}
+
+void jawRetreatWithoutClearanceOrMapping() {
+    auto parameters=tuning(true);
+    parameters.pixel_grasp_enabled=true;
+    Rig rig(parameters,PushState::BACK_OUT);
+    rig.openFrame();
+    rig.input.retreat_safe=rig.input.path_safe=false;
+    rig.input.turn_safe=rig.input.arc_safe=rig.input.jaw_open_safe=false;
+    rig.input.opponent_zone_clear=false;
+    rig.input.geometry_valid=rig.input.zone_valid=false;
+    rig.input.camera_pitch_cdeg=0; // UI120, no calibrated ground mapping.
+    rig.input.camera_pitch_stable=false;
+    rig.input.gripper_done=false; // Release already acknowledged before BACK_OUT.
+    rig.input.sent_velocity_valid=true;
+    rig.fresh_navigation=false;
+    rig.tick();
+    assert(rig.output.state==PushState::BACK_OUT && rig.output.motion.vx_mps<0);
+    assert(rig.output.reason=="jaw_back_out_015m");
+    for (int i=0; i<200 && rig.output.state==PushState::BACK_OUT; ++i) {
+        rig.input.sent_vx_mps=rig.output.motion.vx_mps;
+        rig.tick();
+    }
+    assert(rig.output.state==PushState::VERIFY_DELIVERY);
+    assert(rig.output.immediate_motion_stop && rig.output.motion.vx_mps==0);
+    rig.report("jaw_retreat_without_clearance_or_mapping");
+}
+
 void jawEnterReleaseRetreat() {
     for (int mode : {0, 1, 2}) {
         auto parameters = tuning();
         parameters.pixel_grasp_enabled = true;
         parameters.field_carry = mode == 1;
         parameters.assume_all_safe = mode == 2;
-        Rig rig(parameters, PushState::ENTER);
+        Rig rig(parameters, PushState::CARRY, true);
         rig.origin_x = -parameters.supply_half_x_m;
         rig.origin_y = rig.task.holdCenter() - parameters.deposit_y_m + .02f;
         rig.input.gripper_feedback_open = 0;
-        rig.tick();
-        assert(rig.output.state == PushState::ENTER && rig.output.motion.vx_mps > 0);
-        assert(rig.output.motion.gripper_offset == 20);
-        rig.origin_y = rig.task.holdCenter() - parameters.deposit_y_m;
-        rig.tick();
+        if (mode == 0) {
+            rig.tick();
+            assert(rig.output.state == PushState::CARRY && rig.output.motion.vx_mps > 0);
+            assert(rig.output.motion.gripper_offset == 20);
+            rig.origin_y = rig.task.holdCenter() - parameters.deposit_y_m;
+            rig.tick();
+        } else {
+            rig.input.sent_velocity_valid = rig.input.heading_valid = true;
+            uint64_t sequence = 0;
+            float velocity = 0;
+            bool advanced = false, braked = false;
+            for (int i = 0; i < 400; ++i) {
+                const float target = rig.output.motion.vx_mps;
+                const float acceleration = (target - velocity) / .05f;
+                rig.input.imu_translation_samples.clear();
+                for (int sample_index = 1; sample_index <= 5; ++sample_index) {
+                    ImuTranslationSample sample;
+                    sample.sequence = ++sequence;
+                    sample.received_us = rig.input.now_us + sample_index * 10000;
+                    sample.device_time_ms = sample.received_us / 1000;
+                    sample.valid = true;
+                    sample.acceleration_mps2 = {acceleration, 0, 9.8f};
+                    sample.quaternion_wxyz = {1, 0, 0, 0};
+                    rig.input.imu_translation_samples.push_back(sample);
+                }
+                velocity = target;
+                rig.input.sent_vx_mps = target;
+                rig.tick();
+                if (rig.output.state == PushState::RAISE_RELEASE) {
+                    assert(advanced && braked);
+                    assert(rig.task.transport_phase_.deposit_imu_.distance() >= .15f);
+                    break;
+                }
+                assert(rig.output.state == PushState::CARRY);
+                assert(rig.output.motion.gripper_offset == 20);
+                advanced |= rig.output.motion.vx_mps > 0;
+                braked |= rig.output.reason == "deposit_distance_reached_stop";
+            }
+        }
         assert(rig.output.state == PushState::RAISE_RELEASE);
         rig.stationary(false);
         rig.input.gripper_done = false;
@@ -217,14 +415,52 @@ void jawEnterReleaseRetreat() {
                rig.output.reason == "gripper_opened_at_drop");
         assert(!rig.task.transport_phase_.release_retreat_.needsCargoTracking());
         rig.stationary(true);
-        rig.tick();
-        assert(rig.output.state == PushState::BACK_OUT && rig.output.motion.vx_mps < 0);
-        assert(rig.output.motion.gripper_offset == 0);
         rig.origin_y = .5f;
-        rig.tick();
+        if (mode == 0) {
+            rig.tick();
+        } else {
+            ImuPlant plant{rig};
+            plant.ready();
+            for (int i = 0; i < 20; ++i) {
+                const float sent = rig.output.motion.vx_mps;
+                plant.tick(sent, sent);
+                assert(rig.output.state == PushState::BACK_OUT);
+                assert(rig.output.motion.gripper_offset == 0);
+            }
+            rig.input.retreat_safe = false;
+            for (int i = 0; i < 6; ++i) {
+                const float sent = rig.output.motion.vx_mps;
+                plant.tick(sent, sent, true, 1.f);
+                assert(rig.output.state == PushState::BACK_OUT);
+                assert(rig.output.motion.vx_mps < 0);
+            }
+            rig.input.retreat_safe = true;
+            for (int i = 0; i < 200 && rig.output.state == PushState::BACK_OUT; ++i) {
+                const float sent = rig.output.motion.vx_mps;
+                plant.tick(sent, sent);
+            }
+            assert(-plant.position >= .145f && -plant.position < .165f);
+        }
         assert(rig.output.state == PushState::VERIFY_DELIVERY);
         rig.stationary(true);
         assert(rig.task.transport_phase_.repush_n_ == 0);
+        if (mode != 0) {
+            assert(rig.output.immediate_motion_stop);
+            rig.input.sent_vx_mps = rig.input.sent_wz_rps = 0;
+            rig.input.zone_valid = rig.input.vref_valid = false;
+            for (int i = 0; i < 10; ++i) {
+                rig.input.delivery_observed = true;
+                rig.input.delivery_box_count = 1;
+                rig.input.delivery_box_sample_us = rig.input.now_us + kTick;
+                rig.tick();
+                if (rig.task.transport_phase_.credited)
+                    break;
+                assert(rig.output.state == PushState::VERIFY_DELIVERY);
+                rig.stationary(true);
+            }
+            assert(rig.task.transport_phase_.credited == 1);
+            assert(rig.task.transport_phase_.visual);
+        }
         rig.report("jaw_enter_open_then_retreat");
     }
     {
@@ -237,27 +473,70 @@ void jawEnterReleaseRetreat() {
                !rig.task.transport_phase_.release_retreat_.needsCargoTracking());
         rig.task.actionProgress().travel = 10;
         rig.tick();
-        assert(rig.output.state != PushState::ENTER);
+        assert(rig.output.state != PushState::CARRY);
         assert(rig.output.motion.gripper_offset == 0);
         rig.report("jaw_release_clears_legacy_prepush");
     }
     {
         auto parameters = tuning(true);
         parameters.pixel_grasp_enabled = true;
+        parameters.far_pitch_cdeg = -3000;
+        parameters.track_pitch_cdeg = 0;
+        parameters.near_pitch_cdeg = 2000;
         Rig rig(parameters, PushState::CARRY);
         rig.origin_x = -parameters.supply_half_x_m;
-        rig.origin_y = rig.task.holdCenter() - .05f;
-        rig.vref = true;
+        rig.origin_y = .20f; // start at the entry line to exercise alignment and release
+        rig.input.sent_velocity_valid = rig.input.heading_valid = true;
         rig.input.gripper_feedback_open = 0;
+        rig.input.heading_rad = 0;
+        for (int i=0;i<50 && rig.task.desiredPitch()!=0;++i) {
+            rig.input.supply_view={};
+            auto& half=rig.input.supply_view;
+            half.valid=half.inside=half.entrance_valid=true;
+            half.target_x=parameters.supply_half_x_m;
+            half.entrance_origin_body_m={rig.origin_x,rig.origin_y};
+            half.entrance_yaw_rad=0;
+            rig.input.subzone_view_us=rig.input.now_us+kTick;
+            rig.input.zone_sight_valid=true;
+            rig.input.zone_sight_enemy=false;
+            rig.input.zone_sight_bearing=0;
+            rig.input.zone_sight_box={136,430,1124,260};
+            rig.input.zone_sight_image_size={1280,720};
+            rig.input.zone_sight_sample_us=rig.input.now_us+kTick;
+            rig.input.camera_pitch_cdeg=rig.task.desiredPitch();
+            rig.tick();
+            rig.stationary(false);
+            assert(rig.output.state==PushState::CARRY && rig.output.motion.vx_mps==0);
+        }
+        assert(rig.task.desiredPitch()==0);
+        for (int i=0;i<20 && rig.output.state==PushState::CARRY;++i) {
+            rig.input.camera_pitch_cdeg=0;
+            rig.input.transport_floor={};
+            rig.input.transport_floor.sample_us=rig.input.now_us+kTick;
+            rig.input.transport_floor.valid=rig.input.transport_floor.region_valid=true;
+            rig.input.transport_floor.inside=true;
+            rig.tick();
+            assert(rig.output.motion.gripper_offset==20);
+            if (rig.output.reason=="carry_ui120_region_overrun")
+                assert(rig.output.motion.vx_mps==.04f);
+            else
+                assert(rig.output.motion.vx_mps==0 && rig.output.motion.wz_rps==0);
+        }
+        assert(rig.output.state==PushState::RAISE_RELEASE);
+        assert(rig.output.reason=="carry_ui120_region_stopped");
+        rig.input.camera_pitch_cdeg=rig.task.desiredPitch();
+        assert(rig.input.camera_pitch_cdeg==0);
         rig.tick();
-        assert(rig.output.state == PushState::ENTER);
-        rig.stationary(false);
-        rig.input.camera_pitch_cdeg = rig.task.desiredPitch();
-        rig.input.zone_valid = false;
+        assert(rig.output.motion.gripper_offset==0);
+        rig.stationary(true);
+        rig.input.gripper_feedback_open=1;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER && rig.output.motion.vx_mps > 0);
-        assert(rig.output.motion.gripper_offset == 20);
-        rig.report("jaw_visual_carry_enters_before_release");
+        assert(rig.output.state==PushState::BACK_OUT);
+        rig.input.camera_pitch_cdeg=rig.task.desiredPitch();
+        rig.tick();
+        assert(rig.output.state==PushState::BACK_OUT && rig.output.motion.vx_mps<0);
+        assert(rig.output.reason=="jaw_back_out_015m");
+        rig.report("jaw_020m_align_ui120_colour_open_then_direct_retreat");
     }
 }
 
@@ -489,7 +768,7 @@ void prepushProgressAndEvidence() {
         rig.task.transport_phase_.push_in_.push_hold_valid_ = true;
         rig.task.t_.assume_align_push = true;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_release_then_push");
         assert(rig.task.transport_phase_.cargo_ref_us_ == 0 &&
                rig.task.transport_phase_.push_in_.align_pending_);
@@ -511,7 +790,7 @@ void prepushProgressAndEvidence() {
         rig.task.zone_.advance(-rig.task.t_.assume_prepush_back_m, 0);
         rig.vref = false;
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_release_then_push");
         assert(!rig.task.fault_);
         rig.stationary(true);
@@ -521,7 +800,7 @@ void prepushProgressAndEvidence() {
         Rig rig(tuning(true));
         rig.beginBackOff();
         rig.elapsed(rig.task.t_.retreat_budget_us + 1);
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_release_then_push");
         assert(!rig.task.fault_);
         rig.stationary(true);
@@ -541,7 +820,7 @@ void prepushProgressAndEvidence() {
         rig.report("prepush_inside_precedes_timeout", rig.task.takeDropZoneEvent());
     }
     {
-        Rig rig(tuning(true), PushState::ENTER);
+        Rig rig(tuning(true), PushState::CARRY, true);
         rig.input.gripper_feedback_open = 0;
         rig.input.imu_blocked_us = rig.task.t_.assume_imu_block_us;
         rig.tick();
@@ -568,7 +847,7 @@ void prepushProgressAndEvidence() {
             (rig.task.t_.assume_prepush_back_m + rig.task.t_.assume_repush_back_m) *
             rig.task.drRatio(rig.input.now_us);
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_release_then_push");
         rig.stationary(true);
         assert(rig.output.motion.frame_transaction == kTransaction + 1);
@@ -680,7 +959,7 @@ void lifecycleAndRecovery() {
         assert(rig.output.state == PushState::BACK_OUT && rig.task.actionProgress().travel == 0);
         rig.task.zone_.advance(-.1f, 0);
         rig.tick();
-        assert(rig.output.state == PushState::ENTER &&
+        assert(rig.output.state == PushState::CARRY &&
                rig.output.reason == "assumed_release_then_push");
         assert(!rig.task.fault_);
         rig.report("prepush_pause_preserves_visual_retreat_origin");
@@ -711,8 +990,8 @@ void lifecycleAndRecovery() {
         rig.report("prepush_pause_retains_count_and_duplicate_marker",
                    rig.task.takeDropZoneEvent());
     }
-    for (auto state : {PushState::RAISE_RELEASE, PushState::ENTER, PushState::BACK_OUT}) {
-        Rig rig(tuning(true), state);
+    for (auto state : {PushState::RAISE_RELEASE, PushState::CARRY, PushState::BACK_OUT}) {
+        Rig rig(tuning(true), state, state == PushState::CARRY);
         rig.input.run = false;
         rig.tick();
         assert(rig.output.state == PushState::WAIT_START && rig.task.stopped_from_ == state);
@@ -723,7 +1002,7 @@ void lifecycleAndRecovery() {
         rig.stationary(false);
         assert(rig.output.motion.frame_transaction == kTransaction);
         rig.report(state == PushState::RAISE_RELEASE ? "resume_release_defers_open"
-                   : state == PushState::ENTER       ? "resume_enter_defers_open"
+                   : state == PushState::CARRY       ? "resume_enter_defers_open"
                                                      : "resume_back_defers_open");
         rig.tick();
         assert(rig.output.motion.frame_transaction == kTransaction + 1);
@@ -773,6 +1052,9 @@ void lifecycleAndRecovery() {
 } // namespace
 
 int main() {
+    jawRetreatThroughRuntimeRamp();
+    jawRetreatCompletesAtRequestedSpeed();
+    jawRetreatWithoutClearanceOrMapping();
     jawEnterReleaseRetreat();
     releaseGates();
     backOutGatesAndDeadlines();

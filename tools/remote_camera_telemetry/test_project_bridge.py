@@ -2,13 +2,16 @@ import asyncio
 import json
 import os
 import struct
+import signal
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 import websockets
 from websockets.server import serve
-from project_bridge import PAGE, CONFIG_SCHEMA, CHANNELS, Source, read_packet, client, imu_view
+from project_bridge import PAGE, CONFIG_SCHEMA, CHANNELS, Source, read_packet, client, imu_view, main
 
 
 def packet(stamp=None):
@@ -160,5 +163,31 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
         await ws.send(json.dumps({'op':'subscribe','subscriptions':[{'id':1,'channelId':99}]}))
         await asyncio.wait_for(ws.wait_closed(), 2)
         self.assertEqual(ws.close_code,1008)
+
+class StartupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_startup_does_not_resolve_hostname(self):
+        for host in ('0.0.0.0', '127.0.0.1'):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as tmp:
+                args = SimpleNamespace(snapshot=str(Path(tmp) / 'snapshot'), fps=10,
+                                       host=host, http_port=0, ws_port=0)
+                callbacks = {}
+                loop = asyncio.get_running_loop()
+                with patch('project_bridge.socket.getfqdn',
+                           side_effect=AssertionError('HTTP startup must not wait for DNS')) as dns, \
+                     patch.object(loop, 'add_signal_handler',
+                                  side_effect=lambda sig, callback: callbacks.update({sig: callback})):
+                    task = asyncio.create_task(main(args))
+                    try:
+                        await asyncio.sleep(0)
+                        if task.done():
+                            await task
+                        self.assertIn(signal.SIGTERM, callbacks)
+                        callbacks[signal.SIGTERM]()
+                        await asyncio.wait_for(task, 2)
+                        dns.assert_not_called()
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
 
 if __name__ == '__main__': unittest.main()

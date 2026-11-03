@@ -165,8 +165,8 @@ int main() {
         assert(document.at("config").at("model") == config.model_path);
         assert(document.at("config").at("imu_baud") == config.imu_baud);
         assert(expected.at("startup").at("requested_advance_ms") == 5000);
-        assert(expected.at("startup").at("effective_advance_us") == 1250000);
-        assert(expected.at("startup").at("effective_speed_mps") == 1.f);
+        assert(expected.at("startup").at("effective_advance_us") == 5000000);
+        assert(expected.at("startup").at("effective_speed_mps") == .25f);
         assert(std::abs(expected.at("task").at("turn_wz").get<double>() - .55) < 1e-6);
         assert(std::abs(expected.at("request").at("turn_wz_rps").get<double>() - .3) < 1e-6);
         assert(document.at("motion").at("hardware_output_enabled") == 0);

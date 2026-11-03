@@ -253,7 +253,7 @@ int main() {
     std::this_thread::sleep_for(Ms(30));
     assert(uart.latestActuatorFeedback().timestamp_us == received.timestamp_us);
     assert(uart.getLatestCmd() == 0xAA);
-    std::this_thread::sleep_for(Ms(220));
+    std::this_thread::sleep_for(Ms(320));
     const auto stale = uart.latestActuatorFeedback();
     assert(stale.timestamp_us == received.timestamp_us && !stale.valid);
 
@@ -374,7 +374,7 @@ int main() {
     assert(uart.gripperActionResult() == R::NotDone);
     mcuReport(0, 3);
     assert(uart.gripperActionResult() == R::Done);
-    std::this_thread::sleep_for(Ms(220));
+    std::this_thread::sleep_for(Ms(320));
     assert(uart.gripperActionResult() == R::NoFeedback); // 反馈过期
 
     // 相机pitch：目标0、读回0 → 到位；改为向下30°后读回未跟上 → 未到位
@@ -573,6 +573,83 @@ int main() {
             assert(last_wz == 0);
             gated.stop();
             collect(40);
+        }
+        {
+            // Virtual UART: compensate once after ramping, retaining business-unit stats.
+            MotionLinkConfig config;
+            config.period_ms = 20;
+            config.angular_accel_rps2 = config.angular_decel_rps2 = 100.f;
+            config.angular_command_scale = .177f;
+            std::atomic<bool> permit{true};
+            MotionLink compensated(link_uart, config, [&] { return permit.load(); });
+            MotionCommand target;
+            target.vx_mps = .1f;
+            target.wz_rps = .4f;
+            target.gripper_offset = 20;
+            target.camera_pitch_cdeg = 1200;
+            const auto wz = [](const Out& frame) {
+                float value;
+                std::memcpy(&value, frame.data() + 5, sizeof(value));
+                return value;
+            };
+            const auto check = [&](const std::vector<Out>& packets, float expected) {
+                assert(!packets.empty());
+                for (const auto& packet : packets) {
+                    assert(std::abs(wz(packet)) <= .4f + 1e-6f);
+                    assert(packet[9] == 0xFB && pitch(packet) == 12);
+                    const auto crc = UARTController::calculateCRC16(packet.data(), 0, 12);
+                    assert(packet[13] == (crc & 255) && packet[14] == (crc >> 8));
+                }
+                assert(std::abs(wz(packets.back()) - expected) < 1e-6f);
+            };
+            compensated.submit(target);
+            check(collect(90), .4f * .177f);
+            auto stats = compensated.stats();
+            assert(stats.sent_vx_mps > 0 && stats.sent_vx_mps <= .1f);
+            assert(std::abs(stats.sent_wz_rps - .4f) < 1e-6f);
+            assert(std::abs(stats.wire_wz_rps - .4f * .177f) < 1e-6f);
+            compensated.submit(target); // repeated sends must never scale the ramp state
+            check(collect(50), .4f * .177f);
+            // Startup/Search/Capture raise the request by 1/K, then still apply K.
+            // Periodic resends keep this choice with the command; transport restores gain 1.
+            for (float legacy_wz : {.3f, -.3f, .1f}) {
+                target.wz_rps = legacy_wz;
+                compensated.submit(target, false, true);
+                check(collect(90), target.wz_rps);
+                stats = compensated.stats();
+                assert(std::abs(stats.sent_wz_rps - target.wz_rps) < 1e-6f);
+                assert(std::abs(stats.precomp_wz_rps - target.wz_rps / .177f) < 1e-6f);
+                assert(std::abs(stats.wire_wz_rps - stats.precomp_wz_rps * .177f) < 1e-6f);
+                assert(stats.sent_vx_mps > 0 && stats.sent_vx_mps <= .1f);
+            }
+            compensated.submit(target, true, true);
+            check(collect(30), 0);
+            compensated.submit(target, false, true);
+            check(collect(70), .1f);
+            check(collect(200), 0);
+            assert(compensated.stats().precomp_wz_rps == 0);
+            target.wz_rps = .4f;
+            compensated.submit(target); // phase change back to transport, same global K
+            check(collect(90), .4f * .177f);
+            assert(std::abs(compensated.stats().precomp_wz_rps - .4f) < 1e-6f);
+            target.wz_rps = -.4f;
+            compensated.submit(target);
+            check(collect(70), -.4f * .177f);
+            assert(std::abs(compensated.stats().sent_wz_rps + .4f) < 1e-6f);
+            compensated.submit(target, true);
+            check(collect(30), 0);
+            compensated.submit(target);
+            check(collect(70), -.4f * .177f);
+            permit = false;
+            check(collect(40), 0); // authorization loss bypasses the compensated ramp
+            permit = true;
+            compensated.submit(target);
+            check(collect(70), -.4f * .177f);
+            check(collect(200), 0); // stale command still stops both axes
+            assert(compensated.stats().sent_vx_mps == 0);
+            assert(compensated.stats().sent_wz_rps == 0);
+            compensated.stop();
+            check(collect(30), 0);
         }
         link_uart.closePort();
         close(mcu);

@@ -1,12 +1,14 @@
 #include "rescue/app/observation_builder.hpp"
 #include "rescue/app/runtime_config.hpp"
 #include "rescue/control/controlled_field.hpp"
+#include "rescue/control/motion_readiness.hpp"
 #include "rescue/hardware/imu_adapter.hpp"
 #include "rescue/control/motion_watch.hpp"
 #include "rescue/hardware/sensor_fusion.hpp"
 #include "rescue/perception/silhouette.hpp"
 #include "rescue/core/utils.hpp"
 #include "rescue/geometry/zone_visual_reference.hpp"
+#include "rescue/geometry/subzone_entrance.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -45,7 +47,14 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
                                             uint64_t frame_sequence,
                                             uint64_t timestamp,
                                             const ObservationContext& context) {
-    const auto& config = config_.request;
+    auto config = config_.request;
+    const FrameSensors frame_sensors = context.feedback ? context.feedback->feedbackAt(timestamp) : FrameSensors{};
+    config.ui140_core_confidence = config.coreConfidenceAtPitch(
+        frame_sensors.actuator.camera_pitch_cdeg, frame_sensors.actuator.valid,
+        frame_sensors.pitch_stable, config_.task.pitch_tolerance_cdeg);
+    detections.erase(std::remove_if(detections.begin(), detections.end(), [&](const SegDetection& d) {
+        return d.label == "core_supply" && d.confidence < std::min(config.confidence, config.ui140_core_confidence);
+    }), detections.end());
     auto* geometry = geometry_;
     const auto& vref_calibration = vref_calibration_;
     const bool vref_ready = vref_ready_;
@@ -71,12 +80,14 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     const bool box_area_accepted = config_.box_area_accepted;
     const std::string prefer_label = config.assume_injured_trip ? "injured_person" : "";
     const auto obstacleConfidence = [&](const SegDetection& d) {
+        if (d.label == "core_supply")
+            return std::min(config.confidence, config.ui140_core_confidence);
         return d.label == "injured_person" ? std::min(config.confidence, config.injured_confidence)
                                            : config.confidence;
     };
     std::vector<ZoneKeypoint> zone_points;
     if (vision_result.pose_ran)
-        zone_points = zoneHalvesToKeypoints(vision_result.halves, config.pose_keypoint_confidence);
+        zone_points = zoneHalvesToKeypoints(vision_result.halves, config.pose_keypoint_confidence, frame.size());
     const auto observed_at = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch())
             .count());
@@ -97,7 +108,6 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     bool vref_ok = false;
     SensorState geometry_sensor;
     // Servo readback at capture time; without the feedback port it stays invalid.
-    const FrameSensors frame_sensors = feedback ? feedback->feedbackAt(timestamp) : FrameSensors{};
     for (auto& d : detections)
         if (d.label == "injured_person")
             d.silhouette_hw = orangeSilhouetteAspect(frame, d.box);
@@ -149,7 +159,8 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             }
         }
         geometry_result = geometry->process(geometry_frame, points, detections);
-        if (vref_ready && vision_result.pose_ran && zone_color.color == config.team) {
+        if (vref_ready && !vref_calibration.zonePnpPrimaryEnabled() &&
+            vision_result.pose_ran && zone_color.color == config.team) {
             vref_estimate = ZoneEstimate{};
             vref_ok = estimateVisualZone(vref_calibration,
                                          zone_geometry,
@@ -225,6 +236,9 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     const bool selecting_task =
         previous.run_status == RunStatus::Running &&
         (previous.phase == TaskPhase::Search || previous.phase == TaskPhase::Capture);
+    pixel_selector.setCaptureLoad(previous.capture_keep_inventory);
+    if (previous.pixel_selection_paused)
+        pixel_selector.reset();
     pixel_selector.syncSplitSelection(previous.split_target_reselecting,
                                       previous.split_target_candidate_id);
     if (!previous.split_target_reselecting)
@@ -240,17 +254,33 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     const float selection_heading = selection_imu.fresh && selection_imu.sample.measurements_valid
                                         ? selection_imu.sample.body_rpy_rad[2]
                                         : std::numeric_limits<float>::quiet_NaN();
+    const bool near_selection = selecting_task && !previous.recovering &&
+                                !previous.split_target_reselecting &&
+                                !previous.pixel_selection_paused;
+    const auto selection_ack =
+        link && feedback ? feedback->gripperAck() : UARTController::GripperAck{};
+    const bool reselect_stopped =
+        near_selection && !previous.entry_confirmed &&
+        (previous.state == PushState::APPROACH || previous.state == PushState::RUSH) &&
+        selection_ack.result == ActionResult::Done && selection_ack.target == 1 &&
+        std::isfinite(previous.motion.vx_mps) && std::isfinite(previous.motion.wz_rps) &&
+        std::abs(previous.motion.vx_mps) <= config_.task.pixel_align_stopped_vx &&
+        std::abs(previous.motion.wz_rps) <= config_.task.pixel_align_stopped_wz;
     const auto selection =
         pixel_selector.update(cargo_detections,
                               frame.size(),
                               frame_sensors.actuator.camera_pitch_cdeg,
-                              frame_sensors.actuator.valid && frame_sensors.pitch_stable,
+                              frame_sensors.actuator.valid && frame_sensors.pitch_stable &&
+                                  !previous.pixel_selection_paused,
                               observed_at,
                               previous.first_ordinary_delivered,
                               config.confidence,
                               rejected_ids,
                               prefer_label,
-                              selection_heading);
+                              selection_heading,
+                              config.ui140_core_confidence,
+                              near_selection ? &config_.capture : nullptr,
+                              reselect_stopped);
     auto input = makePushObservation(cargo_detections,
                                      observed_at,
                                      previous.first_ordinary_delivered,
@@ -260,7 +290,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
                                      false,
                                      false,
                                      false,
-                                     prefer_label);
+                                     prefer_label, config.ui140_core_confidence);
     applySplitRetreatBox(
         input, cargo_detections, frame.size(), observed_at, config.confidence, previous.target_id);
     for (const auto& d : cargo_detections)
@@ -278,6 +308,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     input.pixel_selection_managed = true;
     input.pixel_released_id = selection.released_id;
     input.pixel_rebound_from = selection.rebound_from;
+    input.pixel_reselected_from = selection.reselected_from;
     (void)box_area_accepted; // 现场同步：像素比不再要求box_area_accepted标定（沿用demo）
     std::cout << "[PIXEL_SELECTION] timestamp=" << observed_at
               << " pitch=" << frame_sensors.actuator.camera_pitch_cdeg
@@ -288,6 +319,9 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
               << " task_id=" << previous.target_id << " held_id=" << selection.held_id
               << " released_id=" << selection.released_id
               << " rebound_from=" << selection.rebound_from
+              << " reselected_from=" << selection.reselected_from << " candidates=["
+              << selection.candidates << "]"
+              << " selection_paused=" << previous.pixel_selection_paused
               << " split_reselect=" << previous.split_target_reselecting
               << " split_candidate=" << previous.split_target_candidate_id
               << (selection.row.empty() ? std::string() : " ROW[" + selection.row + "]") << "\n";
@@ -321,7 +355,23 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     input.run = false; // MatchControl supplies the final authorization below.
     if (geometry)
         geometry->apply(input, geometry_result, expected_stop, config.team, imuNowUs());
+    input.zone_observed_heading_valid = selection_imu.connected && selection_imu.fresh &&
+        selection_imu.sample.measurements_valid && std::isfinite(selection_heading);
+    input.zone_observed_heading_rad = selection_heading;
+    input.zone_observed_heading_us = input.zone_observed_heading_valid ? timestamp : 0;
     const bool stable_view = frame_sensors.actuator.valid && frame_sensors.pitch_stable;
+    applySubzoneView(input, vision_result.halves, zone_geometry, frame.size(), stable_view,
+                     zone_color.verified && zone_color.color==config.team,
+                     config_.task.supply_half_x_m, config_.task.injured_half_x_m,
+                     config.pose_keypoint_confidence, vision_result.pose_ran ? timestamp : 0);
+    if (vref_ready) {
+        for (auto* half_view : {&input.supply_view, &input.injured_view})
+            measureSubzoneEntrance(*half_view, vision_result.halves[half_view->target_x<0 ? 0 : 1],
+                                   zone_geometry, vref_calibration,
+                                   frame_sensors.actuator.camera_pitch_cdeg, &geometry_sensor);
+    }
+    applyDeliveryBoxEvidence(input, detections, config.team, frame.size(), stable_view,
+                             observed_at, config.confidence);
     const bool detected_zone =
         vref_ready && applyZoneDetectionSight(input,
                                               detections,
@@ -335,6 +385,8 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     // Detection boxes guide post-capture search even without pose keypoints.
     // Fall back to pose bearing only when its color is actually identified.
     const bool pose_sight = !detected_zone && stable_view && vision_result.pose_ran &&
+                            timestamp && timestamp<=observed_at &&
+                            observed_at-timestamp<=config_.task.frame_timeout_us &&
                             !zone_points.empty() && zone_color.verified && !zone_color.assumed;
     if (vref_ready && pose_sight && vref_calibration.cameraMatrix().type() == CV_64F &&
         vref_calibration.cameraMatrix().rows == 3) {
@@ -351,6 +403,8 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             input.zone_sight_valid = true;
             input.zone_sight_enemy = input.enemy_zone_seen = zone_color.color != config.team;
             input.zone_sight_bearing = float(std::atan2(-x, forward));
+            input.zone_sight_sample_us = timestamp;
+            input.zone_sight_image_size = frame.size();
         }
     }
     for (const auto& d : cargo_detections)
@@ -374,7 +428,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         input.clutter_ts_us = observed_at;
     {
         for (const auto& d : cargo_detections)
-            if (d.ground_position_valid && d.confidence >= config.confidence &&
+            if (d.ground_position_valid && d.confidence >= (d.label == "core_supply" ? config.ui140_core_confidence : config.confidence) &&
                 std::isfinite(d.body_xy_m.x) && std::isfinite(d.body_xy_m.y) &&
                 (d.label == "ordinary_supply" || d.label == "core_supply" ||
                  d.label == "injured_person")) {
@@ -418,7 +472,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         input.vref_zone.timestamp_us = observed_at;
         input.vref_zone.observed_us = observed_at;
         input.vref_points = int(input.zone_estimate.inlier_ids.size());
-        std::cout << "[ZONE_FIX] source=strict n=" << input.vref_points << "\n";
+        std::cout << "[ZONE_FIX] source=" << (geometry_result.pnp_primary ? "pnp" : "strict") << " n=" << input.vref_points << "\n";
     } else if (vref_ok) {
         input.vref_valid = true;
         input.vref_zone = vref_estimate;
@@ -434,16 +488,42 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         input.camera_pitch_cdeg = frame_sensors.actuator.camera_pitch_cdeg;
         input.camera_pitch_stable = frame_sensors.pitch_stable;
     }
+    const bool floor_view = stable_view &&
+        input.camera_pitch_cdeg != kCameraPitchInvalid &&
+        std::abs(int(input.camera_pitch_cdeg) - int(config_.pushboard_floor.pitch_cdeg)) <=
+            config_.task.pitch_tolerance_cdeg;
+    input.pushboard_floor = observePushboardFloor(frame, detections, config_.pushboard_floor,
+                                                  config.team, floor_view, timestamp);
+    const bool transport_floor_view = stable_view && previous.phase == TaskPhase::Transport &&
+        previous.state == PushState::CARRY &&
+        input.camera_pitch_cdeg != kCameraPitchInvalid &&
+        std::abs(int(input.camera_pitch_cdeg) - int(config_.task.track_pitch_cdeg)) <=
+            config_.task.pitch_tolerance_cdeg;
+    input.transport_floor = observeTransportFloor(frame, detections, config_.pushboard_floor,
+                                                   config.team, transport_floor_view, timestamp);
     // Gripper completion: id echoed and observed open/closed state matches the last target.
     // Read-only feedback never sends, so it never acknowledges anything.
     UARTController::GripperAck gripper_ack;
     if (link) {
-        gripper_ack = feedback->gripperAck();
+        gripper_ack = selection_ack;
         if (gripper_ack.result == ActionResult::Done) {
             input.gripper_done = true;
             input.gripper_feedback_open = gripper_ack.target;
         }
     }
+    const bool startup_ordinary_view = task.startupOrdinaryOnly() ||
+        (input.camera_pitch_cdeg != kCameraPitchInvalid &&
+         std::abs(int(input.camera_pitch_cdeg) - int(config_.task.near_pitch_cdeg)) <=
+             config_.task.pitch_tolerance_cdeg);
+    if (previous.phase == TaskPhase::Startup)
+        applyStartupSight(input, cargo_detections, frame.size(), observed_at,
+                          config.confidence, task.startupSightTargetId(), startup_ordinary_view,
+                          task.startupSightRejectedId(observed_at), task.startupSightReference());
+    // runtime refreshes previous.motion from MotionLink::stats() immediately before
+    // build(): this is the command actually sent after ramping, not a requested stop.
+    input.sent_velocity_valid = context.motion_link_enabled;
+    input.sent_vx_mps = previous.motion.vx_mps;
+    input.sent_wz_rps = previous.motion.wz_rps;
     // Holding-region and rush-corridor inventory; uncertainty leaves them incomplete.
     capture.update(input,
                    cargo_detections,
@@ -543,9 +623,11 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
                                 frame.size(),
                                 field_previous,
                                 geometry_result.mapping_valid,
-                                config.controlled_ignore_clearance);
+                                config.controlled_ignore_clearance,
+                                !imuReadinessRequired(previous.phase, config.single_phase));
     }
-    // Raw boxes do not establish metric distance, route safety or delivery.
+    // Raw boxes do not establish metric distance or route safety. Delivery has its
+    // own explicit same-image containment evidence above.
     // Keep unconnected evidence invalid; never synthesize successful observations.
     const auto imu_data = imu ? imu->snapshot() : ImuSnapshot{};
     // IMU absence/fault/over-tilt can veto permission; it never establishes geometry or route
@@ -562,9 +644,23 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         input.heading_valid = imu_data.fresh && imu_data.sample.measurements_valid &&
                               std::isfinite(imu_data.sample.body_rpy_rad[2]);
         input.heading_rad = imu_data.sample.body_rpy_rad[2];
+        for (const auto& sample : imu->samplesAfter(imu_translation_sequence_)) {
+            input.imu_translation_samples.push_back({sample.sequence, sample.received_us,
+                sample.device_time_ms, sample.body_acceleration_mps2,
+                sample.body_angular_velocity_rps, sample.body_quaternion_wxyz,
+                sample.measurements_valid});
+            imu_translation_sequence_ = sample.sequence;
+        }
         input.imu_blocked_us = motion_watch.blockedUs();
         input.imu_spin_stall_us = motion_watch.spinStallUs();
     }
+    // Non-ordinary startup guides need raw image steering even without grasp calibration.
+    // At UI140 ordinary approach retains CaptureMonitor's calibrated centre and readiness.
+    if (previous.phase == TaskPhase::Startup &&
+        (!input.pixel_grasp_near_view || input.label != "ordinary_supply"))
+        applyStartupSight(input, cargo_detections, frame.size(), observed_at,
+                          config.confidence, task.startupSightTargetId(), startup_ordinary_view,
+                          task.startupSightRejectedId(observed_at), task.startupSightReference());
     return {std::move(input),
             std::move(detections),
             std::move(zone_points),

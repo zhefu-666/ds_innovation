@@ -63,13 +63,11 @@ rescue_add_task_test(rescue_disperse_swing_stage_tests task/stages/disperse_swin
 
 rescue_add_task_test(rescue_disperse_rush_stage_tests task/stages/disperse_rush_stage_tests.cpp)
 
-rescue_add_task_test(rescue_disperse_rush_task_integration_tests task/integration/disperse_rush_task_integration_tests.cpp)
-set_tests_properties(rescue_disperse_rush_stage_tests rescue_disperse_rush_task_integration_tests PROPERTIES TIMEOUT 10)
+set_tests_properties(rescue_disperse_rush_stage_tests PROPERTIES TIMEOUT 10)
 
 rescue_add_task_test(rescue_sweep_ledger_tests task/stages/sweep_ledger_tests.cpp)
 
-rescue_add_task_test(rescue_sweep_task_integration_tests task/integration/sweep_task_integration_tests.cpp)
-set_tests_properties(rescue_sweep_ledger_tests rescue_sweep_task_integration_tests PROPERTIES TIMEOUT 10)
+set_tests_properties(rescue_sweep_ledger_tests PROPERTIES TIMEOUT 10)
 
 rescue_add_task_test(rescue_push_in_stage_tests task/stages/push_in_stage_tests.cpp)
 
@@ -85,10 +83,11 @@ rescue_add_task_test(rescue_recovery_stage_tests task/stages/recovery_stage_test
 rescue_add_task_test(rescue_enter_stage_tests task/stages/enter_stage_tests.cpp)
 rescue_add_task_test(rescue_disperse_cluster_stage_tests task/stages/disperse_cluster_stage_tests.cpp)
 rescue_add_task_test(rescue_carry_approach_stage_tests task/stages/carry_approach_stage_tests.cpp)
+rescue_add_task_test(rescue_carry_task_integration_tests task/integration/carry_task_integration_tests.cpp)
+set_tests_properties(rescue_carry_task_integration_tests PROPERTIES TIMEOUT 10 LABELS "integration;task")
 rescue_add_task_test(rescue_carry_search_stage_tests task/stages/carry_search_stage_tests.cpp)
 rescue_add_task_test(rescue_sweep_trigger_stage_tests task/stages/sweep_trigger_stage_tests.cpp)
 rescue_add_task_test(rescue_search_stage_tests task/stages/search_stage_tests.cpp)
-rescue_add_task_test(rescue_sweep_stage_tests task/stages/sweep_stage_tests.cpp)
 
 rescue_add_task_test(rescue_delivery_verification_tests task/stages/delivery_verification_tests.cpp)
 
@@ -107,12 +106,59 @@ add_executable(rescue_first_trip_capture_review_tests
 target_include_directories(rescue_first_trip_capture_review_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(rescue_first_trip_capture_review_tests PRIVATE
-    rescue_test_task_common rescue_app_config ${OpenCV_LIBS})
-target_compile_options(rescue_first_trip_capture_review_tests PRIVATE -UNDEBUG -Wall -Wextra)
-add_test(NAME rescue_first_trip_capture_review_tests COMMAND rescue_first_trip_capture_review_tests
-    ${PROJECT_SOURCE_DIR}/tests/fixtures/first_trip_20261029_212327_boxes.txt)
-set_tests_properties(rescue_first_trip_capture_review_tests PROPERTIES TIMEOUT 10
-    LABELS "integration;task;perception;replay")
+    rescue_test_task_common rescue_app_config ${OpenCV_LIBS} nlohmann_json::nlohmann_json)
+# Large scenario fixture: avoid GCC IPA optimizer failures; production stays at Release settings.
+target_compile_options(rescue_first_trip_capture_review_tests PRIVATE -O0 -UNDEBUG -Wall -Wextra)
+foreach(scenario dangerous-front-risk supplied-grasp-ranges injured-removal)
+    add_test(NAME rescue_capture_${scenario}
+        COMMAND rescue_first_trip_capture_review_tests
+            ${PROJECT_SOURCE_DIR}/tests/fixtures/first_trip_20261029_212327_boxes.txt ${scenario})
+    set_tests_properties(rescue_capture_${scenario} PROPERTIES TIMEOUT 15 LABELS "integration;task;perception")
+endforeach()
+
+add_executable(rescue_observation_builder_capture_tests
+    app/observation_builder_capture_tests.cpp
+    ${PROJECT_SOURCE_DIR}/src/app/observation_builder.cpp
+    ${PROJECT_SOURCE_DIR}/src/control/controlled_field.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/capture_monitor.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/pushboard_floor.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/zone_color.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/perception_adapter.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/silhouette.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/zone_keypoints.cpp
+    ${PROJECT_SOURCE_DIR}/src/geometry/zone_geometry.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/keypoint_filter.cpp
+    ${PROJECT_SOURCE_DIR}/src/geometry/ground_pose_fitter.cpp
+    ${PROJECT_SOURCE_DIR}/src/geometry/geometry_pipeline.cpp
+    ${PROJECT_SOURCE_DIR}/src/geometry/camera_calibration.cpp
+    ${PROJECT_SOURCE_DIR}/src/geometry/safe_zone_pose.cpp
+    ${PROJECT_SOURCE_DIR}/src/geometry/zone_layout.cpp
+    ${PROJECT_SOURCE_DIR}/src/geometry/planner.cpp
+    ${PROJECT_SOURCE_DIR}/src/hardware/hipnuc_imu.cpp
+    ${PROJECT_SOURCE_DIR}/src/hardware/imu_adapter.cpp
+    ${PROJECT_SOURCE_DIR}/src/hardware/uart_controller.cpp
+    ${PROJECT_SOURCE_DIR}/src/hardware/sensor_fusion.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/utils.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/types.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/logger.cpp)
+target_include_directories(rescue_observation_builder_capture_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rescue_observation_builder_capture_tests PRIVATE
+    rescue_test_task_common rescue_app_config rescue_rknn ${OpenCV_LIBS} pthread)
+target_compile_options(rescue_observation_builder_capture_tests PRIVATE -UNDEBUG -Wall -Wextra)
+add_test(NAME rescue_observation_builder_capture_tests COMMAND rescue_observation_builder_capture_tests)
+set_tests_properties(rescue_observation_builder_capture_tests PROPERTIES TIMEOUT 15
+    LABELS "integration;task;perception")
+add_test(NAME rescue_near_target_selection_tests
+    COMMAND rescue_observation_builder_capture_tests --near-selection-only)
+set_tests_properties(rescue_near_target_selection_tests PROPERTIES TIMEOUT 15
+    LABELS "integration;task;perception")
+
+add_test(NAME rescue_observation_builder_zone_sight_tests
+    COMMAND rescue_observation_builder_capture_tests --zone-sight-only)
+set_tests_properties(rescue_observation_builder_zone_sight_tests PROPERTIES TIMEOUT 15
+    LABELS "integration;task;perception")
+
 
 rescue_add_task_test(rescue_task_phase_tests task/integration/task_phase_tests.cpp)
 set_tests_properties(rescue_task_phase_tests PROPERTIES TIMEOUT 10 LABELS "integration;task")
@@ -303,7 +349,6 @@ function(rescue_add_tool_test name script labels)
 endfunction()
 rescue_add_tool_test(board_monitor_tests tools/board_monitor/test_monitor.py "tool;telemetry")
 rescue_add_tool_test(camera_overlap_tests tools/camera_calibration/test_overlap.py "tool;calibration")
-rescue_add_tool_test(camera_image_trigger_tests tools/camera_calibration/test_image_trigger.py "tool;calibration")
 rescue_add_tool_test(camera_calibration_tests tools/camera_calibration/test_calibrate.py "tool;calibration")
 rescue_add_tool_test(camera_guided_tests tools/camera_calibration/test_guided.py "tool;calibration")
 rescue_add_tool_test(camera_handeye_tests tools/camera_calibration/test_handeye.py "tool;calibration")
@@ -316,9 +361,7 @@ set_tests_properties(rescue_runtime_config_tests PROPERTIES LABELS "unit;config"
 set_tests_properties(rescue_core_tests PROPERTIES LABELS "regression;core")
 set_tests_properties(rescue_disperse_swing_stage_tests PROPERTIES LABELS "unit;task")
 set_tests_properties(rescue_disperse_rush_stage_tests PROPERTIES LABELS "unit;task")
-set_tests_properties(rescue_disperse_rush_task_integration_tests PROPERTIES LABELS "integration;task")
 set_tests_properties(rescue_sweep_ledger_tests PROPERTIES LABELS "unit;task")
-set_tests_properties(rescue_sweep_task_integration_tests PROPERTIES LABELS "integration;task")
 set_tests_properties(rescue_push_in_stage_tests PROPERTIES LABELS "unit;task")
 set_tests_properties(rescue_push_in_task_integration_tests PROPERTIES LABELS "integration;task")
 set_tests_properties(rescue_release_stage_tests PROPERTIES LABELS "unit;task")
@@ -330,7 +373,6 @@ set_tests_properties(rescue_carry_approach_stage_tests PROPERTIES LABELS "unit;t
 set_tests_properties(rescue_carry_search_stage_tests PROPERTIES LABELS "unit;task")
 set_tests_properties(rescue_sweep_trigger_stage_tests PROPERTIES LABELS "unit;task")
 set_tests_properties(rescue_search_stage_tests PROPERTIES LABELS "unit;task")
-set_tests_properties(rescue_sweep_stage_tests PROPERTIES LABELS "unit;task")
 set_tests_properties(rescue_delivery_verification_tests PROPERTIES LABELS "unit;task")
 set_tests_properties(rescue_delivery_task_integration_tests PROPERTIES LABELS "integration;task")
 set_tests_properties(rescue_capture_verification_tests PROPERTIES LABELS "unit;task")
@@ -364,3 +406,19 @@ set_tests_properties(demo_launcher_tests PROPERTIES LABELS "tool;config")
 
 get_property(all_tests DIRECTORY PROPERTY TESTS)
 set_tests_properties(${all_tests} PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+rescue_add_task_test(rescue_search_entry_tests task/integration/search_entry_tests.cpp)
+set_tests_properties(rescue_search_entry_tests PROPERTIES LABELS "integration;task")
+
+add_executable(rescue_pushboard_floor_tests perception/pushboard_floor_tests.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/pushboard_floor.cpp)
+target_include_directories(rescue_pushboard_floor_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rescue_pushboard_floor_tests PRIVATE ${OpenCV_LIBS})
+target_compile_options(rescue_pushboard_floor_tests PRIVATE -UNDEBUG -Wall -Wextra)
+add_test(NAME rescue_pushboard_floor_tests COMMAND rescue_pushboard_floor_tests)
+
+add_test(NAME rescue_capture_score_tests
+    COMMAND rescue_first_trip_capture_review_tests
+        ${PROJECT_SOURCE_DIR}/tests/fixtures/first_trip_20261029_212327_boxes.txt capture-score)
+set_tests_properties(rescue_capture_score_tests PROPERTIES TIMEOUT 15 LABELS "integration;task;perception")

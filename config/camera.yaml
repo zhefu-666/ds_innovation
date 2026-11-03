@@ -67,3 +67,6 @@ mechanical_model_note: "Measured handeye rotation plus ruler translation; fixed 
 
 # User 2026-10-27: distance must not use PnP. Ground mapping remains calibrated.
 enable_pnp_crosscheck: 0
+
+# User 2026-11-01: use ground mapping for 40cm range and entry normal; no PnP.
+enable_zone_pnp_primary: 0

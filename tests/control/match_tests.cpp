@@ -104,10 +104,11 @@ int main() {
         m.health(1250000, true, "");
         assert(!m.status(1250000).permit);
         assert(m.command(MatchCommand::RESUME, 1250000));
-        assert(!m.status(1500001).permit); // independent health deadline, no main update
-        m.health(1550000, true, "");
-        assert(!m.status(1550000).permit);
-        assert(m.command(MatchCommand::RESUME, 1550000));
+        assert(m.status(1550000).permit); // 300ms remains valid
+        assert(!m.status(1550001).permit); // independent health deadline, no main update
+        m.health(1560000, true, "");
+        assert(!m.status(1560000).permit);
+        assert(m.command(MatchCommand::RESUME, 1560000));
         assert(m.command(MatchCommand::STOP, 1600000));
         assert(m.status(31000000).state == MatchState::FINISHED); // clock runs through stops
         m.health(31000000, true, "");

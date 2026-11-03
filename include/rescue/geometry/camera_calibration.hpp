@@ -81,6 +81,7 @@ class CameraCalibration {
 
     // Available only for an independently validated dynamic extrinsic model.
     bool cameraFromGround(int16_t pitch, const SensorState& sensor, cv::Matx34d& transform) const;
+    bool zonePnpPrimaryEnabled() const { return zone_pnp_primary_enabled_; }
     bool pnpCrosscheckEnabled() const { return pnp_crosscheck_enabled_; }
     const cv::Mat& cameraMatrix() const {
         return camera_matrix_;
@@ -101,6 +102,7 @@ class CameraCalibration {
     std::map<int16_t, cv::Matx33d> overlap_ground_;
     std::map<int16_t, cv::Matx34d> overlap_camera_;
     bool pnp_crosscheck_enabled_ = true;
+    bool zone_pnp_primary_enabled_ = false;
     GroundMode mode_ = GroundMode::NONE;
     cv::Mat camera_matrix_;
     cv::Mat dist_coeffs_;

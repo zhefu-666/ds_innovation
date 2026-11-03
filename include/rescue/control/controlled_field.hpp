@@ -17,7 +17,8 @@ class ControlledField {
                 cv::Size,
                 const PushOutput&,
                 bool mapping_valid,
-                bool ignore_clearance = false);
+                bool ignore_clearance = false,
+                bool startup_without_imu = false);
     const std::string& reason() const {
         return reason_;
     }

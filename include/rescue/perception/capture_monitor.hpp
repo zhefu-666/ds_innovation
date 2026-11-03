@@ -17,6 +17,11 @@ struct HoldingView {
         0; // object must reach this depth, even if clipped by image bottom
     std::vector<cv::Point2f> polygon;
 };
+// Shared with target selection: touching an image edge leaves the object truncated.
+inline bool captureBoxComplete(const cv::Rect& box, cv::Size image) {
+    return box.width > 0 && box.height > 0 && box.x > 0 && box.y > 0 && box.br().x < image.width &&
+           box.br().y < image.height;
+}
 // Original-image box-centre bounds from the supplied class boundary samples.
 struct GraspCenterRange {
     std::string label;
@@ -25,9 +30,17 @@ struct GraspCenterRange {
     RectArea area;
     cv::Point2f target_center_px;
     bool lateral_measured = true;
+    bool containsCenter(const cv::Rect& box) const {
+        return PushObservation::imageBoxCenterInRegion(
+            box, {area.x1, area.y1, area.x2 - area.x1, area.y2 - area.y1});
+    }
 };
 struct CaptureConfig {
     bool pixel_grasp_enabled = false;
+    // Explicit image-reference coordinate contract; legacy whole-box profiles stay unchanged.
+    bool pixel_center_membership = false;
+    // Additional dangerous-object centre risk, not a selectable cargo/grasp range.
+    cv::Rect2f dangerous_front_risk_region_px;
     int16_t pixel_approach_pitch_cdeg = 0; // UI 120; image approach, no metric ranging
     std::vector<GraspCenterRange> grasp_center_ranges;
     // No uncalibrated angle is observable by default.
@@ -40,6 +53,13 @@ struct CaptureConfig {
     // A box with a measured (untruncated) ground contact this far beyond the mouth lies in front
     // of the jaw, not in it: it is neither held nor ambiguous. Disabled until calibrated.
     float mouth_y_m = std::numeric_limits<float>::infinity(), outside_margin_m = .03f;
+    // Engineering tolerance for deferring a lateral bbox decision, not a mechanical margin.
+    float dangerous_side_overlap_ratio = .05f;
+    // Image jitter at the upper entering bottom, in a 720-high reference image.
+    // Only retains an already confirmed outside state; never grants initial clearance.
+    float dangerous_upper_jitter_px = 2.f;
+    int dangerous_side_clear_frames = 3;
+    uint64_t dangerous_side_clear_us = 250000;
     uint64_t max_age_us = 200000;
     float min_confidence = .25f;   // below this, a box counts as an unknown object
     float noise_confidence = .10f; // ignored entirely below this
@@ -86,6 +106,8 @@ class CaptureMonitor {
                 const std::string& capture_label = {});
     void reset() {
         history_.clear();
+        dangerous_side_.clear();
+        dangerous_side_target_id_ = -1;
         view_ = -1;
     }
     // Holding region for a stable readback, or nullptr when the frame is out of view.
@@ -100,6 +122,15 @@ class CaptureMonitor {
 
   private:
     CaptureConfig c_;
+    struct DangerousSideHistory {
+        cv::Rect box;
+        uint64_t sample_us = 0, clear_us = 0, now_us = 0;
+        int clear_frames = 0;
+        int16_t pitch = kCameraPitchInvalid;
+        bool risk = false, pending = true, upper = false;
+    };
+    std::map<int, DangerousSideHistory> dangerous_side_;
+    int dangerous_side_target_id_ = -1;
     std::map<int, std::vector<cv::Point2f>> history_;
     HoldDiagnostics diag_;
     std::vector<CorridorEntry> corridor_diag_;

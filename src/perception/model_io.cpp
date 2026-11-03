@@ -62,12 +62,15 @@ std::vector<SegDetection> decodeModelOutput(const cv::Mat& output,
     if (!std::isfinite(config.confidence) || config.confidence < 0 || config.confidence > 1 ||
         !std::isfinite(config.injured_confidence) || config.injured_confidence < 0 ||
         config.injured_confidence > 1 || !std::isfinite(config.nms) || config.nms < 0 ||
-        config.nms > 1)
+        config.nms > 1 || !std::isfinite(config.ui140_core_confidence) ||
+        config.ui140_core_confidence < 0 || config.ui140_core_confidence > 1)
         throw std::runtime_error("Invalid detection thresholds");
     const int count = output.size[2];
     const float* raw = output.ptr<float>();
     const auto classThreshold = [&](int c) {
         const auto& name = config.class_names[c];
+        if (name == "core_supply" || taskLabel(name) == "core_supply")
+            return std::min(config.confidence, config.ui140_core_confidence);
         return (name == "injured_person" || taskLabel(name) == "injured_person")
                    ? std::min(config.confidence, config.injured_confidence)
                    : config.confidence;
@@ -118,7 +121,12 @@ std::vector<SegDetection> decodeModelOutput(const cv::Mat& output,
             boxes.push_back(candidates[i].box);
             scores.push_back(candidates[i].confidence);
         }
-        cv::dnn::NMSBoxes(boxes, scores, classThreshold(group.first), config.nms, keep);
+        // NMS uses score > threshold; core candidates already passed the inclusive gate above.
+        const auto& label = config.class_names[group.first];
+        const float nms_floor = (label == "core_supply" || taskLabel(label) == "core_supply")
+                                    ? std::nextafter(classThreshold(group.first), 0.f)
+                                    : classThreshold(group.first);
+        cv::dnn::NMSBoxes(boxes, scores, nms_floor, config.nms, keep);
         for (int i : keep)
             results.push_back(candidates[group.second[i]]);
     }

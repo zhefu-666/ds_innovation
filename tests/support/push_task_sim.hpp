@@ -75,6 +75,7 @@ struct Sim {
     std::vector<PushObservation::HeldObject>
         load_objects; // detections behind `load` (identity/confidence)
     std::set<PushState> visited;
+    bool visited_placement = false;
     static TaskTuning testTune(TaskTuning t) {
         t.startup_advance_us = 0;
         t.require_multi_view = false;
@@ -226,12 +227,29 @@ struct Sim {
         if (record)
             frames.push_back(in);
         visited.insert(out.state);
+        visited_placement |= out.state == PushState::CARRY && out.navigation_release;
         return out;
     }
     bool until(PushState s, int limit) {
         for (int i = 0; i < limit; ++i)
             if (tick().state == s)
                 return true;
+        return false;
+    }
+    bool untilPlacement(int limit) {
+        for (int i = 0; i < limit; ++i) {
+            tick();
+            if (out.state == PushState::CARRY && out.navigation_release)
+                return true;
+        }
+        return false;
+    }
+    bool untilFinalHoldCheck(int limit) {
+        for (int i = 0; i < limit; ++i) {
+            tick();
+            if (out.state == PushState::CARRY && task.actionProgress().step == 2)
+                return true;
+        }
         return false;
     }
     // Lock, open, inventory the corridor and start the rush.
@@ -248,7 +266,7 @@ struct Sim {
     }
     // Whole trip with the zone counts reacting once the load is pushed in.
     void deliver(bool counts_react = true) {
-        assert(until(PushState::ENTER, 400));
+        assert(untilPlacement(400));
         in.delivery_observed = counts_react;
         assert(until(PushState::BACK_OUT, 400));
         if (counts_react) {

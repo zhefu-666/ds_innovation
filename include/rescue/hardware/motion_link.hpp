@@ -14,6 +14,8 @@ struct MotionLinkConfig {
     // Initial chassis tuning, not measured mechanical limits. Fault stops bypass these ramps.
     float linear_accel_mps2 = .30f, linear_decel_mps2 = .40f;
     float angular_accel_rps2 = .80f, angular_decel_rps2 = 1.0f;
+    // Wire command / desired body yaw rate; applied once after the business-unit ramp.
+    float angular_command_scale = 1.f;
 };
 
 // Rate-limit normal command changes in the sender's time domain, not the camera frame rate.
@@ -62,7 +64,10 @@ struct MotionLinkStats {
     uint64_t last_ok_us = 0; // host steady clock of the last successful write
     bool last_ok = false;
     float requested_vx_mps = 0, requested_wz_rps = 0;
+    // Last successful command in business units; not a measured chassis velocity.
     float sent_vx_mps = 0, sent_wz_rps = 0;
+    float precomp_wz_rps = 0; // Yaw request after restoring legacy tuning, before compensation.
+    float wire_wz_rps = 0; // Actual float written to the MCU after response compensation.
 };
 // Periodic MCU command sender. The task loop submits one command per frame; this thread
 // ramps velocity on immediate writes and periodic resends, so a healthy loop never trips the MCU
@@ -77,7 +82,11 @@ class MotionLink {
     ~MotionLink();
     MotionLink(const MotionLink&) = delete;
     MotionLink& operator=(const MotionLink&) = delete;
-    void submit(const MotionCommand& command, bool immediate_stop = false);
+    // Legacy phases were tuned before compensation: raise yaw by 1/K before applying K.
+    // Ramping and task feedback retain the original tuning units throughout.
+    void submit(const MotionCommand& command,
+                bool immediate_stop = false,
+                bool preserve_angular_tuning = false);
     // Sends a final zero-velocity packet (if anything was sent) and joins; idempotent.
     void stop();
     // A command was submitted and a packet written within command_timeout, and A6 feedback is
@@ -92,7 +101,8 @@ class MotionLink {
 
   private:
     void run();
-    void write(MotionCommand command, bool stale, bool immediate_stop = false);
+    void
+    write(MotionCommand command, bool stale, bool immediate_stop, bool preserve_angular_tuning);
     std::function<bool()> permit_;
     MotionCommand authorized_;
     bool ever_authorized_ = false;
@@ -105,6 +115,7 @@ class MotionLink {
     uint64_t submitted_us_ = 0;
     bool has_command_ = false, pending_ = false, stopping_ = false, stopped_ = false;
     bool immediate_stop_ = false, stop_pending_ = false;
+    bool preserve_angular_tuning_ = false;
     MotionLinkStats stats_;
     std::thread worker_;
 };

@@ -17,7 +17,8 @@ void ControlledField::update(PushObservation& in,
                              cv::Size size,
                              const PushOutput& previous,
                              bool mapping,
-                             bool ignore_clearance) {
+                             bool ignore_clearance,
+                             bool startup_without_imu) {
     in.clearance_checks_disabled = ignore_clearance;
     blockers_.clear();
     const auto note = [&](const char* flag, const SegDetection& d, const char* why) {
@@ -32,11 +33,33 @@ void ControlledField::update(PushObservation& in,
     // The existing controlled-field attestation also covers pixel-guided capture.
     // This is a control permission, not a fabricated ground projection.
     const bool pixel_capture = in.pixel_grasp_view && in.camera_pitch_stable &&
-        (previous.phase == TaskPhase::Search || previous.phase == TaskPhase::Capture);
-    in.path_safe = in.retreat_safe =
-        (mapping || pixel_capture) && std::isfinite(body_radius_) && body_radius_ > 0;
+        (previous.phase == TaskPhase::Startup || previous.phase == TaskPhase::Search ||
+         previous.phase == TaskPhase::Capture);
+    // Startup uses timed/image control, so its explicit cleared-area permission must
+    // not disappear merely because the IMU-dependent ground mapping is unavailable.
+    const bool startup_motion = startup_without_imu && previous.phase == TaskPhase::Startup &&
+                                in.camera_pitch_stable;
+    // Final placement uses the same controlled-field image-motion permission as capture.
+    // This is limited to the task's UI140 floor leg; it never fabricates metric mapping.
+    const bool pixel_placement = previous.pushboard_floor_active &&
+        previous.phase == TaskPhase::Transport && previous.run_status == RunStatus::Running &&
+        in.camera_pitch_stable && in.pushboard_floor.valid;
+    // Active jaw transport may approach in FAR/UI90 without metric mapping.
+    // The operator-attested corridor needs a valid stable camera feedback, not
+    // cargo's near-view flag. Release and retreat retain separate permissions.
+    const bool pixel_transport = in.camera_pitch_cdeg != kCameraPitchInvalid &&
+        in.camera_pitch_stable &&
+        previous.phase == TaskPhase::Transport && previous.state == PushState::CARRY &&
+        previous.run_status == RunStatus::Running && previous.navigation_approach &&
+        std::isfinite(body_radius_) && body_radius_ > 0;
+    const bool base_clearance = (mapping || pixel_capture || startup_motion) &&
+        std::isfinite(body_radius_) && body_radius_ > 0;
+    const bool floor_forward = pixel_placement && std::isfinite(body_radius_) && body_radius_ > 0;
+    in.path_safe = base_clearance || floor_forward || pixel_transport;
+    in.retreat_safe = in.jaw_open_safe = base_clearance;
+    in.turn_safe = base_clearance || pixel_transport;
+    in.arc_safe = base_clearance || floor_forward || pixel_transport;
     in.directional_clearance_valid = envelope_[0] > 0;
-    in.turn_safe = in.arc_safe = in.jaw_open_safe = in.path_safe;
     // Forward checks the full straight approach to the target, using its current bearing depth.
     const float forward =
         in.geometry_valid ? std::max(0.f, in.distance_m * std::cos(in.heading_error) - envelope_[5])

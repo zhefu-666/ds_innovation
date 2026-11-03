@@ -53,9 +53,23 @@ void PushTask::drive(TaskTick& tick, float vx, float wz, bool pixel_align) {
                              ? std::max(t_.max_speed, t_.startup_advance_speed)
                              : t_.max_speed; // only the start-up run may exceed the normal cap
     tick.motion.vx_mps = std::clamp(vx, -vx_cap, vx_cap);
+    // Carrying forward uses continuous curvature steering. A minimum turn rate would turn
+    // small bearing corrections into alternating pulses after the sender's deceleration ramp.
+    // Keep the existing floor for stationary alignment and every other task state.
+    if (state_ == PushState::CARRY && !transport_phase_.placing_ && carryLogic() && vx > 0) {
+        tick.motion.wz_rps = std::clamp(wz, -t_.max_wz, t_.max_wz);
+        return;
+    }
     if (pixel_align) {
-        // Preserve proportional pixel steering; no legacy floor, boost or escalation.
-        const float cap = std::min(t_.pixel_align_max_wz, t_.max_wz);
+        // Grasp pixel steering stays proportional. Stationary carry corrections
+        // need the effective turn floor; IMU endpoints stop them at the target.
+        // Forward carry arcs above remain proportional without a minimum rate.
+        const bool carry_turn = state_ == PushState::CARRY && !transport_phase_.placing_ &&
+                                carryLogic() && vx == 0;
+        const float cap = carry_turn ? t_.transportTurnCap()
+                                     : std::min(t_.pixel_align_max_wz, t_.max_wz);
+        if (carry_turn && wz!=0)
+            wz=std::copysign(std::max(std::abs(wz),std::min(t_.transportTurnFloor(),cap)),wz);
         tick.motion.wz_rps = std::clamp(wz, -cap, cap);
         return;
     }
@@ -74,7 +88,10 @@ void PushTask::drive(TaskTick& tick, float vx, float wz, bool pixel_align) {
         escalated = tick.now - inplace_since_us_ >= 1000000;
         demo_cap = escalated ? t_.max_wz : std::max(.25f, t_.min_turn_wz);
     }
-    const float wz_cap = demo_capture_turn
+    const bool startup_pitch_turn = phase_ == TaskPhase::Startup &&
+                                    startup_action_ == StartupAction::TurnBeforePitch;
+    const float wz_cap = startup_pitch_turn ? 1.f
+                         : demo_capture_turn
                              ? std::min(t_.max_wz, demo_cap)
                              : (tick.scan_spin ? std::max(t_.max_wz, t_.scan_wz) : t_.max_wz);
     if (wz != 0)
@@ -83,7 +100,7 @@ void PushTask::drive(TaskTick& tick, float vx, float wz, bool pixel_align) {
     tick.motion.wz_rps = std::clamp(wz, -wz_cap, wz_cap);
     if (vx == 0 && wz != 0 && !demo_capture_turn && t_.inplace_turn_boost > 1.f &&
         (state_ == PushState::APPROACH || state_ == PushState::MID_APPROACH ||
-         state_ == PushState::CUE_APPROACH || state_ == PushState::SELECT_CARGO))
+         state_ == PushState::SELECT_CARGO))
         tick.motion.wz_rps *= t_.inplace_turn_boost;
 }
 
@@ -92,11 +109,127 @@ bool PushTask::pixelLateralAccepted(const PushObservation& in) const {
            (in.target_grasp_range_lateral_measured || in.pixel_grasp_aligned);
 }
 
+void PushTask::invalidateEntryPosition() {
+    search_entry_.first_id = -1;
+    search_entry_.confirmed = search_entry_.handoff = false;
+    search_entry_.sample_us = search_entry_.accepted_us = 0;
+    search_entry_.stage = "observation_wait";
+    pixel_alignment_ = {};
+}
+
+void PushTask::selectSearchEntry(const PushObservation& in) {
+    if (search_entry_.target_id == trip_context_.target_id_ &&
+        search_entry_.label == trip_context_.label_)
+        return;
+    search_entry_ = {};
+    search_entry_.target_id = trip_context_.target_id_;
+    search_entry_.label = trip_context_.label_;
+    (void)in;
+}
+
+bool PushTask::entryPositionValid(const PushObservation& in) const {
+    return tracking(in) && in.target_id == search_entry_.target_id &&
+           in.label == search_entry_.label && search_entry_.first_id == in.target_id &&
+           in.pixel_grasp_near_view && in.camera_pitch_stable &&
+           in.target_center_px_valid && in.target_grasp_range_valid &&
+           in.target_grasp_range_inside && pixelLateralAccepted(in) &&
+           in.pixel_grasp_sample_us && in.pixel_grasp_sample_us <= in.now_us &&
+           in.now_us - in.pixel_grasp_sample_us <= t_.frame_timeout_us;
+}
+
+bool PushTask::locateSearchEntry(TaskTick& tick) {
+    selectSearchEntry(tick.in);
+    auto& entry = search_entry_;
+    const auto& in = tick.in;
+    tick.immediate_motion_stop = true;
+    if (!tracking(in) || !in.camera_pitch_stable || !in.pixel_grasp_near_view ||
+        !in.target_center_px_valid || !in.target_grasp_range_valid ||
+        !in.capture_scene_valid || !in.capture_scene_us || in.capture_scene_us > tick.now ||
+        tick.now - in.capture_scene_us > t_.frame_timeout_us || in.capture_area_px.empty() ||
+        !in.pixel_grasp_sample_us || in.pixel_grasp_sample_us > tick.now ||
+        tick.now - in.pixel_grasp_sample_us > t_.frame_timeout_us) {
+        invalidateEntryPosition();
+        reason_ = "first_entry_observation_wait";
+        return false;
+    }
+    if (in.target_grasp_range_past_rear) {
+        enter(PushState::CAPTURE_FAIL, tick.now, "first_entry_past_rear_recovery");
+        return false;
+    }
+    // Centres establish entry order. Whole boxes remain the inventory/path evidence.
+    // Latch only the first fresh UI140 scene containing a centre inside its class range.
+    if (entry.first_id == -1 && in.capture_scene_us > entry.sample_us) {
+        entry.sample_us = in.capture_scene_us;
+        int first = -1;
+        bool target_seen = false, all_needed = true;
+        for (const auto& object : in.capture_image_objects) {
+            const auto region = in.capture_class_regions_px.find(object.label);
+            const auto area = region == in.capture_class_regions_px.end()
+                                  ? in.capture_area_px : region->second;
+            const cv::Point2f center{object.box.x + .5f * object.box.width,
+                                     object.box.y + .5f * object.box.height};
+            const bool inside = center.x >= area.x && center.x <= area.x + area.width &&
+                                center.y >= area.y && center.y <= area.y + area.height;
+            target_seen |= object.id == in.target_id && object.label == in.label;
+            if (!object.complete && (inside || object.id == in.target_id)) {
+                reason_ = "first_entry_incomplete_scene";
+                return false;
+            }
+            if (inside) {
+                first = first == -1 ? object.id : -2;
+                all_needed &= targetSelectable(object.label, first_);
+            }
+        }
+        if (!target_seen) {
+            reason_ = "first_entry_target_missing";
+            return false;
+        }
+        // If all entered blocks are selectable this trip, the first is needed too.
+        // Existing inventory review still decides whether this batch can close.
+        entry.first_id = first == -2 && all_needed && in.target_grasp_range_inside
+                             ? in.target_id : first;
+    }
+    if (entry.first_id != -1 && entry.first_id != in.target_id) {
+        entry.stage = "review_first_object";
+        reason_ = entry.first_id == -2 ? "first_entry_order_ambiguous" : "first_entry_other_object";
+        // Do not push a preceding neighbour farther in. Reuse the existing stopped split.
+        if (pixelAlign(tick, true, true)) {
+            if (evaluateCaptureScene(in) == CaptureSceneVerdict::Incomplete) {
+                reason_ = "first_entry_inventory_incomplete";
+                return false;
+            }
+            beginPixelSplit(tick);
+        }
+        return false;
+    }
+    if (!in.target_grasp_range_inside || !pixelLateralAccepted(in)) {
+        entry.confirmed = false;
+        entry.stage = "approach";
+        if (!pixelAlign(tick, false, pixelLateralAccepted(in)))
+            return false;
+        if (pixelLateralAccepted(in) && in.target_center_px.y < in.capture_area_px.y) {
+            reason_ = "first_entry_approach";
+            drive(tick, std::min(t_.approach_speed, t_.rush_near_speed), 0);
+            tick.immediate_motion_stop = tick.motion.vx_mps == 0;
+        }
+        return false;
+    }
+    entry.stage = "stop_confirm";
+    entry.confirmed = entryPositionValid(in) && pixelAlign(tick, true, true);
+    entry.stage = entry.confirmed ? "target_entered_first" : "stop_confirm";
+    reason_ = entry.confirmed ? "first_entry_target_ready" : "first_entry_stop_confirm";
+    return entry.confirmed;
+}
+
 bool PushTask::pixelAlign(TaskTick& tick,
                           bool strict,
                           bool hold_position,
                           float tolerance_override_px) {
-    auto& a = pixel_alignment_;
+    return pixelAlignTarget(tick, strict, hold_position, tolerance_override_px, pixel_alignment_);
+}
+
+bool PushTask::pixelAlignTarget(TaskTick& tick, bool strict, bool hold_position,
+                               float tolerance_override_px, PixelAlignment& a) {
     const auto& in = tick.in;
     tick.immediate_motion_stop = true;
     // A handoff or accepted position needs rest, not another turn.
@@ -106,7 +239,8 @@ bool PushTask::pixelAlign(TaskTick& tick,
         a.holding_position = hold_position;
     }
     const bool far_handoff = !in.pixel_grasp_view && in.target_center_px_valid &&
-                             in.pixel_view_handoff_ready;
+        (in.pixel_view_handoff_ready ||
+         (phase_ == TaskPhase::Startup && startup_action_ == StartupAction::FarHandoff));
     if ((!in.pixel_grasp_target_valid && !far_handoff) || !in.pixel_grasp_sample_us ||
         in.pixel_grasp_sample_us > tick.now ||
         tick.now - in.pixel_grasp_sample_us > t_.frame_timeout_us ||
@@ -127,6 +261,14 @@ bool PushTask::pixelAlign(TaskTick& tick,
                           : approach                ? t_.pixel_align_approach_restart_px
                                                     : t_.pixel_align_restart_px;
     const float hold_limit = approach ? restart : tolerance;
+    // Transport UI120 uses its own alignment state; cargo, UI140 and view handoffs
+    // keep their rules. A stopped coarse approach may accept the existing hold band.
+    const bool carry_approach = &a == &carry_alignment_ &&
+        phase_ == TaskPhase::Transport && !transport_phase_.placing_ &&
+        approach && in.pixel_grasp_view && !hold_position;
+    const float acceptance = carry_approach ? hold_limit : tolerance;
+    a.tolerance_px = tolerance;
+    a.acceptance_px = acceptance;
     const float sent_vx = in.sent_velocity_valid ? in.sent_vx_mps : last_vx_;
     const float sent_wz = in.sent_velocity_valid ? in.sent_wz_rps : last_wz_;
     // Sent commands are not measured wheel velocities. Fresh stationary images are also
@@ -135,37 +277,82 @@ bool PushTask::pixelAlign(TaskTick& tick,
                          std::abs(sent_vx) <= t_.pixel_align_stopped_vx &&
                          std::abs(sent_wz) <= t_.pixel_align_stopped_wz;
     const bool fresh = in.pixel_grasp_sample_us > a.last_sample_us;
-    if (fresh)
+    const uint64_t sample_delta = fresh && a.last_sample_us
+                                     ? in.pixel_grasp_sample_us - a.last_sample_us : 0;
+    const bool resumed = a.resume_pending;
+    if (fresh && resumed &&
+        (sample_delta > 150000 ||
+         std::abs(error - a.last_error_px) > t_.pixel_align_brake_motion_px ||
+         std::abs(in.target_center_px.y - a.last_center_y_px) > t_.pixel_align_brake_motion_px)) {
+        a.stage = PixelAlignment::Stage::Brake;
+        a.stopped_since_us = a.stable_since_us = a.correction_since_us = 0;
+        a.stable_frames = a.resume_frames = 0;
+        a.within_tolerance = false;
+        a.brake_reason = "sample_discontinuity";
+    }
+    // Reuse startup's bounded prediction/pulses for transport UI120 only.
+    // Measured cargo bounds and UI140 transport acceptance stay unchanged.
+    const bool near_startup = phase_ == TaskPhase::Startup &&
+        startup_action_ == StartupAction::OpenApproach && in.pixel_grasp_near_view;
+    float closing_px_per_s = 0;
+    const bool predictive = near_startup || carry_approach;
+    if (predictive && fresh && !resumed && sample_delta >= 10000 && sample_delta <= 150000) {
+        const float rate = (error - a.last_error_px) * 1000000.f / float(sample_delta);
+        if (rate * error < 0)
+            closing_px_per_s = std::abs(rate);
+    }
+    if (fresh) {
         a.last_sample_us = in.pixel_grasp_sample_us;
+        a.last_error_px = error;
+        a.last_center_y_px = in.target_center_px.y;
+        if (a.resume_pending && ++a.resume_frames >= t_.pixel_align_stable_frames)
+            a.resume_pending = false;
+    }
     const int direction = error > 0 ? 1 : (error < 0 ? -1 : 0);
-    const auto brake = [&] {
+    const auto brake = [&](const char* cause) {
+        a.brake_reason = cause;
         a.stage = PixelAlignment::Stage::Brake;
         a.stopped_since_us = 0;
-        a.within_tolerance = hold_position || magnitude <= tolerance;
+        a.correction_since_us = 0;
+        a.within_tolerance = hold_position || magnitude <= acceptance;
         a.stable_frames = 0;
         a.stable_since_us = 0;
         reason_ = "pixel_align_brake";
     };
     if (a.stage == PixelAlignment::Stage::Advance) {
         if ((hold_position || magnitude <= (strict ? tolerance : restart)) &&
-            (!strict || stopped))
+            (!strict || stopped) && !a.resume_pending)
             return true;
-        brake();
+        brake("advance_limit");
         return false;
     }
     if (a.stage == PixelAlignment::Stage::Correct) {
-        if (hold_position || magnitude <= tolerance ||
+        const bool fine = predictive && magnitude <= 2.f * restart;
+        const bool predicted_stop = predictive && closing_px_per_s > 0 &&
+            magnitude <= tolerance + std::min(80.f, .15f * closing_px_per_s);
+        // A fast chassis may cross the whole fine band before the first delayed
+        // response arrives. Bound transport's coarse bursts too, then observe at rest.
+        const bool pulse_done = (fine || carry_approach) && a.correction_since_us &&
+                                tick.now - a.correction_since_us >= 100000;
+        if (hold_position || magnitude <= tolerance || predicted_stop || pulse_done ||
             (a.direction && direction != a.direction) ||
             !std::isfinite(sent_vx) || !std::isfinite(sent_wz) ||
             std::abs(sent_vx) > t_.pixel_align_stopped_vx ||
             (sent_wz * error < 0 && std::abs(sent_wz) > t_.pixel_align_stopped_wz)) {
-            brake();
+            brake(hold_position ? "handoff" : magnitude <= tolerance ? "tolerance" :
+                  predicted_stop ? "prediction" : pulse_done ? "pulse_end" :
+                  (a.direction && direction != a.direction) ? "crossed_center" : "motion_wait");
             return false;
         }
+        a.brake_reason = "none";
         reason_ = "pixel_center_align";
-        drive(tick, 0, t_.pixel_align_gain_rps_per_px * error, true);
-        if (tick.motion.wz_rps != 0)
+        const float wz = t_.pixel_align_gain_rps_per_px * error;
+        drive(tick, 0, fine ? std::clamp(.5f * wz, -.1f, .1f) : wz, true);
+        if (tick.motion.wz_rps != 0) {
             a.direction = direction;
+            if (!a.correction_since_us)
+                a.correction_since_us = tick.now;
+        }
         return false;
     }
     if (a.stage == PixelAlignment::Stage::Brake) {
@@ -182,7 +369,7 @@ bool PushTask::pixelAlign(TaskTick& tick,
         // require a fresh, low-drift image window before permitting either direction.
         if (!fresh || in.pixel_grasp_sample_us <= a.stopped_since_us)
             return false;
-        if (hold_position || magnitude <= tolerance)
+        if (hold_position || magnitude <= acceptance)
             a.within_tolerance = true;
         else if (magnitude > hold_limit)
             a.within_tolerance = false;
@@ -215,18 +402,18 @@ bool PushTask::pixelAlign(TaskTick& tick,
     }
     reason_ = "pixel_align_settle";
     if (!stopped || (!hold_position && magnitude > hold_limit)) {
-        brake();
+        brake("settle_limit");
         return false;
     }
     if (fresh) {
-        if (hold_position) {
+        if (hold_position || carry_approach) {
             a.brake_min_px = std::min(a.brake_min_px, error);
             a.brake_max_px = std::max(a.brake_max_px, error);
             a.brake_min_y_px = std::min(a.brake_min_y_px, in.target_center_px.y);
             a.brake_max_y_px = std::max(a.brake_max_y_px, in.target_center_px.y);
             if (a.brake_max_px - a.brake_min_px > t_.pixel_align_brake_motion_px ||
                 a.brake_max_y_px - a.brake_min_y_px > t_.pixel_align_brake_motion_px) {
-                brake();
+                brake("image_drift");
                 return false;
             }
         }
@@ -234,7 +421,8 @@ bool PushTask::pixelAlign(TaskTick& tick,
             a.stable_since_us = in.pixel_grasp_sample_us;
         ++a.stable_frames;
         if (a.stable_frames >= t_.pixel_align_stable_frames &&
-            in.pixel_grasp_sample_us - a.stable_since_us >= t_.pixel_align_stable_us) {
+            in.pixel_grasp_sample_us - a.stable_since_us >= t_.pixel_align_stable_us &&
+            !a.resume_pending) {
             a.stage = PixelAlignment::Stage::Advance;
             return true;
         }
@@ -244,7 +432,12 @@ bool PushTask::pixelAlign(TaskTick& tick,
 
 void PushTask::scanSpin(TaskTick& tick) {
     tick.scan_spin = true;
-    drive(tick, 0, t_.scan_wz);
+    if (phase_ == TaskPhase::Transport && state_ == PushState::CARRY &&
+        carryLogic() && t_.transport_scan_wz > 0) {
+        drive(tick, 0, t_.transport_scan_wz, true);
+    } else {
+        drive(tick, 0, t_.scan_wz);
+    }
     tick.scan_spin = false;
 }
 
@@ -258,29 +451,7 @@ CarrySearchContext PushTask::carrySearchContext(TaskTick& tick) {
     context.zone_mem_yaw = zone_mem_yaw_;
     context.run_yaw0_set = run_yaw0_set_;
     context.run_yaw0 = run_yaw0_;
-    context.enemy_zone_seen = tick.in.enemy_zone_seen;
-    context.travel_m = actionProgress().travel;
-    context.motion_ratio = motionRatio();
     return context;
-}
-
-bool PushTask::evadeEnemy(TaskTick& tick) {
-    const auto evade = transport_phase_.carry_search_.evade(t_, carrySearchContext(tick));
-    if (evade.reset_zone_search)
-        transport_phase_.zone_search_started_us_ = evade.zone_search_us;
-    if (evade.reset_travel)
-        actionProgress().travel = 0;
-    if (evade.reason)
-        reason_ = evade.reason;
-    if (evade.action == CarrySearchAction::TurnAway) {
-        scanSpin(tick);
-        return true;
-    }
-    if (evade.action == CarrySearchAction::DriveAway) {
-        drive(tick, evade.speed, evade.heading);
-        return true;
-    }
-    return false;
 }
 
 bool PushTask::unstick(TaskTick& tick) { // true: the wiggle owns this tick's motion
@@ -336,30 +507,32 @@ bool PushTask::preLower(TaskTick& tick, const char* why) { // true: lowering may
     return false;
 }
 
-void PushTask::steer(TaskTick& tick, float speed, float heading) {
-    if (std::abs(heading) > t_.rotate_in_place_rad)
+void PushTask::steer(TaskTick& tick, float speed, float heading, bool blend, float forward_speed) {
+    if (std::abs(heading) > t_.rotate_in_place_rad && !blend) {
         drive(tick, 0, t_.heading_gain * heading);
-    else
-        drive(tick,
-              speed,
-              std::abs(heading) <= t_.heading_deadband_rad ? 0.f : t_.heading_gain * heading);
+        return;
+    }
+    float wz = 0;
+    if (std::abs(heading) > t_.heading_deadband_rad) {
+        if (state_ == PushState::CARRY && !transport_phase_.placing_ && carryLogic()) {
+            // Pure-pursuit curvature: slower forward travel needs a smaller yaw rate, not
+            // the same high-gain turn used to rotate in place. Bound the gain by the legacy
+            // value so a short configured lookahead cannot make steering more aggressive.
+            const float gain = std::min(
+                t_.heading_gain, 2.f * speed / std::max(.02f, t_.assume_lookahead_m));
+            wz = gain * std::sin(heading);
+        } else
+            wz = t_.heading_gain * heading;
+    }
+    // An explicit forward speed leaves the steering gain based on the original speed.
+    drive(tick, forward_speed >= 0.f ? forward_speed : speed, wz);
 }
 
 bool PushTask::carrySearch(TaskTick& tick) {
     const auto carry = transport_phase_.carry_search_.update(t_, carrySearchContext(tick));
-    if (carry.reset_zone_search)
-        transport_phase_.zone_search_started_us_ = carry.zone_search_us;
-    if (carry.reset_travel)
-        actionProgress().travel = 0;
     if (carry.reason)
         reason_ = carry.reason;
     switch (carry.action) {
-        case CarrySearchAction::TurnAway:
-            scanSpin(tick);
-            return true;
-        case CarrySearchAction::DriveAway:
-            drive(tick, carry.speed, carry.heading);
-            return true;
         case CarrySearchAction::Scan:
             scanSpin(tick);
             return false;
@@ -388,94 +561,17 @@ const char* PushTask::trackingReason(TaskTick& tick) {
     return "target_distance_or_heading_invalid";
 }
 
-ClusterGroup
-PushTask::findBest(TaskTick& tick, const std::vector<cv::Point2f>& pts, float max_y, float radius) {
-    return tick.cluster.findBest(t_, tick.in, pts, max_y, radius);
-}
-
-int PushTask::evalGroup(TaskTick& tick,
-                        const std::vector<cv::Point2f>& pts,
-                        int need_n,
-                        int far_need,
-                        float short_radius) {
-    return tick.cluster.evalGroup(
-        t_, tick.in, pts, need_n, far_need, tick.far_y, tick.sweep_esc, short_radius);
-}
-
-void PushTask::beginScatter(TaskTick& tick, bool far, bool commit, const char* why) {
-    search_phase_.sweep_.resetScatterApproach();
-    trip_context_.target_id_ = -1;
-    actionProgress().confirmations = 0;
-    search_phase_.cue_mode_ = false;
-    const cv::Point2f best_c = tick.cluster.bestCentre();
-    const float best_d = tick.cluster.bestDistance();
-    search_phase_.scatter_yaw_ = wrapAngle(tick.in.heading_rad + std::atan2(-best_c.x, best_c.y));
-    search_phase_.scatter_range_ = best_d;
-    search_phase_.scatter_far_ = far;
-    search_phase_.scatter_commit_ = commit;
-    sweep_ledger_.begin(t_, tick.now);
-    search_phase_.burst_fast_ = search_phase_.burst_swing_ = false;
-    if (far) {
-        search_phase_.scatter_approach_m_ =
-            std::max(0.f, best_d - t_.blind_scatter_approach_stop_m);
-        if (t_.first_burst && !commit && !search_phase_.burst_drive_used_ &&
-            search_phase_.scatter_approach_m_ >= t_.first_burst_min_drive_m) {
-            search_phase_.burst_fast_ = search_phase_.burst_drive_used_ =
-                search_phase_.burst_swing_armed_ = true;
-        }
-    } else {
-        search_phase_.burst_swing_ = search_phase_.burst_swing_armed_;
-        search_phase_.burst_swing_armed_ = false;
-        search_phase_.disperse_sign_ = (search_phase_.scatter_count_ % 2 == 0) ? 1.f : -1.f;
-        search_phase_.disperse_swing_.configure(t_.blind_scatter_passes, t_.blind_scatter_swings);
-        search_phase_.disperse_rush_.beginSweep(t_.swing_avoid_outside);
-        ++search_phase_.scatter_count_;
-    }
-    enter(PushState::SCATTER, tick.now, why);
-}
-
-bool PushTask::beginPileFromSweep(
-    TaskTick& tick,
-    const char* why) { // a disperse sweep that really swung continues in PILE (layer loop)
-                       // instead of the plain re-search
-    if (!t_.pile_chain || !t_.pile_clear || search_phase_.disperse_small_ || frame_raised_ != 0 ||
-        trip_context_.trip_.total() != 0 || !tick.in.heading_valid ||
-        !std::isfinite(tick.in.heading_rad))
-        return false;
-    trip_context_.target_id_ = -1;
-    actionProgress().confirmations = 0;
-    search_phase_.cue_mode_ = false;
-    search_phase_.pile_yaw0_ = tick.in.heading_rad;
-    search_phase_.pile_phase_ = 7;
-    search_phase_.pile_seen_ = 0;
-    search_phase_.pile_chain_n_ = 0;
-    search_phase_.sweep_phase_ = 0;
-    enter(PushState::PILE, tick.now, why);
-    search_phase_.pile_phase_us_ = tick.now;
-    return true;
-}
-
 bool PushTask::lostTarget(TaskTick&) {
     return ++actionProgress().misses > t_.hold_grace_frames;
 }
 
 void PushTask::searchLost(TaskTick& tick) {
-    if (frame_raised_ == 0 && trip_context_.trip_.total() == 0 && tick.scatter_ok &&
-        tick.clutter_fresh) { // the group is still in view from the approach camera: sweep it
-                              // instead of spinning
-        const int g =
-            evalGroup(tick, tick.in.clutter_body, t_.blind_scatter_min, t_.blind_scatter_far_min);
-        if (g) {
-            beginScatter(tick, g == 2, true, g == 2 ? "lost_group_far" : "lost_group_sweep");
-            return;
-        }
-    }
     if (frame_raised_ != 0 || trip_context_.trip_.total() > 0) {
         failStop(tick, "lost_search_jaw_or_load_unsafe");
         return;
     }
     clearTrip();
-    search_phase_.lost_round_ = search_phase_.post_disperse_mid_ && midPitch() ? 1 : 0;
+    search_phase_.lost_round_ = 0;
     search_phase_.post_disperse_mid_ = false;
     enter(PushState::LOST_SEARCH, tick.now, "lost_target_search");
 }
@@ -487,173 +583,6 @@ int PushTask::holdCheck(TaskTick& tick) {
     }
     actionProgress().confirmations = 0;
     return ++actionProgress().hold_misses > t_.hold_grace_frames ? -1 : 0;
-}
-
-bool PushTask::cueCandidate(TaskTick& tick) {
-    return t_.enable_search_cues && tick.in.target_is_search_cue && tick.in.target_valid &&
-           tick.in.target_id >= 0 && targetKind(tick.in.label) != TargetKind::UNKNOWN &&
-           tick.in.geometry_valid && tick.in.target_region_valid && !tick.in.target_in_zone &&
-           std::isfinite(tick.in.distance_m) && tick.in.distance_m >= 0 &&
-           std::isfinite(tick.in.heading_error);
-}
-
-bool PushTask::sweepFrameReady(TaskTick& tick) {
-    if ((!t_.sweep_frame_open && !t_.frame_open_default) || sweep_open_disabled_ ||
-        frame_raised_ != 0)
-        return true;
-    if (!sweep_open_) {
-        if (!(t_.sweep_frame_open || defaultOpenState()))
-            return true;
-        search_phase_.sweep_start_us_ = tick.now;
-        reason_ = "sweep_frame_open_wait";
-        return false;
-    }
-    if (sweep_open_done_)
-        return true;
-    if (tick.in.gripper_done && tick.in.gripper_feedback_open == 1) {
-        sweep_open_done_ = true;
-        std::cout << "[SWEEP_FRAME] open confirmed after " << (tick.now - sweep_open_us_) / 1000
-                  << " ms state=" << name(state_) << "\n";
-        return true;
-    }
-    if (tick.now - sweep_open_us_ > t_.gripper_timeout_us) {
-        sweep_open_disabled_ = true;
-        std::cout << "[SWEEP_FRAME] open not confirmed within " << t_.gripper_timeout_us / 1000
-                  << " ms: sweeps stay closed from now on\n";
-    }
-    search_phase_.sweep_start_us_ = tick.now;
-    reason_ = "sweep_frame_open_wait";
-    return false;
-}
-
-bool PushTask::disperseStep(TaskTick& tick) {
-    if (!sweepFrameReady(tick))
-        return false;
-    if (search_phase_.sweep_phase_ == 4) {
-        const bool plan_target = candidate(tick.in, tick.now) &&
-                                 std::isfinite(tick.in.distance_m) &&
-                                 std::isfinite(tick.in.heading_error);
-        DisperseRushContext rush_context;
-        rush_context.now_us = tick.now;
-        rush_context.sweep_start_us = search_phase_.sweep_start_us_;
-        rush_context.travel_m = actionProgress().travel;
-        rush_context.sweep_travel_m = search_phase_.sweep_travel0_;
-        rush_context.motion_ratio = motionRatio();
-        rush_context.rush_distance_m = search_phase_.disperse_rush_m_;
-        rush_context.cluster_range_m = search_phase_.scatter_range_;
-        rush_context.scatter_state = state_ == PushState::SCATTER;
-        rush_context.burst_swing = search_phase_.burst_swing_;
-        rush_context.far_judge = t_.sweep_far_judge;
-        rush_context.pitch_ready = pitch_cmd_ == t_.far_pitch_cdeg;
-        rush_context.clutter_fresh = tick.clutter_fresh;
-        rush_context.has_target = plan_target;
-        if (plan_target)
-            rush_context.target_body = targetBody(tick);
-        const auto rush = search_phase_.disperse_rush_.update(t_, tick.in, rush_context);
-        if (rush.plan_event) {
-            if (rush.first_sign != 0.f)
-                search_phase_.disperse_sign_ = rush.first_sign;
-            std::cout << "[SWING_PLAN] outside=" << rush.outside_n
-                      << " cap_left=" << rush.cap_positive << " cap_right=" << rush.cap_negative
-                      << " first=" << (search_phase_.disperse_sign_ > 0 ? "left" : "right") << "\n";
-        }
-        if (rush.outcome == DisperseRushOutcome::Complete) {
-            search_phase_.sweep_phase_ = 5;
-            search_phase_.sweep_start_us_ = tick.now;
-            search_phase_.sweep_yaw0_ = tick.in.heading_rad;
-            search_phase_.disperse_swing_.beginSwing();
-            search_phase_.sweep_travel0_ = actionProgress().travel;
-            sweep_ledger_.setSwung(true);
-            search_phase_.disperse_turn_.begin(t_.disperse_single_turn &&
-                                               !search_phase_.disperse_small_);
-        } else {
-            if (rush.reason)
-                reason_ = rush.reason;
-            drive(tick, rush.vx, 0);
-            if (tick.motion.vx_mps > 0)
-                tick.motion.vx_mps = rush.vx; // preserve every clearance veto before bypassing the
-                                              // ordinary speed cap
-            return false;
-        }
-    }
-    if (search_phase_.disperse_turn_.active()) {
-        const DisperseTurnContext context{tick.now,
-                                          search_phase_.sweep_start_us_,
-                                          actionProgress().travel,
-                                          search_phase_.sweep_travel0_,
-                                          search_phase_.sweep_yaw0_,
-                                          motionRatio(),
-                                          search_phase_.disperse_sign_,
-                                          desiredPitch() == pitch_cmd_ &&
-                                              tick.in.camera_pitch_stable,
-                                          midPitch(),
-                                          search_phase_.disperse_rush_.planActive(),
-                                          search_phase_.disperse_rush_.capPositive(),
-                                          search_phase_.disperse_rush_.capNegative()};
-        const auto turn = search_phase_.disperse_turn_.update(tick.in, t_, context);
-        if (turn.turn_started) {
-            search_phase_.sweep_yaw0_ = tick.in.heading_rad;
-            search_phase_.sweep_start_us_ = tick.now;
-        }
-        if (turn.push_started) {
-            search_phase_.sweep_start_us_ = tick.now;
-            search_phase_.sweep_travel0_ = actionProgress().travel;
-        }
-        if (turn.frame_event)
-            std::cout << "[TURN] frame_zone n=" << turn.frame_count
-                      << " max=" << t_.disperse_turn_frame_max << " turned=" << turn.turned
-                      << " ok_frames=" << turn.confirmations << "\n";
-        if (turn.reason)
-            reason_ = turn.reason;
-        if (turn.motion == DisperseTurnMotion::Push)
-            drive(tick, t_.disperse_speed, 0);
-        else if (turn.motion == DisperseTurnMotion::Turn) {
-            const bool fast = (search_phase_.burst_swing_ && state_ == PushState::SCATTER) ||
-                              (t_.approach_dense_burst_swing && state_ == PushState::APPROACH &&
-                               !search_phase_.sweep_non_supply_active_);
-            drive(tick, 0.f, turn.direction);
-            if (tick.motion.wz_rps != 0)
-                tick.motion.wz_rps =
-                    std::copysign(fast ? t_.first_burst_swing_wz : t_.disperse_wz, turn.direction);
-        }
-        return turn.outcome == DisperseTurnOutcome::Complete;
-    }
-    const bool burst = search_phase_.burst_swing_ && state_ == PushState::SCATTER;
-    const DisperseSwingContext context{tick.now,
-                                       search_phase_.sweep_start_us_,
-                                       actionProgress().travel,
-                                       search_phase_.sweep_travel0_,
-                                       search_phase_.sweep_yaw0_,
-                                       tick.in.heading_rad,
-                                       motionRatio(),
-                                       search_phase_.disperse_sign_,
-                                       search_phase_.disperse_small_,
-                                       search_phase_.disperse_rush_.planActive(),
-                                       search_phase_.disperse_rush_.capPositive(),
-                                       search_phase_.disperse_rush_.capNegative(),
-                                       burst,
-                                       t_.approach_dense_burst_swing &&
-                                           state_ == PushState::APPROACH &&
-                                           !search_phase_.sweep_non_supply_active_};
-    const auto swing = search_phase_.disperse_swing_.update(t_, context);
-    if (swing.restart_clock)
-        search_phase_.sweep_start_us_ = tick.now;
-    if (swing.outcome == DisperseSwingOutcome::NextPass) {
-        search_phase_.disperse_rush_m_ = t_.disperse_pass_extra_m;
-        search_phase_.disperse_sign_ = -search_phase_.disperse_sign_;
-        search_phase_.sweep_phase_ = 4;
-        search_phase_.sweep_start_us_ = tick.now;
-        search_phase_.sweep_travel0_ = actionProgress().travel;
-    }
-    if (swing.reason)
-        reason_ = swing.reason;
-    if (swing.motion_requested) {
-        drive(tick, swing.vx, swing.direction);
-        if (tick.motion.wz_rps != 0)
-            tick.motion.wz_rps = std::copysign(
-                swing.fast ? t_.first_burst_swing_wz : t_.disperse_wz, swing.direction);
-    }
-    return swing.outcome == DisperseSwingOutcome::Complete;
 }
 
 } // namespace rescue

@@ -103,7 +103,7 @@ void navigationReadinessCases() {
         s.in.zone_identity_verified = false;
         for (int i = 0; i < 20; ++i) {
             auto o = s.tick();
-            assert(o.motion.vx_mps == 0 && o.state != PushState::GATE);
+            assert(o.motion.vx_mps == 0 && !o.navigation_release);
         }
     }
     {
@@ -133,6 +133,12 @@ void cameraStartupCases() {
         assert(stationaryPitchWork(out, "pitch_moving"));
         assert(stationaryPitchWork(out, "pitch_not_calibrated"));
         assert(!stationaryPitchWork(out, "imu_not_synchronized"));
+        assert(!imuReadinessRequired(TaskPhase::Startup, ""));
+        assert(!imuReadinessRequired(TaskPhase::Startup, "startup"));
+        for (const char* phase : {"search", "capture", "transport"})
+            assert(imuReadinessRequired(TaskPhase::Startup, phase));
+        for (auto phase : {TaskPhase::Search, TaskPhase::Capture, TaskPhase::Transport})
+            assert(imuReadinessRequired(phase, ""));
         assert(!stationaryPitchWork(out, "stale_frame"));
         out.motion.vx_mps = .1f;
         assert(!stationaryPitchWork(out, "pitch_moving"));
@@ -240,7 +246,7 @@ void cameraStartupCases() {
         }
         assert(searched); // >25s with no zone no longer aborts the requested first-trip search
         s.zone_visible = true;
-        assert(s.until(PushState::GATE, 1200));
+        assert(s.untilFinalHoldCheck(1200));
         s.deliver();
         assert(s.out.delivered_total == 1 && s.out.first_ordinary_delivered);
         assert(s.until(PushState::SCAN, 400));
@@ -256,9 +262,9 @@ void cameraStartupCases() {
         assert(s.out.reason == "own_zone_search_timeout" && stopped(s.out.motion) &&
                s.out.motion.gripper_offset == 20);
     }
-    { // Startup is deliberately deferred: old duration settings cannot command motion.
+    { // Startup is explicitly disabled: old duration settings cannot command motion.
         TaskTuning t;
-        t.startup_advance_us = 10000000;
+        t.startup_advance_us = 0;
         PushTask task(t);
         PushObservation in;
         in.run = in.safety_ok = in.path_safe = in.opponent_zone_clear = true;
@@ -271,7 +277,7 @@ void cameraStartupCases() {
         out = task.update(in);
         assert(out.phase == TaskPhase::Search && out.state == PushState::SCAN);
         assert(stopped(out.motion) && out.startup_commanded_us == 0);
-        assert(out.reason == "startup_deferred");
+        assert(out.reason == "startup_disabled");
         in.run = false;
         in.now_us += 100000;
         task.update(in);
@@ -515,7 +521,7 @@ void demoWatchdogCases() {
         t.demo_carry_once = true;
         Sim s(t);
         s.toCarry();
-        assert(s.until(PushState::ENTER, 400));
+        assert(s.untilPlacement(400));
         s.in.delivery_observed = true;
         assert(s.until(PushState::BACK_OUT, 400));
         s.in.zone_supply_count += s.out.batch_size;

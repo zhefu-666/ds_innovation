@@ -1,0 +1,16 @@
+[Unit]
+Description=Rescue project start on MCU A7 button packet
+Documentation=file:/home/cat/ds_innovation/tools/match/README.start-listener.md
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cat/ds_innovation
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /home/cat/ds_innovation/tools/match/start_on_a7.py -- /usr/bin/bash /home/cat/ds_innovation/tools/match/match_main.sh --run --site-clear --frame close
+Restart=no
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

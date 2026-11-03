@@ -55,7 +55,7 @@ void assumedDeliveryCases() {
             s.vref_visible = true;
             assert(s.until(PushState::BACK_OUT, 100) && s.out.reason == "assumed_release_back_off");
             const float yb = s.py;
-            assert(s.until(PushState::ENTER, 300) && s.out.reason == "assumed_release_then_push");
+            assert(s.untilPlacement(300) && s.out.reason == "assumed_release_then_push");
             assert(std::abs((yb - s.py) - s.tune.assume_prepush_back_m) < .04f);
             assert(s.until(PushState::RAISE_RELEASE, 600) &&
                    s.out.reason == "assumed_push_in_done");
@@ -118,7 +118,7 @@ void assumedDeliveryCases() {
         s.vref_visible = true;
         s.toRush();
         s.in.target_valid = false;
-        assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
         s.cargo_on = true;
         s.cargo_zone = {s.tune.supply_half_x_m, .12f};
         assert(s.until(PushState::RAISE_RELEASE, 600) && s.out.reason == "assumed_push_in_done");
@@ -148,7 +148,7 @@ void assumedDeliveryCases() {
         s.vref_visible = true;
         s.toRush();
         s.in.target_valid = false;
-        assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
         assert(s.until(PushState::RAISE_RELEASE, 1500) && s.out.reason == "assumed_push_in_done");
         const float depth = s.py + s.tune.hold_center_y_m;
         const std::string ev = s.task.takeDropZoneEvent();
@@ -175,7 +175,7 @@ void assumedDeliveryCases() {
         s.vref_visible = true;
         s.toRush();
         s.in.target_valid = false;
-        assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
         assert(s.until(PushState::RAISE_RELEASE, 1500) && s.out.reason == "assumed_push_in_done");
         assert(s.py + s.tune.hold_center_y_m < s.tune.assume_push_depth_m + .06f);
         assert(s.task.takeDropZoneEvent().find("push_unconfirmed") == std::string::npos);
@@ -277,7 +277,7 @@ void assumedDeliveryCases() {
         s.cargo_zone = {s.tune.supply_half_x_m, .12f};
         assert(s.until(PushState::VERIFY_DELIVERY, 2500));
         s.cargo_zone = {s.tune.supply_half_x_m, -.02f};
-        assert(s.until(PushState::ENTER, 200) && s.out.reason == "assumed_verify_repush");
+        assert(s.untilPlacement(200) && s.out.reason == "assumed_verify_repush");
         assert(s.task.takeDropZoneEvent().find("event=verify_outside_repush") != std::string::npos);
     }
     { // 块近端刚越过前沿约2cm（日志实测1.4~3cm）→ 算进区，不再重推。
@@ -339,12 +339,12 @@ void assumedDeliveryCases() {
             s.vref_visible = true;
             s.toRush();
             s.in.target_valid = false;
-            assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+            assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
             s.cargo_on = true;
             s.cargo_zone = {s.px + .12f, .03f};
             bool turned = false;
             float lastx = 9.f;
-            for (int i = 0; i < 900 && s.out.state == PushState::ENTER; ++i) {
+            for (int i = 0; i < 900 && s.out.state == PushState::CARRY; ++i) {
                 s.tick();
                 if (s.out.reason == "assumed_push_align_turn")
                     turned = true;
@@ -374,7 +374,7 @@ void assumedDeliveryCases() {
         s.vref_visible = true;
         s.toRush();
         s.in.target_valid = false;
-        assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
         s.cargo_on = true;
         s.cargo_zone = {s.px, .0f};
         s.py_max = -.15f - s.tune.hold_center_y_m;
@@ -382,7 +382,7 @@ void assumedDeliveryCases() {
         for (int n = 0; n < 2; ++n) {
             assert(s.until(PushState::BACK_OUT, 1500) && s.out.reason == "assumed_stuck_repush");
             const float yb = s.py;
-            assert(s.until(PushState::ENTER, 600) && s.out.reason == "assumed_release_then_push");
+            assert(s.untilPlacement(600) && s.out.reason == "assumed_release_then_push");
             const float back = yb - s.py;
             if (n == 0)
                 back1 = back;
@@ -430,12 +430,12 @@ void assumedDeliveryCases() {
         s.vref_visible = true;
         s.toRush();
         s.in.target_valid = false;
-        assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
         s.in.imu_blocked_us = 1000000;
         for (int n = 0; n < 2; ++n) {
             assert(s.until(PushState::BACK_OUT, 200) && s.out.reason == "assumed_stuck_repush");
             s.in.imu_blocked_us = 0;
-            assert(s.until(PushState::ENTER, 600) && s.out.reason == "assumed_release_then_push");
+            assert(s.untilPlacement(600) && s.out.reason == "assumed_release_then_push");
             s.in.imu_blocked_us = 1000000;
         }
         assert(s.until(PushState::RAISE_RELEASE, 200));
@@ -459,7 +459,7 @@ void assumedDeliveryCases() {
             s.vref_visible = true;
             s.toRush();
             s.in.target_valid = false;
-            assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+            assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
             const bool deep = k == 0 || k == 3; // 0:截断+深 1:截断+浅 2:看不到+浅 3:看不到+深
             s.py_max = (deep ? .13f : .04f) - s.tune.hold_center_y_m;
             if (k < 2) {
@@ -467,12 +467,12 @@ void assumedDeliveryCases() {
                 s.cargo_zone = {s.px, .20f};
                 s.cargo_clip = true;
             }
-            for (int i = 0; i < 400 && s.py < s.py_max - .005f && s.out.state == PushState::ENTER;
+            for (int i = 0; i < 400 && s.py < s.py_max - .005f && s.out.state == PushState::CARRY;
                  ++i)
                 s.tick();
             s.in.imu_blocked_us = 1000000;
             s.task.takeDropZoneEvent();
-            for (int i = 0; i < 60 && s.out.state == PushState::ENTER; ++i)
+            for (int i = 0; i < 60 && s.out.state == PushState::CARRY; ++i)
                 s.tick();
             const std::string ev = s.task.takeDropZoneEvent();
             if (k == 1 || k == 2) {
@@ -504,11 +504,11 @@ void assumedDeliveryCases() {
         s.vref_visible = true;
         s.toRush();
         s.in.target_valid = false;
-        assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
         s.cargo_on = true;
         s.cargo_zone = {s.px + .08f, .30f};
         int aligned = 0;
-        for (int i = 0; i < 200 && s.out.state == PushState::ENTER; ++i) {
+        for (int i = 0; i < 200 && s.out.state == PushState::CARRY; ++i) {
             s.tick();
             if (s.out.reason == "assumed_push_align_turn") {
                 ++aligned;
@@ -574,7 +574,7 @@ void assumedDeliveryCases() {
                 assert(s.until(PushState::SAFE_STOP, 400) &&
                        s.out.reason == "demo_next_trip_ready");
             } else {
-                assert(s.until(PushState::ENTER, 100) && s.out.reason == "assumed_verify_repush");
+                assert(s.untilPlacement(100) && s.out.reason == "assumed_verify_repush");
             }
         }
     }
@@ -593,12 +593,12 @@ void assumedDeliveryCases() {
         s.vref_visible = true;
         s.toRush();
         s.in.target_valid = false;
-        assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
         s.py_max = s.py + .01f;
         const uint64_t t0 = s.in.now_us;
         float first = 0, second = 0;
         bool prev = false;
-        for (int i = 0; i < 200 && s.out.state == PushState::ENTER; ++i) {
+        for (int i = 0; i < 200 && s.out.state == PushState::CARRY; ++i) {
             s.tick();
             const bool probe = s.out.reason == "assumed_push_imu_probe" && s.out.motion.wz_rps != 0;
             if (probe && !prev) {
@@ -626,7 +626,7 @@ void assumedDeliveryCases() {
         s.vref_visible = true;
         s.toRush();
         s.in.target_valid = false;
-        assert(s.until(PushState::ENTER, 2000) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(2000) && s.out.reason == "assumed_release_then_push");
         s.in.imu_blocked_us = s.tune.assume_imu_block_us - 100000;
         for (int i = 0; i < 20; ++i) {
             s.tick();
@@ -734,7 +734,7 @@ void assumedDeliveryCases() {
         assert(std::abs(std::hypot(s.px - x0, s.py - y0) - s.tune.assume_carry_m) < .03f);
         assert(s.until(PushState::BACK_OUT, 100) &&
                s.out.reason.rfind("assumed_release_back_off", 0) == 0);
-        assert(s.until(PushState::ENTER, 600) && s.out.reason == "assumed_release_then_push");
+        assert(s.untilPlacement(600) && s.out.reason == "assumed_release_then_push");
         const float xp = s.px, yp = s.py;
         assert(s.until(PushState::RAISE_RELEASE, 400) && s.out.reason == "assumed_push_in_done");
         assert(std::abs(std::hypot(s.px - xp, s.py - yp) - s.tune.assume_push_m) < .03f);
@@ -780,10 +780,10 @@ void strictDeliveryCases() {
     { // Transport uses a lowered enclosure until the destination, then lifts at rest.
         Sim s;
         s.toCarry();
-        assert(s.until(PushState::ENTER, 400));
+        assert(s.untilPlacement(400));
         assert(!s.visited.count(PushState::RAISE_RELEASE));
         bool advanced = false;
-        for (int i = 0; i < 400 && s.out.state == PushState::ENTER; ++i) {
+        for (int i = 0; i < 400 && s.out.state == PushState::CARRY; ++i) {
             s.tick();
             assert(s.out.motion.gripper_offset == 20);
             if (s.out.motion.vx_mps > 0)
@@ -815,9 +815,7 @@ void strictDeliveryCases() {
                         PushState::LOWER_FRAME,
                         PushState::VERIFY_CAPTURE,
                         PushState::CARRY,
-                        PushState::GATE,
                         PushState::RAISE_RELEASE,
-                        PushState::ENTER,
                         PushState::BACK_OUT,
                         PushState::VERIFY_DELIVERY,
                         PushState::TURN_SCAN})
@@ -1074,9 +1072,9 @@ void strictDeliveryCases() {
       // as delivered.
         Sim s;
         s.toCarry();
-        assert(s.until(PushState::GATE, 800));
+        assert(s.untilFinalHoldCheck(800));
         s.hold({});
-        for (int i = 0; i < 100 && s.out.state == PushState::GATE; ++i) {
+        for (int i = 0; i < 100 && s.out.state == PushState::CARRY; ++i) {
             s.tick();
             assert(s.out.motion.gripper_offset == 20);
         }
@@ -1098,7 +1096,7 @@ void strictDeliveryCases() {
         Sim s;
         s.in.corridor = inv(2);
         s.toCarry(inv(2));
-        assert(s.until(PushState::ENTER, 400));
+        assert(s.untilPlacement(400));
         s.in.delivery_observed = true;
         assert(s.until(PushState::BACK_OUT, 400));
         s.hold({});
@@ -1110,7 +1108,7 @@ void strictDeliveryCases() {
     { // A transient target entry, with no inventory increase, gets no credit.
         Sim s;
         s.toCarry();
-        assert(s.until(PushState::ENTER, 400));
+        assert(s.untilPlacement(400));
         s.in.delivery_observed = true;
         assert(s.until(PushState::BACK_OUT, 400));
         s.in.delivery_observed = false;
@@ -1226,70 +1224,32 @@ void fieldCarryCases() {
             s.zone_visible = false;
             for (int i = 0; i < 400; ++i) { // 20 s, inside carry_budget_us
                 s.tick();
-                assert(s.out.state != PushState::RAISE_RELEASE && s.out.state != PushState::ENTER);
+                assert(s.out.state != PushState::RAISE_RELEASE && !s.out.navigation_release);
                 assert(s.out.reason != "assumed_blind_carry" &&
                        s.out.reason != "assumed_drop_point");
             }
             assert(s.out.state == PushState::CARRY && s.out.reason == "searching_own_zone");
         }
-        { // Enemy-colour zone seen while searching: turn about (IMU), drive a long leg away, then
-          // resume searching our zone.
+        { // Enemy-only detections do not schedule a turn-about or a drive-away leg.
             Sim s(t);
             s.toCarry();
             s.zone_visible = false;
             for (int i = 0; i < 200 && s.out.reason != "searching_own_zone"; ++i)
                 s.tick();
-            assert(s.out.reason == "searching_own_zone");
-            const float phi0 = s.phi;
             s.in.enemy_zone_seen = true;
-            s.tick();
-            s.tick(); // below the 3-frame debounce
-            s.in.enemy_zone_seen = false;
-            s.tick();
-            assert(s.out.reason == "searching_own_zone");
-            s.in.enemy_zone_seen = true;
-            for (int i = 0; i < 3; ++i)
-                s.tick();
-            s.in.enemy_zone_seen = false;
-            assert(s.out.reason == "enemy_zone_turn_away");
-            bool turned = false, drove = false;
-            float x0 = 0, y0 = 0;
-            for (int i = 0; i < 400 && s.out.reason != "searching_own_zone"; ++i) {
-                s.tick();
-                if (s.out.reason == "enemy_zone_drive_away") {
-                    if (!drove) {
-                        drove = true;
-                        x0 = s.px;
-                        y0 = s.py;
-                        turned = std::abs(s.phi - phi0) >= s.tune.enemy_evade_turn_rad;
-                    }
-                    assert(s.out.motion.vx_mps > 0 && s.out.state == PushState::CARRY);
-                }
-                assert(s.out.state == PushState::CARRY);
-            }
-            assert(turned && drove && s.out.reason == "searching_own_zone");
-            assert(std::abs(std::hypot(s.px - x0, s.py - y0) -
-                            s.tune.enemy_evade_m * s.tune.assume_motion_ratio) < .08f);
-            // Cooldown: an immediate re-sighting does not restart the manoeuvre.
-            s.in.enemy_zone_seen = true;
-            for (int i = 0; i < 4; ++i) {
-                s.tick();
-                assert(s.out.reason == "searching_own_zone");
-            }
-        }
-        { // Without the enemy sighting nothing changes; with it disabled the sighting is ignored.
-            TaskTuning off = t;
-            off.enemy_evade = false;
-            Sim s(off);
-            s.toCarry();
-            s.zone_visible = false;
-            for (int i = 0; i < 200 && s.out.reason != "searching_own_zone"; ++i)
-                s.tick();
-            s.in.enemy_zone_seen = true;
+            s.in.zone_sight_valid = s.in.zone_sight_enemy = true;
+            s.in.zone_sight_bearing = .3f;
             for (int i = 0; i < 40; ++i) {
                 s.tick();
                 assert(s.out.reason == "searching_own_zone");
+                assert(s.out.motion.vx_mps == 0);
             }
+            // A new own-color detection immediately supplies the forward direction.
+            s.in.enemy_zone_seen = s.in.zone_sight_enemy = false;
+            s.in.zone_sight_bearing = 0;
+            s.tick();
+            assert(s.out.reason == "carry_drive_to_sighted_zone");
+            assert(s.out.motion.vx_mps > 0 && s.out.motion.wz_rps == 0);
         }
         { // Zone never found: after carry_search_turns turns the robot drives back along the start
           // line, then spins again.
@@ -1359,17 +1319,17 @@ void fieldCarryCases() {
             assert(s.out.state==PushState::CARRY &&
                    s.out.reason=="carry_drive_to_sighted_zone");
         }
-        { // Strict transport also turns toward a detected own zone while awaiting a metric plan.
+        { // Strict transport approaches a detected own zone without waiting for a metric plan.
             Sim s;
             s.toCarry(); s.zone_visible=false;
             s.in.zone_sight_valid=true; s.in.zone_sight_enemy=false;
-            s.in.zone_sight_bearing=.5f;
+            s.in.zone_sight_bearing=.2f;
             bool aligned=false;
             for (int i=0;i<20;++i) {
                 s.tick();
-                if (s.out.reason=="aligning_to_detected_own_zone") {
+                if (s.out.reason=="carry_drive_to_sighted_zone") {
                     aligned=true;
-                    assert(s.out.state==PushState::CARRY && s.out.motion.vx_mps==0 &&
+                    assert(s.out.state==PushState::CARRY && s.out.motion.vx_mps>0 &&
                            s.out.motion.wz_rps>0);
                     break;
                 }

@@ -1,4 +1,5 @@
 #include "rescue/perception/model_io.hpp"
+#include "rescue/perception/pixel_selector.hpp"
 #include "rescue/perception/perception_adapter.hpp"
 #include "rescue/perception/zone_keypoints.hpp"
 #include <cassert>
@@ -10,6 +11,16 @@ using namespace rescue;
 namespace {
 // 640x480 into 640: scale 1, pad_y 80. 1280x720 into 640: scale .5, pad_y 140.
 void detectorTests() {
+    { // Only stable, confirmed UI140 enables the lower core threshold.
+        Config scoped;
+        scoped.confidence = .6f;
+        scoped.ui140_core_confidence = .4f;
+        assert(scoped.coreConfidenceAtPitch(2000, true, true) == .4f);
+        for (int pitch : {-3000, 0, 1899, 2101})
+            assert(scoped.coreConfidenceAtPitch(pitch, true, true) == .6f);
+        assert(scoped.coreConfidenceAtPitch(2000, false, true) == .6f);
+        assert(scoped.coreConfidenceAtPitch(2000, true, false) == .6f);
+    }
     Config c;
     c.confidence = 0.25f;
     assert(c.input_size == 640 &&
@@ -41,6 +52,35 @@ void detectorTests() {
     assert(out[0].box == cv::Rect(220, 190, 200, 100));
     assert(out[1].label == "dangerous_object" && out[1].model_label == "blue" &&
            out[2].label == "core_supply" && out[0].mask.empty());
+    { // Same .4 score: only core survives .6 global decoding, including exact boundary.
+        Config scoped = c;
+        scoped.confidence = scoped.injured_confidence = .6f;
+        scoped.ui140_core_confidence = .4f;
+        cv::Mat scores = raw.clone();
+        float* v = scores.ptr<float>();
+        v[6 * 4] = v[6 * 4 + 1] = v[4 * 4 + 2] = v[7 * 4 + 3] = .4f;
+        v[6 * 4 + 1] = 0.f;
+        v[5 * 4 + 1] = .4f; // injured must still meet .6
+        auto low = decodeModelOutput(scores, image, bgr.size(), scoped, 1000000);
+        assert(low.size() == 1 && low[0].label == "core_supply");
+        low[0].track_id = 9;
+        assert(makePushObservation(low, 1050000, true, .6f, -1, {}, false, false, false, "", .4f).target_valid);
+        assert(!makePushObservation(low, 1050000, true, .6f, -1, {}, false, false, false, "", .6f).target_valid);
+        for (int pitch : {-3000, 0, 2000}) {
+            PixelSelector selector;
+            PixelSelection selected;
+            const float threshold = scoped.coreConfidenceAtPitch(pitch, true, true);
+            for (int i = 0; i < 4; ++i) {
+                const uint64_t stamp = 1000000 + i * 30000;
+                low[0].timestamp_us = stamp;
+                selected = selector.update(low, bgr.size(), pitch, true, stamp, true,
+                                           .6f, {}, "", 0.f, threshold);
+            }
+            assert(selected.locked == (pitch == 2000));
+        }
+        v[7 * 4 + 3] = .399f;
+        assert(decodeModelOutput(scores, image, bgr.size(), scoped, 1000000).empty());
+    }
     out[0].track_id = 1;
     out[1].track_id = 2;
     out[2].track_id = 3;
@@ -272,12 +312,27 @@ void poseTests() {
     only_left[1].valid = false;
     points = zoneHalvesToKeypoints(only_left, .5f);
     assert(points.size() == 2 && points[0].id == 0 && points[1].id == 3);
-    // Disagreeing divider corners (> 25% of half width apart) are dropped, not averaged.
+    // Disagreeing divider corners are dropped, not averaged.
     auto split = halves;
     split[1].keypoints[1] += cv::Point2f(200, 0);
     points = zoneHalvesToKeypoints(split, .5f);
     for (auto& k : points)
         assert(k.id != 1);
+    // Recorded shared divider predictions disagree despite high scores.
+    auto inconsistent = halves;
+    inconsistent[0].keypoints = {{{587,420},{519,533},{918,420},{1009,510}}};
+    inconsistent[1].keypoints = {{{873,420},{986,556},{1190,397},{1257,397}}};
+    inconsistent[1].confidence.fill(.95f);
+    points = zoneHalvesToKeypoints(inconsistent, .5f);
+    for (const auto& k : points)
+        assert(k.id != 1 && k.id != 4);
+    auto clipped = halves;
+    clipped[1].keypoints[3] = {1280, 400};
+    points = zoneHalvesToKeypoints(clipped, .5f, {1280, 720});
+    for (const auto& k : points) assert(k.id != 2);
+    clipped[0].keypoints[1] = {2, 400};
+    points = zoneHalvesToKeypoints(clipped, .5f, {1280, 720});
+    for (const auto& k : points) assert(k.id != 0 && k.id != 2);
     // Nothing above threshold -> empty, still a valid call.
     assert(!decodeZonePose(raw, image, bgr.size(), .95f)[0].valid);
     bool failed = false;
@@ -293,6 +348,43 @@ void poseTests() {
     halves = decodeZonePose(raw, image, bgr.size(), .25f);
     assert(halves[0].valid && std::abs(halves[0].score - .6f) < 1e-6);
 }
+void deliveryBoxContainmentTests() {
+    const uint64_t now = 1000000;
+    SegDetection z, d;
+    z.label = "blue_safe_zone"; z.box = {200,100,600,500};
+    z.confidence = .9f; z.timestamp_us = now;
+    d = z; d.label = "ordinary_supply"; d.box = {300,200,100,100};
+    PushObservation in;
+    const auto apply = [&](std::vector<SegDetection> ds, const char* team = "blue",
+                           bool stable = true, uint64_t at = 1000000) {
+        applyDeliveryBoxEvidence(in, ds, team, {1280,720}, stable, at, .6f);
+        return in.delivery_observed;
+    };
+    assert(apply({z,d}) && in.delivery_box_count == 1);
+    assert(!in.geometry_valid && !in.zone_valid && !in.path_safe);
+    assert(apply({z,z,d}) && in.delivery_box_count == 1);
+    d.box = z.box; assert(apply({z,d})); // Equality of edges is containment.
+    for (cv::Rect box : {cv::Rect{190,200,100,100}, {710,200,100,100},
+                         {300,90,100,100}, {300,510,100,100}}) {
+        d.box = box; assert(!apply({z,d})); // Partial overlap is insufficient.
+    }
+    d.box = {300,200,100,100};
+    assert(!apply({z,d}, "red"));
+    z.label = "red_safe_zone"; assert(apply({z,d}, "red"));
+    z.label = "blue_safe_zone";
+    assert(!apply({z,d}, "blue", false));
+    assert(!apply({z,d}, "blue", true, now + 200001));
+    assert(!apply({z,d}, "blue", true, now - 1));
+    for (const char* label : {"core_supply", "injured_person", "dangerous_object"}) {
+        d.label = label; assert(!apply({z,d}));
+    }
+    d.label = "ordinary_supply"; d.timestamp_us = now - 1;
+    assert(!apply({z,d})); // Mixed image timestamps do not establish containment.
+    d.timestamp_us = now; d.confidence = .59f; assert(!apply({z,d}));
+    d.confidence = .9f; d.box = {-1,200,100,100}; assert(!apply({z,d}));
+    assert(!apply({}) && in.delivery_box_count == 0 && !in.delivery_box_sample_us);
+}
+
 void zoneDetectionSightTests() {
     const uint64_t now = 1000000;
     const cv::Mat k = (cv::Mat_<double>(3,3) << 800,0,640, 0,800,360, 0,0,1);
@@ -308,6 +400,8 @@ void zoneDetectionSightTests() {
         return applyZoneDetectionSight(in,detections,team,{1280,720},k,-3000,stable,at,.5f);
     };
     assert(sight({blue,red,cargo}));
+    assert(in.zone_sight_box == blue.box && in.zone_sight_image_size == cv::Size(1280,720));
+    assert(in.zone_sight_sample_us == blue.timestamp_us);
     assert(in.zone_sight_valid && !in.zone_sight_enemy && !in.enemy_zone_seen &&
            in.zone_sight_bearing > 0); // Blue team chooses lower-confidence blue at left.
     assert(!in.geometry_valid && !in.zone_valid && !in.zone_identity_verified &&
@@ -318,6 +412,7 @@ void zoneDetectionSightTests() {
     assert(in.zone_sight_enemy && in.enemy_zone_seen);
     assert(sight({blue},"red") && in.zone_sight_enemy);
     assert(!sight({cargo}) && !in.zone_sight_valid);
+    assert(in.zone_sight_box.empty() && in.zone_sight_sample_us == 0);
     assert(!sight({blue,red},"blue",false) && !in.zone_sight_valid);
     assert(!sight({blue,red},"blue",true,now+200001) && !in.zone_sight_valid);
     assert(!sight({blue},"blue",true,now-1));
@@ -335,9 +430,53 @@ void zoneDetectionSightTests() {
             assert(!makePushObservation({blue,red},now,first,.5f,-1,{},search).target_valid);
     assert(makePushObservation({cargo,blue,red},now,false,.5f).target_id==1);
 }
+void imageSubzoneViewTests() {
+    ZoneGeometry g;g.id="view-test";g.label="blue_safe_zone";g.confirmed=true;
+    g.width_m=g.landmark_width_m=.6f;g.depth_m=g.landmark_depth_m=.3f;
+    PushObservation in;in.now_us=100000;
+    ZoneHalves halves;
+    for(int i=0;i<2;++i) {
+        auto& h=halves[i];h.valid=true;h.score=.95f;h.confidence.fill(.95f);
+        const float x=340+300*i;
+        h.keypoints={cv::Point2f{x,200},cv::Point2f{x,500},
+                     cv::Point2f{x+300,200},cv::Point2f{x+300,500}};
+    }
+    auto step=[&](bool stable=true,bool own=true) {
+        applySubzoneView(in,halves,g,{1280,720},stable,own,-.15f,.15f,.5f,in.now_us);
+    };
+    step();
+    assert(in.supply_view.valid && in.injured_view.valid);
+    assert(!in.supply_view.inside && !in.injured_view.inside);
+    assert(in.supply_view.error_fraction<0 && in.injured_view.error_fraction>0);
+    for(auto& h:halves)for(auto& p:h.keypoints)p.x+=150;
+    step();assert(in.supply_view.inside && std::abs(in.supply_view.error_fraction)<1e-5f);
+    halves[1].valid=false;step();
+    assert(in.supply_view.valid && !in.injured_view.valid); // missing other half does not block
+    halves[1].valid=true;
+    for(auto& h:halves)for(auto& p:h.keypoints)p.x-=300;
+    step();assert(in.injured_view.inside && std::abs(in.injured_view.error_fraction)<1e-5f);
+    step(false);assert(!in.injured_view.valid);
+    step(true,false);assert(!in.injured_view.valid);
+    // Edge slope comes from the raw connected corners, independent of any pose.
+    for(float slope : {-.12f,0.f,.12f}) {
+        auto& h=halves[1];
+        h.keypoints={cv::Point2f{490,200},cv::Point2f{490,500},
+                     cv::Point2f{790,200+300*slope},cv::Point2f{790,500+300*slope}};
+        step();assert(in.injured_view.valid);
+        assert(std::abs(in.injured_view.edge_slope-slope)<1e-5f);
+    }
+    auto good=halves[1];
+    std::swap(halves[1].keypoints[0],halves[1].keypoints[2]);
+    step();assert(!in.injured_view.valid);
+    halves[1]=good;
+    halves[1].confidence[3]=.1f;step();assert(!in.injured_view.valid);
+    std::cout<<"PASS uncalibrated selected-subzone image-centreline evidence"<<std::endl;
+}
 } // namespace
 int main() {
+    imageSubzoneViewTests();
     detectorTests();
+    deliveryBoxContainmentTests();
     zoneDetectionSightTests();
     poseTests();
     std::cout << "Vision tensor, RGB, class mapping, NMS, coordinates, pose decode and fail-closed "

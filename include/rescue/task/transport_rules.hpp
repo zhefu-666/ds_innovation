@@ -60,6 +60,13 @@ const char* verdictName(RuleVerdict verdict);
 
 // Is this set legal to carry in one trip (planned corridor set or verified held set)?
 RuleVerdict checkTrip(const Inventory& set, bool first_ordinary_delivered);
+// Best legal load from the observed cargo. Equal scores favour one injured person.
+struct TripChoice {
+    Inventory inventory;
+    int supply_score = 0, injured_score = 0;
+    int score() const { return inventory.injured ? injured_score : supply_score; }
+};
+TripChoice chooseTrip(const Inventory& available, bool first_ordinary_delivered);
 // Before the rush: everything the gripper frame would sweep must form a legal trip.
 // The first trip and injured trips additionally require an occlusion-free corridor,
 // because a hidden core/injured object would make the trip illegal.

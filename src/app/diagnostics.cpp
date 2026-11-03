@@ -1,6 +1,7 @@
 #include "rescue/app/diagnostics.hpp"
 #include <opencv2/imgproc.hpp>
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 
 namespace rescue {
@@ -43,13 +44,17 @@ void drawZoneProjection(cv::Mat& frame,
                         const SensorState& sensor,
                         float confidence,
                         bool mapping_valid,
-                        const std::string& geometry_reason) {
+                        const std::string& geometry_reason,
+                        const ZoneEstimate& accepted,
+                        const ZoneHalves& raw_halves,
+                        const cv::Mat& pnp_rvec,
+                        const cv::Mat& pnp_tvec) {
     const cv::Scalar cyan(255, 255, 0), orange(0, 165, 255);
     const auto status = [&](const std::string& detail) {
         cv::rectangle(
             frame, {0, frame.rows - 66}, {frame.cols - 1, frame.rows - 1}, {15, 15, 15}, -1);
         cv::putText(frame,
-                    "MAGENTA: model   CYAN: geometry fit   ORANGE: point error",
+                    "MAGENTA: model   CYAN: accepted geometry   ORANGE X: excluded",
                     {10, frame.rows - 43},
                     cv::FONT_HERSHEY_SIMPLEX,
                     .6,
@@ -57,57 +62,59 @@ void drawZoneProjection(cv::Mat& frame,
                     1);
         cv::putText(frame, detail, {10, frame.rows - 17}, cv::FONT_HERSHEY_SIMPLEX, .55, orange, 1);
     };
+    const auto inlier = [&](int id) {
+        return accepted.valid && accepted.source != ZoneEstimate::Source::PREDICTED &&
+            std::find(accepted.inlier_ids.begin(), accepted.inlier_ids.end(), id) !=
+                accepted.inlier_ids.end();
+    };
+    const int ids[2][4] = {{3, 0, 4, 1}, {4, 1, 5, 2}};
+    int excluded = 0;
+    for (int h = 0; h < 2; ++h) {
+        if (!raw_halves[h].valid) continue;
+        for (int k = 0; k < 4; ++k) {
+            const auto p = raw_halves[h].keypoints[k];
+            if (raw_halves[h].confidence[k] < confidence ||
+                !std::isfinite(p.x) || !std::isfinite(p.y)) continue;
+            if (!inlier(ids[h][k])) {
+                ++excluded;
+                const cv::Point2f shown(std::clamp(p.x, 4.f, float(frame.cols - 5)),
+                                        std::clamp(p.y, 4.f, float(frame.rows - 70)));
+                cv::drawMarker(frame, shown, orange, cv::MARKER_TILTED_CROSS, 14, 2);
+            }
+        }
+    }
+    if (!accepted.valid || accepted.source == ZoneEstimate::Source::PREDICTED ||
+        accepted.observed_us != accepted.timestamp_us) {
+        status("No accepted current-frame geometry | " + geometry_reason +
+               " | excluded=" + std::to_string(excluded));
+        return;
+    }
     cv::Matx34d camera;
     if (!mapping_valid || !geometry.valid() ||
         !calibration.cameraFromGround(pitch, sensor, camera)) {
         status("Projection unavailable | strict: " + geometry_reason);
         return;
     }
+    const bool pnp = !pnp_rvec.empty() && !pnp_tvec.empty();
+    cv::Mat pnp_rotation;
+    if (pnp) cv::Rodrigues(pnp_rvec,pnp_rotation);
     const auto objects = geometry.objectPoints();
-    std::vector<cv::Point2d> zone, body;
     std::vector<ZoneKeypoint> observed;
-    for (const auto& k : points) {
-        if (!k.visible || k.id < 0 || k.id >= 6 || k.confidence < confidence)
-            continue;
-        cv::Point2f xy;
-        if (!calibration.pixelToPlane(k.pixel, pitch, geometry.landmark_height_m, xy, &sensor))
-            continue;
-        zone.emplace_back(objects[k.id].x, objects[k.id].y);
-        body.emplace_back(xy.x, xy.y);
-        observed.push_back(k);
-    }
-    if (zone.size() < 3) {
-        status("Projection needs >=3 mapped points | strict: " + geometry_reason);
-        return;
-    }
-    // Fit only ground translation/yaw, retaining measured scale, height and camera extrinsics.
-    // Use all visible points without rejecting bad ones, so inconsistencies remain visible.
-    cv::Point2d zm{}, bm{};
-    for (size_t i = 0; i < zone.size(); ++i) {
-        zm += zone[i];
-        bm += body[i];
-    }
-    zm *= 1.0 / zone.size();
-    bm *= 1.0 / body.size();
-    double dot = 0, cross = 0;
-    for (size_t i = 0; i < zone.size(); ++i) {
-        const auto z = zone[i] - zm, b = body[i] - bm;
-        dot += z.dot(b);
-        cross += z.x * b.y - z.y * b.x;
-    }
-    if (std::hypot(dot, cross) < 1e-10) {
-        status("Projection fit degenerate | strict: " + geometry_reason);
-        return;
-    }
-    const double yaw = std::atan2(cross, dot), c = std::cos(yaw), sn = std::sin(yaw);
+    for (const auto& k : points)
+        if (inlier(k.id))
+            observed.push_back(k);
     const auto transform = [&](double x, double y) {
-        return cv::Point2d(bm.x + c * (x - zm.x) - sn * (y - zm.y),
-                           bm.y + sn * (x - zm.x) + c * (y - zm.y));
+        const auto p = accepted.zoneToBody({float(x), float(y)});
+        return cv::Point2d(p.x, p.y);
     };
     std::vector<cv::Point3d> camera_points;
     for (const auto& o : objects) {
         const auto xy = transform(o.x, o.y);
-        const auto q = camera * cv::Vec4d(xy.x, xy.y, geometry.landmark_height_m, 1);
+        auto q = camera * cv::Vec4d(xy.x, xy.y, geometry.landmark_height_m, 1);
+        if (pnp) {
+            const cv::Mat v=pnp_rotation*(cv::Mat_<double>(3,1)<<o.x,o.y,o.z)+pnp_tvec;
+            q={v.at<double>(0),v.at<double>(1),v.at<double>(2)};
+        }
         if (!std::isfinite(q[2]) || q[2] <= 0) {
             status("Projection behind camera | strict: " + geometry_reason);
             return;
@@ -152,11 +159,11 @@ void drawZoneProjection(cv::Mat& frame,
     char metrics[150];
     std::snprintf(metrics,
                   sizeof(metrics),
-                  "DIAGNOSTIC FIT (not validation) n=%zu RMS=%.1fpx max=%.1fpx | strict: ",
+                  "ACCEPTED geometry n=%zu RMS=%.1fpx max=%.1fpx | ",
                   observed.size(),
-                  std::sqrt(sum / observed.size()),
+                  observed.empty() ? 0. : std::sqrt(sum / observed.size()),
                   maximum);
-    status(std::string(metrics) + geometry_reason);
+    status(std::string(metrics) + (pnp ? "PnP | " : "ground | ") + geometry_reason);
 }
 
 void printZone(const ZoneHalves& halves, const std::vector<ZoneKeypoint>& points) {

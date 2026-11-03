@@ -60,7 +60,7 @@ ZoneHalves decodeZonePose(const cv::Mat& output,
     }
     return out;
 }
-std::vector<ZoneKeypoint> zoneHalvesToKeypoints(const ZoneHalves& h, float threshold) {
+std::vector<ZoneKeypoint> zoneHalvesToKeypoints(const ZoneHalves& h, float threshold, cv::Size image_size) {
     enum {
         FAR_LEFT = 0,
         NEAR_LEFT = 1,
@@ -70,14 +70,20 @@ std::vector<ZoneKeypoint> zoneHalvesToKeypoints(const ZoneHalves& h, float thres
     const auto &L = h[0], &R = h[1];
     std::vector<ZoneKeypoint> out;
     const auto seen = [&](const ZoneHalf& half, int k) {
-        return half.valid && half.confidence[k] >= threshold;
+        const auto p = half.keypoints[k];
+        const bool inside = image_size.empty() ||
+            (p.x > 2 && p.y > 2 && p.x < image_size.width - 2 &&
+             p.y < image_size.height - 2);
+        return half.valid && std::isfinite(half.confidence[k]) &&
+               half.confidence[k] >= threshold && std::isfinite(p.x) &&
+               std::isfinite(p.y) && inside;
     };
     const auto single = [&](int id, const ZoneHalf& half, int k) {
         if (seen(half, k))
             out.push_back({id, half.keypoints[k], half.confidence[k], true});
     };
     // Divider corners from the two halves mark the same physical divider, so they
-    // must be close relative to the half width (divider << 330 mm half width).
+    // must agree within 5% of a half width, capped at 12 original-image pixels.
     const auto divider = [&](int id, int left_k, int left_outer, int right_k, int right_outer) {
         if (!seen(L, left_k) || !seen(R, right_k))
             return;
@@ -87,7 +93,7 @@ std::vector<ZoneKeypoint> zoneHalvesToKeypoints(const ZoneHalves& h, float thres
             span = std::max(span, float(cv::norm(a - L.keypoints[left_outer])));
         if (seen(R, right_outer))
             span = std::max(span, float(cv::norm(b - R.keypoints[right_outer])));
-        if (span > 0 && cv::norm(a - b) > .25f * span)
+        if (span <= 0 || cv::norm(a - b) > std::min(12.f, .05f * span))
             return;
         out.push_back(
             {id, (a + b) * .5f, std::min(L.confidence[left_k], R.confidence[right_k]), true});

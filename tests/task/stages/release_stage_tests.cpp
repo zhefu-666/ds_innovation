@@ -50,6 +50,34 @@ void expect(const ReleaseRetreatResult& result,
     CHECK(result.reverse == reverse);
 }
 
+void jawCarryRetreatsFifteenCentimetres() {
+    for (bool assume : {false, true}) {
+        Fixture f;
+        f.tuning.pixel_grasp_enabled = true;
+        f.tuning.field_carry = !assume;
+        f.tuning.assume_all_safe = assume;
+        f.context.motion_ratio = 1;
+        f.context.mouth_clear = true; // Must still complete the requested retreat.
+        f.context.travel_m = .149f;
+        expect(f.update(), ReleaseRetreatOutcome::Continue, "jaw_back_out_015m", true);
+        f.context.observed_zone = false;
+        expect(f.update(), ReleaseRetreatOutcome::Continue, "jaw_back_out_015m", true);
+        f.context.travel_m = .15f;
+        expect(f.update(), ReleaseRetreatOutcome::VerifyDelivery, "jaw_backed_out_015m");
+        for (float ratio : {1.f, 4.f, 8.f}) {
+            f.context.motion_ratio = ratio;
+            f.context.travel_m = .149f;
+            expect(f.update(), ReleaseRetreatOutcome::Continue, "jaw_back_out_015m", true);
+            f.context.travel_m = .15f;
+            expect(f.update(), ReleaseRetreatOutcome::VerifyDelivery, "jaw_backed_out_015m");
+        }
+        f.context.travel_m = 0;
+        expect(f.update(f.tuning.retreat_budget_us + 1), ReleaseRetreatOutcome::Fault,
+               "retreat_blocked");
+        expect(f.update(18000000), ReleaseRetreatOutcome::Fault, "retreat_blocked");
+    }
+}
+
 void strictRetreatUsesObservedMouthClearance() {
     Fixture missing;
     missing.context.observed_zone = false;
@@ -426,6 +454,7 @@ void pauseKeepsPrepushHistoryWhileCallerResetsElapsedAndTravel() {
 
 int main() {
     try {
+        jawCarryRetreatsFifteenCentimetres();
         strictRetreatUsesObservedMouthClearance();
         carryModesAllowBoundedBlindRetreat();
         blindRetreatRemainsBlindAfterAnObservationReturns();

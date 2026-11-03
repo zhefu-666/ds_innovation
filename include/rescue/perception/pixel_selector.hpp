@@ -2,6 +2,8 @@
 #include "rescue/perception/perception_adapter.hpp"
 #include "rescue/task/transport_rules.hpp"
 #include "rescue/perception/row_selector.hpp"
+#include "rescue/perception/capture_monitor.hpp"
+#include <sstream>
 #include <map>
 #include <limits>
 #include <set>
@@ -12,6 +14,8 @@ struct PixelSelection {
     std::string mode = "none", reason = "no_candidate";
     bool locked = false;
     int held_id = -1, released_id = -1, rebound_from = -1;
+    int reselected_from = -1; // A different object; never a same-object tracker rebind.
+    std::string candidates;
     std::string event = "none";
     bool row_split = false; // row mode: the locked ordinary block has an injured/dangerous/core
                             // piece in its frame footprint (to be separated, not skipped)
@@ -32,8 +36,10 @@ class PixelSelector {
     uint64_t last_ = 0, last_capture_ = 0;
     uint64_t challenger_us_ = 0;
     int task_id_ = -1;
+    int near_challenger_ = -1, near_count_ = 0, reselected_from_ = -1;
     bool split_selection_ = false;
     int split_candidate_ = -1;
+    Inventory keep_inventory_;
     PushState observation_state_ = PushState::WAIT_START;
     uint64_t missing_since_us_ = 0, world_us_ = 0;
     std::string locked_label_;
@@ -115,6 +121,8 @@ class PixelSelector {
     RowParams row_;
 
   public:
+    // Apply only to target selection. All detections still reach inventory/safety checks.
+    void setCaptureLoad(const Inventory& inventory) { keep_inventory_ = inventory; }
     // Row mode: with a left-right row of >= row.min_n blocks in view the lock goes to the middle
     // block whose frame footprint is clean, not the largest box.
     void setRow(bool on, const RowParams& p = {}) {
@@ -142,6 +150,8 @@ class PixelSelector {
             locked_label_ = label;
         }
         task_id_ = id;
+        if (id == locked_)
+            reselected_from_ = -1;
     }
     // End the old selection episode once on entry, then accumulate fresh observations.
     // A task without a cargo lock must not erase the independent visual confirmation.
@@ -161,6 +171,8 @@ class PixelSelector {
         split_candidate_ = requested ? candidate : -1;
     }
     void clearComparison() {
+        near_challenger_ = -1;
+        near_count_ = 0;
         history_.clear();
         challenger_ = -1;
         count_ = 0;
@@ -175,6 +187,9 @@ class PixelSelector {
         last_capture_ = 0;
         challenger_us_ = 0;
         task_id_ = -1;
+        near_challenger_ = -1;
+        near_count_ = 0;
+        reselected_from_ = -1;
         split_selection_ = false;
         split_candidate_ = -1;
         missing_since_us_ = world_us_ = 0;
@@ -193,9 +208,13 @@ class PixelSelector {
                           float confidence,
                           const std::vector<int>& rejected = {},
                           const std::string& prefer_label = "",
-                          float heading = std::numeric_limits<float>::quiet_NaN()) {
+                          float heading = std::numeric_limits<float>::quiet_NaN(),
+                          float ui140_core_confidence = 1.f,
+                          const CaptureConfig* near_config = nullptr,
+                          bool allow_near_reselect = false) {
         PixelSelection out;
         out.held_id = locked_;
+        out.reselected_from = reselected_from_;
         if (task_id_ >= 0 && locked_ < 0) {
             out.released_id = task_id_;
             out.reason = "lock_released";
@@ -234,6 +253,18 @@ class PixelSelector {
         uint64_t capture_stamp = 0;
         bool masks = false, boxes = false;
         std::map<int, std::pair<double, std::string>> values;
+        const bool near_view =
+            near_config && near_config->pixel_grasp_enabled &&
+            near_config->pixel_center_membership &&
+            std::any_of(near_config->grasp_center_ranges.begin(),
+                        near_config->grasp_center_ranges.end(),
+                        [&](const auto& range) {
+                            return size == cv::Size(range.image_width_px, range.image_height_px) &&
+                                   std::abs(int(pitch) - int(range.pitch_cdeg)) <=
+                                       near_config->pitch_tolerance_cdeg;
+                        });
+        std::map<int, int> priority; // 0: complete inside, 1: complete outside, 2: unselectable.
+        std::ostringstream candidates;
         std::set<int> geo_ok;
         std::map<int, cv::Point2f> centers;
         std::set<int> vetoed; // explicitly rejected ids release the lock at once; only mere absence
@@ -242,14 +273,16 @@ class PixelSelector {
             vetoed.insert(id);
         for (const auto& d : ds) {
             if (d.track_id == locked_ &&
-                (d.label != locked_label_ || !targetSelectable(d.label, first)))
+                (d.label != locked_label_ || !targetSelectable(d.label, first) ||
+                 (keep_inventory_.total() && !keep_inventory_.count(targetKind(d.label)))))
                 vetoed.insert(d.track_id);
             if (d.injured_upright_rejected) {
                 vetoed.insert(d.track_id);
                 continue;
             } // an on-end injured block never competes for the lock
             if (d.track_id < 0 || !targetSelectable(d.label, first) ||
-                !std::isfinite(d.confidence) || d.confidence < confidence || !d.timestamp_us ||
+                (keep_inventory_.total() && !keep_inventory_.count(targetKind(d.label))) ||
+                !std::isfinite(d.confidence) || d.confidence < (d.label == "core_supply" ? std::min(confidence, ui140_core_confidence) : confidence) || !d.timestamp_us ||
                 now < d.timestamp_us || now - d.timestamp_us > 200000 || d.box.width <= 0 ||
                 d.box.height <= 0 ||
                 std::find(rejected.begin(), rejected.end(), d.track_id) != rejected.end())
@@ -276,9 +309,37 @@ class PixelSelector {
                     geo_ok.insert(d.track_id);
             }
         }
+        if (near_view) {
+            for (const auto& d : ds) {
+                if (!values.count(d.track_id))
+                    continue;
+                const auto range =
+                    std::find_if(near_config->grasp_center_ranges.begin(),
+                                 near_config->grasp_center_ranges.end(),
+                                 [&](const auto& r) {
+                                     return r.label == d.label &&
+                                            size == cv::Size(r.image_width_px, r.image_height_px) &&
+                                            std::abs(int(pitch) - int(r.pitch_cdeg)) <=
+                                                near_config->pitch_tolerance_cdeg;
+                                 });
+                const bool calibrated = range != near_config->grasp_center_ranges.end();
+                const bool complete = captureBoxComplete(d.box, size);
+                const bool inside = calibrated && range->containsCenter(d.box);
+                const int rank = calibrated && complete ? (inside ? 0 : 1) : 2;
+                priority[d.track_id] = rank;
+                candidates << " id=" << d.track_id << ":inside=" << inside
+                           << ",complete=" << complete << ",priority=" << rank
+                           << ",area=" << d.box.area() << ",reason="
+                           << (!calibrated ? "uncalibrated"
+                               : !complete ? "image_clipped"
+                               : inside    ? "complete_inside"
+                                           : "complete_outside");
+            }
+            out.candidates = candidates.str();
+        }
         if (split_selection_) {
             for (auto it = values.begin(); it != values.end();)
-                if (it->first != split_candidate_ || it->second.second != "ordinary_supply")
+                if (it->first != split_candidate_)
                     it = values.erase(it);
                 else
                     ++it;
@@ -296,14 +357,24 @@ class PixelSelector {
                 else
                     ++it;
         }
+        if (near_view) {
+            if (locked_ < 0) {
+                int rank = 2;
+                for (const auto& [id, v] : values)
+                    rank = std::min(rank, priority[id]);
+                for (auto it = values.begin(); it != values.end();)
+                    if (rank == 2 || priority[it->first] != rank)
+                        it = values.erase(it);
+                    else
+                        ++it;
+            }
+        }
         // A larger box without usable ground contact (e.g. clipped at the image edge after a pitch
         // change) must not out-rank a measurable one: the task could never approach it.
-        if (locked_ < 0 && std::any_of(
-                               values.begin(),
-                               values.end(),
-                               [&](const auto& kv) {
-                                   return geo_ok.count(kv.first) > 0;
-                               })) {
+        if (!near_view && locked_ < 0 &&
+            std::any_of(values.begin(), values.end(), [&](const auto& kv) {
+                return geo_ok.count(kv.first) > 0;
+            })) {
             for (auto it = values.begin(); it != values.end();)
                 if (!geo_ok.count(it->first))
                     it = values.erase(it);
@@ -372,6 +443,7 @@ class PixelSelector {
         if (locked_ >= 0 && view_changed_)
             lock_absent = true; // Even the same tracker ID must be re-observed in a new view.
         int rebound = -1;
+        bool continuous_rebind = false;
         if (lock_absent) {
             if (!missing_since_us_)
                 missing_since_us_ = now;
@@ -394,6 +466,16 @@ class PixelSelector {
                     rebound = d.track_id;
                     ++matches;
                 }
+            }
+            // During RUSH, a unique, strongly overlapping same-view detection is
+            // the current physical target under a new tracker ID, not a new selection.
+            if (matches == 1 && observation_state_ == PushState::RUSH && !view_changed_) {
+                for (const auto& d : ds)
+                    if (d.track_id == rebound) {
+                        const double overlap = double((d.box & locked_box_).area());
+                        const double total = double(d.box.area()) + locked_box_.area() - overlap;
+                        continuous_rebind = total > 0 && overlap / total >= .6;
+                    }
             }
             if (matches != 1) {
                 challenger_ = -1;
@@ -422,10 +504,42 @@ class PixelSelector {
         // A fresh acquisition prefers the least crowded comparable candidate: a block whose
         // footprint would swallow an injured/dangerous piece or a third supply is vetoed later
         // anyway, so do not drive at it first.
+        // A new inside candidate may replace an outside/clipped lock only at an
+        // acknowledged open-frame stop, after three distinct fresh observations.
+        int near_pick = -1;
+        if (near_view && allow_near_reselect && locked_ >= 0 && !view_changed_ &&
+            values.count(locked_)) {
+            for (const auto& [id, v] : values) {
+                if (priority[id] >= priority[locked_] || priority[id] >= 2)
+                    continue;
+                if (near_pick < 0 || priority[id] < priority[near_pick] ||
+                    (priority[id] == priority[near_pick] &&
+                     history_[id].value > history_[near_pick].value))
+                    near_pick = id;
+            }
+        }
+        if (near_pick < 0) {
+            near_challenger_ = -1;
+            near_count_ = 0;
+        } else {
+            if (near_challenger_ != near_pick) {
+                near_challenger_ = near_pick;
+                near_count_ = 0;
+            }
+            if (++near_count_ >= 3) {
+                reselected_from_ = locked_;
+                out.reselected_from = locked_;
+                out.event = "near_target_reselected";
+                locked_ = near_pick;
+                locked_label_ = values[near_pick].second;
+                challenger_ = near_challenger_ = -1;
+                count_ = near_count_ = 0;
+            }
+        }
         int row_pick = -1;
         std::vector<int> row_split_ids;
-        if (row_on_) {
-            const auto rp = RowSelector::pick(ds, now, first, confidence, locked_, row_);
+        if (row_on_ && !near_view) {
+            const auto rp = RowSelector::pick(ds, now, first, confidence, locked_, row_, ui140_core_confidence);
             out.row = "seq=" + rp.seq + " n=" + std::to_string(rp.n) +
                       " idx=" + std::to_string(rp.index) + " id=" + std::to_string(rp.id) + " " +
                       rp.reason;
@@ -476,7 +590,7 @@ class PixelSelector {
         }
         // For the first ordinary trip, a fore/aft pair starts at the block nearer
         // the chassis. Image layout chooses a target, never permission to split.
-        if (!first && locked_ < 0 && values.size() == 2 && ds.size() == 2) {
+        if (!near_view && !first && locked_ < 0 && values.size() == 2 && ds.size() == 2) {
             auto a = values.begin(), b = std::next(a);
             if (a->second.second == "ordinary_supply" && b->second.second == "ordinary_supply") {
                 const auto delta = centers[a->first] - centers[b->first];
@@ -503,7 +617,7 @@ class PixelSelector {
             if (centers.count(best))
                 challenger_center_ = centers[best];
             challenger_us_ = now;
-            if (++count_ >= 3) {
+            if (++count_ >= 3 || continuous_rebind) {
                 out.rebound_from = locked_;
                 out.event = locked_ < 0     ? "target_acquired"
                             : view_changed_ ? "view_reacquired"
@@ -523,10 +637,12 @@ class PixelSelector {
                           (!lock_absent || out.rebound_from >= 0);
         out.locked = held;
         out.held_id = locked_;
-        if (held && task_id_ >= 0 && task_id_ != locked_)
+        if (held && task_id_ >= 0 && task_id_ != locked_ && reselected_from_ < 0)
             out.rebound_from = task_id_;
         if (held && out.event == "none")
-            out.event = out.rebound_from >= 0 ? "await_task_rebind" : "target_held";
+            out.event = reselected_from_ >= 0   ? "await_near_reselection"
+                        : out.rebound_from >= 0 ? "await_task_rebind"
+                                                : "target_held";
         out.id = held ? locked_ : -1;
         out.row_split = held && std::find(row_split_ids.begin(), row_split_ids.end(), locked_) !=
                                     row_split_ids.end();

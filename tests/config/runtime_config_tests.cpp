@@ -64,6 +64,17 @@ struct TemporaryCalibration {
 
 int main() {
     assert(Config{}.single_phase.empty());
+    assert(!Config{}.capture_after_first);
+    assert(parse({"test", "--phase", "capture", "--capture-after-first"}).capture_after_first);
+    assert(!parse({"test", "--phase", "capture"}).capture_after_first);
+    for (const char* phase : {"", "startup", "search", "transport"}) {
+        bool rejected = false;
+        try {
+            if (*phase) parse({"test", "--capture-after-first", "--phase", phase});
+            else parse({"test", "--capture-after-first"});
+        } catch (const std::exception&) { rejected = true; }
+        assert(rejected);
+    }
     for (const char* phase : {"startup", "search", "capture", "transport"})
         assert(parse({"test", "--phase", phase}).single_phase == phase);
     for (const auto& args : {std::vector<const char*>{"test", "--phase", "invalid"},
@@ -75,11 +86,19 @@ int main() {
         catch (const std::exception&) { rejected = true; }
         assert(rejected);
     }
+    assert(parse({"test", "--start-zone", "3"}).start_zone == 3);
+    for (const char* zone : {"0", "5", "2.5"}) {
+        bool rejected = false;
+        try { parse({"test", "--start-zone", zone}); }
+        catch (const std::exception&) { rejected = true; }
+        assert(rejected);
+    }
     assert(!Config{}.step_phases);
     assert(parse({"test", "--step-phases"}).step_phases);
     std::ostringstream diagnostics;
     Config request;
     request.push_replay = "recorded.json";
+    request.start_zone = 3;
     request.startup_advance_ms = 5000;
     request.startup_speed_mps = .25f;
     request.turn_wz_rps = .7f;
@@ -96,13 +115,16 @@ int main() {
     request.push_replay.clear();
     auto field = resolveLegacyRuntimeConfig(request, diagnostics);
     assert(field.policy_name == "legacy_field_v1");
-    assert(field.task.startup_advance_us == 1250000 &&
-           close(field.task.startup_advance_speed, 1.f));
+    assert(field.task.start_zone == 3);
+    assert(field.task.startup_advance_us == 5000000 &&
+           close(field.task.startup_advance_speed, .25f));
     assert(field.request.startup_advance_ms == 5000 &&
            close(field.request.startup_speed_mps, .25f));
     assert(field.task.field_carry && field.task.field_rush && field.task.first_burst);
     assert(close(field.task.carry_speed, .05f) && close(field.task.enter_speed, .05f) &&
-           close(field.task.back_speed, .05f));
+           close(field.task.back_speed, .40f));
+    assert(close(field.task.transport_scan_wz, .90f) &&
+           close(field.task.transport_align_min_wz, .60f));
     assert(close(field.task.assume_repush_speed_gain, 0.f));
     assert(close(field.task.turn_wz, .55f) && close(field.task.rush_speed, .32f));
     assert(field.task.approach_limit_m == 8.f && field.task.retreat_limit_m == 4.f);
@@ -171,7 +193,7 @@ int main() {
     assert(measured.task.near_pitch_cdeg == 3500 && close(measured.task.mouth_y_m, .171f));
     assert(close(measured.task.hold_center_y_m, .13096f) && close(measured.load_half_width, .075f));
     assert(!measured.task.enable_search_cues && !measured.task.enable_short_push);
-    assert(measured.task.attempt_budget_us == 0 && measured.task.startup_advance_us == 500000);
+    assert(measured.task.attempt_budget_us == 0 && measured.task.startup_advance_us == 2000000);
     assert(close(measured.task.max_speed, .4f) && close(measured.task.approach_limit_m, 8.f));
     assert(measured.task_calibration_version == "synthetic-runtime-test");
     assert(measured.calibration_audit.status == "TEMP_ASSUMPTION_NOT_ACCEPTANCE" &&
@@ -202,7 +224,7 @@ int main() {
     assert(std::string(decoded["request"]["model_path"]) == field.request.model_path);
     assert(std::string(decoded["capture"]["mouth_y_m"]) == "+infinity");
     assert(std::string(decoded["task"]["blacklist_us"]) == "9007199254740993");
-    assert(double(decoded["startup"]["effective_advance_us"]) == 1250000);
+    assert(double(decoded["startup"]["effective_advance_us"]) == 5000000);
     assert(int(decoded["startup"]["requested_advance_ms"]) == 5000);
     assert(close(float(decoded["task"]["turn_wz"]), .55f));
     assert(json.str().find(".Inf") == std::string::npos &&

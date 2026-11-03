@@ -96,6 +96,55 @@ struct Fixture {
     }
 };
 
+void jawOrdinaryRequiresPostRetreatBoxContainment() {
+    for (bool assume : {false, true}) {
+        Fixture f;
+        f.field(assume);
+        f.tuning.pixel_grasp_enabled = true;
+        f.observation.sent_velocity_valid = true;
+        f.observation.delivery_observed = true;
+        f.observation.delivery_box_count = 1;
+        for (int i = 0; i < 5; ++i) {
+            auto elapsed = uint64_t(i + 1) * 100000;
+            f.observation.delivery_box_sample_us = f.clock_base + elapsed;
+            auto out = f.update(elapsed);
+            if (i < 3)
+                CHECK(out.outcome == DeliveryVerificationOutcome::Continue);
+            else {
+                CHECK(out.outcome == DeliveryVerificationOutcome::Complete);
+                CHECK(out.credited == 1 && out.visual && out.reason == "delivered_box_contained");
+                break;
+            }
+        }
+        for (int fault = 0; fault < 7; ++fault) {
+            Fixture bad;
+            bad.field(assume);
+            bad.tuning.pixel_grasp_enabled = true;
+            bad.observation.sent_velocity_valid = true;
+            bad.observation.delivery_observed = true;
+            bad.observation.delivery_box_count = 1;
+            bad.fixedCargo(); // Old geometric/assumed evidence must not override the box rule.
+            for (int i = 1; i <= 30; ++i) {
+                uint64_t elapsed = uint64_t(i) * 100000;
+                bad.observation.delivery_box_sample_us = bad.clock_base + elapsed;
+                if (fault == 0) bad.observation.delivery_observed = false;
+                if (fault == 1) bad.observation.delivery_box_count = 0;
+                if (fault == 2) bad.observation.delivery_box_sample_us = bad.clock_base - 1;
+                if (fault == 3) bad.observation.delivery_box_sample_us = bad.clock_base + 100000;
+                if (fault == 4) bad.observation.gripper_feedback_open = 0;
+                if (fault == 5) bad.observation.sent_vx_mps = -.02f;
+                if (fault == 6) bad.trip.ordinary = 2; // Insufficient contained cargo.
+                auto out = bad.update(elapsed);
+                CHECK(out.credited == 0 && !out.visual);
+                if (out.outcome == DeliveryVerificationOutcome::Complete) {
+                    CHECK(out.reason == "delivery_unverified");
+                    break;
+                }
+            }
+        }
+    }
+}
+
 void expect(const DeliveryVerificationResult& result,
             DeliveryVerificationOutcome outcome,
             int credited = 0,
@@ -607,6 +656,7 @@ void clearTripPreservesInventoryAndCargoTimestamp() {
 
 int main() {
     try {
+        jawOrdinaryRequiresPostRetreatBoxContainment();
         independentInventoryFramesAndStableWindow();
         changedDeltaRestartsTheStableWindow();
         inventoryEvidenceGatesResetConfirmation();

@@ -56,7 +56,7 @@ class RowSelector {
                         bool first,
                         float confidence,
                         int prefer_id = -1,
-                        const RowParams& P = {}) {
+                        const RowParams& P = {}, float ui140_core_confidence = 1.f) {
         RowPick out;
         const float floor = std::min(confidence, P.neighbour_min_conf);
         std::vector<const SegDetection*> u;
@@ -133,7 +133,7 @@ class RowSelector {
         Key pk{}, lk{};
         for (int r = 0; r < out.n; ++r) {
             const SegDetection& d = *u[best[r]];
-            if (d.injured_upright_rejected || d.confidence < confidence ||
+            if (d.injured_upright_rejected || d.confidence < (d.label == "core_supply" ? std::min(confidence, ui140_core_confidence) : confidence) ||
                 !targetSelectable(d.label, first))
                 continue;
             const bool ordinary = targetKind(d.label) == TargetKind::ORDINARY;
