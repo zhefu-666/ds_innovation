@@ -20,7 +20,8 @@ usage() {
 --run 开始前自动做同样的下位机只读查询；--frame keep 时记录/给定的编号与下位机编号不一致则拒绝。
 --frame open|close  开局固定先发反向动作、再发目标动作（open=先close再open；不看记录和下位机编号，不跳过），最终停在目标状态(开框0°/关框20°)，并记录已知方框状态；
 --frame keep        不动方框，沿用上次 open/close 的记录，或用 --known-frame-* 显式给出（transport 默认）；整场和 startup 默认 close。
---run 的顺序：静态检查 -> 方框 -> 相机回 UI 90°（内部 -30°） -> 再次静态检查 -> 启动主程序（180秒，--auto-run）。
+--auto-run          显式恢复预检通过后自动开始；默认提前准备并等待 A7 或 match_ctl.py start。
+--run 的顺序：静态检查 -> 方框 -> 相机预置 UI150 -> 再次静态检查 -> 初始化主程序 -> 就绪等待启动（发令后才计180秒）。
 TXT
   exit 2
 }
@@ -30,6 +31,7 @@ site_clear=0
 frame=close
 frame_explicit=0
 single_phase=
+auto_run=0
 capture_after_first=0
 cli_angle=
 cli_id=
@@ -42,6 +44,7 @@ step_phases=0
 while (( $# )); do
   case "$1" in
     --check) mode=check ;;
+    --auto-run) auto_run=1 ;;
     --step-phases) step_phases=1 ;;
     --capture-after-first) capture_after_first=1 ;;
     --phase) [[ $# -ge 2 ]] || usage; single_phase="$2"; shift ;;
@@ -138,11 +141,11 @@ PY
 
 build_args() {
   args=(--config config/project.json
-    --team blue --no-show --parallel-infer --async-capture
+    --no-show --parallel-infer --async-capture
     --controlled-empty-field --match-seconds 180
     --startup-advance-ms "$startup_ms" --startup-speed "$startup_speed" --scan-wz 0.6 --turn-wz .25
     --telemetry --telemetry-fps 30
-    --hardware --imu --imu-port /dev/ttyUSB0 --imu-baud 115200 --port /dev/ttyACM0 --baud 115200
+    --hardware --imu --imu-port /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0 --imu-baud 115200 --port /dev/ttyACM0 --baud 115200
     --known-frame-angle "$known_angle" --known-frame-id "$known_id")
   if (( gripper_profile )); then
     args+=(--task-calibration config/project.json#/frame/gripper
@@ -152,6 +155,7 @@ build_args() {
   [[ -z "$single_phase" ]] || args+=(--phase "$single_phase" --no-match-time-limit)
   (( step_phases )) && args+=(--step-phases --no-match-time-limit)
   (( capture_after_first )) && args+=(--capture-after-first)
+  if (( auto_run )); then args+=(--auto-run); else args+=(--start-on-a7); fi
   (( clear_neighbours )) && args+=(--clear-neighbours)
   return 0
 }
@@ -225,7 +229,7 @@ if [[ "$mode" == check ]]; then
   esac
   cam_known=()
   [[ -n "$known_angle" ]] && cam_known=(--known-frame-angle "$known_angle" --known-frame-id "$known_id")
-  [[ "$single_phase" == capture || "$single_phase" == transport ]] || demo_tool camera.sh --offset-deg -30 "${cam_known[@]}"
+  [[ "$single_phase" == capture || "$single_phase" == transport ]] || demo_tool camera.sh --offset-deg 30 "${cam_known[@]}"
   echo '[check] 完成：未打开设备。'
   exit 0
 fi
@@ -238,7 +242,7 @@ if [[ "$frame" == keep && "$known_id" != "$live_id" ]]; then
   exit 1
 fi
 [[ -c /dev/ttyACM0 ]] || { echo 'MCU 串口 /dev/ttyACM0 不存在；检查 MCU 供电/USB。' >&2; exit 1; }
-[[ -c /dev/ttyUSB0 ]] || { echo 'IMU 串口 /dev/ttyUSB0 不存在。' >&2; exit 1; }
+[[ -c /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0 ]] || { echo 'IMU 串口 /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0 不存在。' >&2; exit 1; }
 
 mkdir -p telemetry_logs
 run_log="telemetry_logs/match-main-$(date +%Y%m%d-%H%M%S)-$$.log"
@@ -261,7 +265,7 @@ esac
 frame_done=1
 cam_known=()
 [[ -n "$cli_angle" ]] && cam_known=(--known-frame-angle "$cli_angle" --known-frame-id "$cli_id")
-[[ "$single_phase" == capture || "$single_phase" == transport ]] || demo_tool camera.sh --offset-deg -30 --run --site-clear "${cam_known[@]}"
+[[ "$single_phase" == capture || "$single_phase" == transport ]] || demo_tool camera.sh --offset-deg 30 --run --site-clear "${cam_known[@]}"
 
 # 演示入口自己持有同一把启动锁，所以方框/相机动作结束后才能取锁。
 exec 9>/tmp/rescue-match-launch.lock
@@ -270,11 +274,10 @@ python3 tools/match/check_socket.py
 
 # 方框动作后状态记录已更新，用真实值再检查一次再启动。
 static_check
-args+=(--auto-run)
 
 source tools/match/telemetry_bridge.sh
 if [[ -n "$single_phase" ]]; then
-  echo "[PHASE_DIRECT] phase=$single_phase：直接执行所选阶段，完成或失败后停车退出。"
+  echo "[PHASE_DIRECT] phase=$single_phase：启动后执行所选阶段，完成或失败后停车退出。"
   if (( capture_after_first )); then
     echo "[PHASE_CAPTURE] capture_after_first=1：仅设置首个普通物资已送达的测试初态；仍需识别、通道/分堆和抓取核验。"
   fi
@@ -283,14 +286,18 @@ elif (( step_phases )); then
   echo '[PHASE_STEP] 已禁用180秒总限时；阶段预算和健康检查保留。status 查询，stop 暂停，finish 终止。'
 else
 cat <<'TXT'
-整场主程序：180 秒（超过 10 分钟自动停止），--auto-run 在实时预检通过后自动发 START；无 demo/assume 标志。
+整场主程序：提前准备后等待 A7 按键或 python3 tools/match/match_ctl.py start；发令后计180秒。
+--auto-run 显式选择预检通过后自动开始；无 demo/assume 标志。
 统一配置中的 frame.assume 与机械俯仰模型均为临时假设，结果不构成验收。
 Ctrl+C 或 match_ctl.py 可停止；零速发送以现场急停为准。
 TXT
-# 主程序整场只需 180 秒；超过 MATCH_MAX_RUN_S（默认 600 秒）仍未退出则发 SIGTERM（主程序会收尾停车），10 秒后仍在则 SIGKILL。
+# MATCH_MAX_RUN_S 为进程总时长；0表示不限。超时发SIGTERM收尾，10秒后仍在则SIGKILL。
 fi
-default_max_run_s=600
-(( step_phases )) && default_max_run_s=3600
+default_max_run_s=0 # 提前准备允许持续等待；比赛180秒从START开始。
+if (( auto_run )); then
+  default_max_run_s=600
+  (( step_phases )) && default_max_run_s=3600
+fi
 max_run_s=${MATCH_MAX_RUN_S:-$default_max_run_s}
 set +e
 start_s=$SECONDS

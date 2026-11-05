@@ -123,12 +123,12 @@ int main() {
     assert(field.task.field_carry && field.task.field_rush && field.task.first_burst);
     assert(close(field.task.carry_speed, .05f) && close(field.task.enter_speed, .05f) &&
            close(field.task.back_speed, .40f));
-    assert(close(field.task.transport_scan_wz, .90f) &&
+    assert(close(field.task.transport_scan_wz, .60f) &&
            close(field.task.transport_align_min_wz, .60f));
     assert(close(field.task.assume_repush_speed_gain, 0.f));
     assert(close(field.task.turn_wz, .55f) && close(field.task.rush_speed, .32f));
     assert(field.task.approach_limit_m == 8.f && field.task.retreat_limit_m == 4.f);
-    assert(field.ground_contact.accept_size_mismatch && field.ground_contact.use_silhouette);
+    assert(field.ground_contact.accept_size_mismatch);
     assert(field.match.duration_us == 180000000 && field.match.require_measured_progress);
     assert(field.motion_link.period_ms == 40 && field.motion_link.command_timeout_ms == 150);
     assert(close(field.motion_link.linear_accel_mps2, .30f));
@@ -267,7 +267,7 @@ int main() {
         assert(close(jaw.capture.pixel_align_tolerance_px, 12.f));
         assert(close(jaw.task.pixel_align_restart_px, 24.f));
         assert(close(jaw.task.pixel_align_approach_tolerance_px, 30.f));
-        assert(close(jaw.task.pixel_align_approach_restart_px, 40.f));
+        assert(close(jaw.task.pixel_align_approach_restart_px, 60.f));
         assert(jaw.task.pixel_align_brake_us == 150000);
         assert(close(jaw.task.pixel_align_brake_motion_px, 4.f));
         assert(jaw.task.pixel_align_stable_us == 200000 && jaw.task.pixel_align_stable_frames == 3);

@@ -249,6 +249,22 @@ bool PushTask::pixelAlignTarget(TaskTick& tick, bool strict, bool hold_position,
         reason_ = "pixel_target_wait";
         return false;
     }
+    // Ordinary search/capture alignment stops use the sender's existing ramp.
+    // Keep invalid evidence, a preceding object and revoked clearance immediate;
+    // Brake/Settle below still wait for stopped commands and fresh stable images.
+    const bool approach_alignment =
+        (phase_ == TaskPhase::Search && search_phase_.action == SearchAction::Approach) ||
+        (phase_ == TaskPhase::Capture && capture_phase_.action == CaptureAction::Advance);
+    const bool first_object_clear = !in.pixel_grasp_near_view ||
+        search_entry_.first_id == -1 || search_entry_.first_id == in.target_id;
+    if (approach_alignment && first_object_clear && in.run && in.safety_ok &&
+        in.camera_pitch_stable && candidate(in, tick.now) &&
+        in.target_id == trip_context_.target_id_ && in.label == trip_context_.label_ &&
+        !in.target_grasp_range_past_rear && !a.resume_pending && tick.forward_ok &&
+        (!in.directional_clearance_valid || (in.turn_safe && in.arc_safe))) {
+        tick.immediate_motion_stop = false;
+        tick.controlled_motion_stop = true;
+    }
     const float error = in.pixel_grasp_error_px;
     const float magnitude = std::abs(error);
     const bool approach = !in.pixel_grasp_near_view;
@@ -256,7 +272,10 @@ bool PushTask::pixelAlignTarget(TaskTick& tick, bool strict, bool hold_position,
                             : far_handoff             ? 40.f
                             : approach                ? t_.pixel_align_approach_tolerance_px
                                                       : t_.pixel_align_tolerance_px;
-    const float restart = tolerance_override_px > 0 ? 2.f * tolerance_override_px
+    // A tighter opening tolerance must not also narrow the existing correction
+    // hysteresis and fine-pulse band.
+    const float restart = tolerance_override_px > 0
+                              ? std::max(t_.pixel_align_restart_px, 2.f * tolerance_override_px)
                           : far_handoff             ? 40.f
                           : approach                ? t_.pixel_align_approach_restart_px
                                                     : t_.pixel_align_restart_px;
@@ -290,12 +309,20 @@ bool PushTask::pixelAlignTarget(TaskTick& tick, bool strict, bool hold_position,
         a.within_tolerance = false;
         a.brake_reason = "sample_discontinuity";
     }
-    // Reuse startup's bounded prediction/pulses for transport UI120 only.
-    // Measured cargo bounds and UI140 transport acceptance stay unchanged.
-    const bool near_startup = phase_ == TaskPhase::Startup &&
-        startup_action_ == StartupAction::OpenApproach && in.pixel_grasp_near_view;
+    // UI120 guide/ordinary alignment has the same delayed chassis response as
+    // UI140 open approach. Brake from image drift before crossing the centre,
+    // and use bounded low-speed corrections near the acceptance band.
+    const bool startup_alignment = phase_ == TaskPhase::Startup &&
+        ((approach && in.pixel_grasp_view &&
+          (startup_action_ == StartupAction::Approach ||
+           startup_action_ == StartupAction::SelectOrdinary ||
+           startup_action_ == StartupAction::OpenApproach)) ||
+         (startup_action_ == StartupAction::OpenApproach && in.pixel_grasp_near_view));
+    const bool startup_ordinary = startup_alignment && approach &&
+        (startup_action_ == StartupAction::SelectOrdinary ||
+         startup_action_ == StartupAction::OpenApproach);
     float closing_px_per_s = 0;
-    const bool predictive = near_startup || carry_approach;
+    const bool predictive = startup_alignment || carry_approach;
     if (predictive && fresh && !resumed && sample_delta >= 10000 && sample_delta <= 150000) {
         const float rate = (error - a.last_error_px) * 1000000.f / float(sample_delta);
         if (rate * error < 0)
@@ -313,13 +340,51 @@ bool PushTask::pixelAlignTarget(TaskTick& tick, bool strict, bool hold_position,
         a.brake_reason = cause;
         a.stage = PixelAlignment::Stage::Brake;
         a.stopped_since_us = 0;
-        a.correction_since_us = 0;
+        a.correction_since_us = a.advance_outside_since_us = 0;
+        a.advance_outside_frames = 0;
         a.within_tolerance = hold_position || magnitude <= acceptance;
         a.stable_frames = 0;
         a.stable_since_us = 0;
         reason_ = "pixel_align_brake";
     };
+    // A mild UI120 ordinary excursion first holds position. Three fresh images
+    // spanning 100 ms are required to discard a completed alignment. Large jumps
+    // and discontinuous/resumed observations still brake immediately.
+    const auto ordinaryExcursion = [&] {
+        if (fresh) {
+            if (!a.advance_outside_since_us) a.advance_outside_since_us=in.pixel_grasp_sample_us;
+            ++a.advance_outside_frames;
+        }
+        return a.advance_outside_frames>=3 &&
+            in.pixel_grasp_sample_us-a.advance_outside_since_us>=100000;
+    };
+    if (startup_ordinary && magnitude<=restart) {
+        a.advance_outside_since_us=0;
+        a.advance_outside_frames=0;
+    }
     if (a.stage == PixelAlignment::Stage::Advance) {
+        if (startup_ordinary && magnitude>restart && magnitude<=2.f*restart && !a.resume_pending) {
+            if (!ordinaryExcursion()) {
+                reason_="pixel_align_outside_wait";
+                return false;
+            }
+            brake("sustained_outside");
+            return false;
+        }
+        // Only the already-aligned closed UI120 pile guide may roll through
+        // brief box jitter. Opening, ordinary cargo and all handoffs retain
+        // their stopped confirmation. Persistent or large departures brake.
+        const bool pile_advance = phase_ == TaskPhase::Startup &&
+            startup_action_ == StartupAction::Approach && approach && in.pixel_grasp_view &&
+            in.target_id == kStartupPileTargetId && !strict && !hold_position &&
+            !a.resume_pending;
+        if (pile_advance && magnitude > restart && magnitude <= 2.f * restart) {
+            if (!a.advance_outside_since_us)
+                a.advance_outside_since_us = tick.now;
+            if (tick.now - a.advance_outside_since_us < 100000)
+                return true;
+        } else
+            a.advance_outside_since_us = 0;
         if ((hold_position || magnitude <= (strict ? tolerance : restart)) &&
             (!strict || stopped) && !a.resume_pending)
             return true;
@@ -328,7 +393,14 @@ bool PushTask::pixelAlignTarget(TaskTick& tick, bool strict, bool hold_position,
     }
     if (a.stage == PixelAlignment::Stage::Correct) {
         const bool fine = predictive && magnitude <= 2.f * restart;
-        const bool predicted_stop = predictive && closing_px_per_s > 0 &&
+        // UI120 pile and ordinary guidance need a useful bounded correction
+        // despite box jitter. One closing sample must not cancel the pulse
+        // before the sender's ramp and delayed chassis response can take effect.
+        const bool startup_fine = startup_alignment && approach && fine &&
+            ((startup_action_ == StartupAction::Approach && in.target_id == kStartupPileTargetId) ||
+             startup_action_ == StartupAction::SelectOrdinary ||
+             startup_action_ == StartupAction::OpenApproach);
+        const bool predicted_stop = predictive && !startup_fine && closing_px_per_s > 0 &&
             magnitude <= tolerance + std::min(80.f, .15f * closing_px_per_s);
         // A fast chassis may cross the whole fine band before the first delayed
         // response arrives. Bound transport's coarse bursts too, then observe at rest.
@@ -347,11 +419,70 @@ bool PushTask::pixelAlignTarget(TaskTick& tick, bool strict, bool hold_position,
         a.brake_reason = "none";
         reason_ = "pixel_center_align";
         const float wz = t_.pixel_align_gain_rps_per_px * error;
-        drive(tick, 0, fine ? std::clamp(.5f * wz, -.1f, .1f) : wz, true);
+        const float fine_wz = std::clamp(.5f * wz, -.1f, .1f);
+        // Near the opening boundary, a 0.06 rad/s pulse with delayed
+        // response can cross the entire acceptance band. Keep the useful coarse
+        // pulse, but allow a smaller final correction before opening.
+        const float min_fine_wz = startup_action_ == StartupAction::SelectOrdinary &&
+                                  magnitude <= 2.f * tolerance ? .03f : .06f;
+        const float correction = startup_fine
+            ? std::copysign(std::min(std::max(std::abs(fine_wz), min_fine_wz),
+                                     t_.pixel_align_max_wz), error)
+            : fine ? fine_wz : wz;
+        drive(tick, 0, correction, true);
         if (tick.motion.wz_rps != 0) {
             a.direction = direction;
-            if (!a.correction_since_us)
+            // Startup UI120 pulses must survive UART ramp-up. Count only a
+            // correction already sent in the intended direction.
+            if (!a.correction_since_us &&
+                (!startup_fine || sent_wz * direction > t_.pixel_align_stopped_wz))
                 a.correction_since_us = tick.now;
+        }
+        return false;
+    }
+    if (startup_ordinary && (a.stage==PixelAlignment::Stage::Brake ||
+                              a.stage==PixelAlignment::Stage::Settle)) {
+        reason_="pixel_align_brake";
+        if (!stopped) {
+            a.stopped_since_us=a.stable_since_us=0;
+            a.stable_frames=0;
+            return false;
+        }
+        if (!a.stopped_since_us) a.stopped_since_us=tick.now;
+        if (!fresh || in.pixel_grasp_sample_us<=a.stopped_since_us) return false;
+        if (sample_delta>150000) { a.stable_frames=0;a.stable_since_us=0; }
+        if (!a.stable_frames) {
+            a.brake_min_px=a.brake_max_px=error;
+            a.stable_since_us=in.pixel_grasp_sample_us;
+        }
+        a.brake_min_px=std::min(a.brake_min_px,error);
+        a.brake_max_px=std::max(a.brake_max_px,error);
+        if (a.brake_max_px-a.brake_min_px>t_.pixel_align_brake_motion_px) {
+            a.brake_min_px=a.brake_max_px=error;
+            a.stable_since_us=in.pixel_grasp_sample_us;
+            a.stable_frames=0;
+        }
+        ++a.stable_frames;
+        if (magnitude<=acceptance) a.within_tolerance=true;
+        else if (magnitude>2.f*restart || (magnitude>restart && ordinaryExcursion()))
+            a.within_tolerance=false;
+        // Brake and settle share one continuous stationary-image window.
+        const uint64_t span=in.pixel_grasp_sample_us-a.stable_since_us;
+        if (a.stable_frames>=t_.pixel_align_stable_frames && span>=t_.pixel_align_brake_us) {
+            a.stage=PixelAlignment::Stage::Settle;
+            reason_="pixel_align_settle";
+        }
+        if (a.stable_frames<t_.pixel_align_stable_frames ||
+            span<std::max(uint64_t(250000),t_.pixel_align_stable_us) || a.resume_pending)
+            return false;
+        if (a.within_tolerance && magnitude<=(strict ? tolerance : restart)) {
+            a.stage=PixelAlignment::Stage::Advance;
+            return true;
+        }
+        if (!a.within_tolerance) {
+            a.stage=PixelAlignment::Stage::Correct;
+            a.direction=0;
+            a.correction_since_us=0;
         }
         return false;
     }

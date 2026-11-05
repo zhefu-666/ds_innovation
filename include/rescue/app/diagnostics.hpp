@@ -4,10 +4,13 @@
 #include "rescue/perception/zone_keypoints.hpp"
 #include "rescue/geometry/camera_calibration.hpp"
 #include <iostream>
+#include "rescue/perception/pose_temporal_smoother.hpp"
 
 namespace rescue {
 void report(const PushOutput& out, std::ostream& stream = std::cout);
 void drawZone(cv::Mat& frame, const std::vector<ZoneKeypoint>& points);
+void drawPosePreview(cv::Mat& frame, const ZoneHalves& raw, const PosePreview& preview,
+                     const std::string& mode);
 // Draw only the accepted same-frame geometry; raw excluded predictions remain visible.
 void drawZoneProjection(cv::Mat& frame,
                         const std::vector<ZoneKeypoint>& points,

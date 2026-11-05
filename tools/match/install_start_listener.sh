@@ -27,5 +27,5 @@ fi
 install -Dm644 "$unit" "$target"
 systemctl --user daemon-reload
 systemctl --user enable --now "$unit"
-echo "已启用 $unit：开机等待 CRC 正确的 A7 start=1。"
+echo "已启用 $unit：立即执行机构与视觉准备，出现 [PREPARED] 后等待 A7 start=1 或 match_ctl.py start。"
 echo "查看日志：journalctl --user -u $unit -f"

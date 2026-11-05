@@ -9,6 +9,14 @@ Config parse(std::initializer_list<const char*> values) {
     return parseArgs(args.size(), args.data());
 }
 int main() {
+    assert(!Config{}.start_on_a7);
+    assert(parse({"host", "--hardware", "--imu", "--start-on-a7"}).start_on_a7);
+    for (auto values : {std::initializer_list<const char*>{"host", "--start-on-a7"},
+                        {"host", "--hardware", "--start-on-a7", "--auto-run"}}) {
+        bool rejected = false;
+        try { parse(values); } catch (const std::exception&) { rejected = true; }
+        assert(rejected);
+    }
     auto c =
         parse({"demo", "--demo-mode", "search", "--startup-advance-ms", "60000", "--scan-wz", "3"});
     assert(c.startup_advance_ms == 0 && c.scan_wz_rps == .25f && c.match_seconds == 60);

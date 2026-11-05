@@ -21,8 +21,8 @@ python3 tools/camera_pitch/pitch_ctl.py prepare45 --timeout 5
 exec build-release/rescue_upper_host \
   --config config/project.json \
   --hardware --no-show --telemetry \
-  --team blue --imu --imu-port /dev/ttyUSB0 \
+  --team blue --imu --imu-port /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0 \
   --calibration config/camera.yaml \
   --model models/detect_v5_int8.rknn \
-  --pose-model models/zone_pose_int8.rknn \
+  --pose-model models/a_rawxy_20261105/A_rawxy_INT8_EXPERIMENTAL.rknn \
   --startup-advance-ms 5000 --startup-speed 1 "$@"

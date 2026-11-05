@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <poll.h>
 #include <stdexcept>
 #include <sys/select.h>
 #include <sys/file.h>
@@ -52,12 +53,26 @@ bool SensorPacketParser::consume(uint8_t byte, uint64_t received_us, ActuatorFee
     last_byte_us_ = received_us;
     buffer_.push_back(byte);
     while (!buffer_.empty()) {
-        if (buffer_[0] != SensorPacket::kHeader) {
+        const bool start_packet = buffer_[0] == 0xA7;
+        if (buffer_[0] != SensorPacket::kHeader && !start_packet) {
             buffer_.erase(buffer_.begin());
             continue;
         }
-        if (buffer_.size() < SensorPacket::kSize)
+        const size_t size = start_packet ? 5 : SensorPacket::kSize;
+        if (buffer_.size() < size)
             return false;
+        if (start_packet) {
+            const uint16_t crc = uint16_t(buffer_[2]) | (uint16_t(buffer_[3]) << 8);
+            if (buffer_[4] != 0x0A ||
+                UARTController::calculateCRC16(buffer_.data(), 0, 1) != crc) {
+                buffer_.erase(buffer_.begin());
+                continue;
+            }
+            if (buffer_[1] == 1)
+                start_us_ = received_us;
+            buffer_.erase(buffer_.begin(), buffer_.begin() + size);
+            continue;
+        }
         SensorPacket packet;
         std::memcpy(&packet, buffer_.data(), sizeof(packet));
         if (UARTController::calculateCRC16(
@@ -94,6 +109,7 @@ void UARTController::initUART(const std::string& port, int baudrate, bool dry_ru
     baudrate_ = baudrate;
     dry_run_ = dry_run;
     latest_cmd_.store(auto_run ? 0xBB : 0xAA);
+    start_us_ = 0;
     {
         std::lock_guard<std::mutex> guard(io_mutex_);
         actuator_feedback_ = {};
@@ -379,24 +395,34 @@ bool UARTController::sendMotion(const MotionCommand& command) {
         return false;
     }
 
+    // Keep feedback readers and the control heartbeat responsive under USB backpressure.
+    // A 15-byte packet takes about 1.3 ms at 115200 baud; never wait indefinitely
+    // for a driver drain while holding io_mutex_. Successful write means queued,
+    // while completion of actuator actions still requires matching A6 feedback.
+    const auto deadline = Clock::now() + Ms(20);
     size_t written = 0;
     while (written < packet.size()) {
+        if (Clock::now() >= deadline) {
+            std::cerr << "[ERR] UART write timed out after 20 ms\n";
+            return false;
+        }
         const ssize_t n = ::write(fd_, packet.data() + written, packet.size() - written);
         if (n > 0) {
             written += static_cast<size_t>(n);
             continue;
         }
-        if (n < 0 && errno == EINTR) {
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            pollfd writable{fd_, POLLOUT, 0};
+            ::poll(&writable, 1, 1);
             continue;
         }
-        std::cerr << "[ERR] UART write failed: " << std::strerror(errno) << "\n";
+        std::cerr << "[ERR] UART write failed: "
+                  << (n == 0 ? "zero-byte write" : std::strerror(errno)) << "\n";
         return false;
     }
-    int drained;
-    do {
-        drained = ::tcdrain(fd_);
-    } while (drained < 0 && errno == EINTR);
-    return drained == 0;
+    return true;
 }
 
 std::array<uint8_t, 13>
@@ -483,8 +509,8 @@ void UARTController::reopenPort() {
 void UARTController::openPort() {
     std::lock_guard<std::mutex> guard(io_mutex_);
     const speed_t speed = baudToTermios(baudrate_);
-    fd_ =
-        ::open(port_.c_str(), (feedback_only_ ? O_RDONLY : O_RDWR) | O_NOCTTY | O_SYNC | O_CLOEXEC);
+    fd_ = ::open(port_.c_str(),
+                 (feedback_only_ ? O_RDONLY : O_RDWR) | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (fd_ < 0) {
         throw std::runtime_error("Failed to open " + port_ + ": " + std::strerror(errno));
     }
@@ -570,6 +596,7 @@ void UARTController::readLoop() {
                 ActuatorFeedback state;
                 if (parser.consume(bytes[i], received_us, state))
                     publishActuatorFeedback(state);
+                start_us_.store(parser.latestStartUs());
             }
         } else if (n == 0) {
             break; // disconnected stream; do not spin while retaining stale feedback

@@ -35,6 +35,8 @@ struct Config {
     std::string pose_model_red_path;
     float pose_confidence = 0.25f;         // 两版共用：per-half box score
     float pose_keypoint_confidence = 0.5f; // 两版共用：per-keypoint visibility
+    // off preserves the legacy display; raw/smoothed/overlay show eight independent slots.
+    std::string pose_smoothing_preview = "off";
     int detect_core_mask = -1; // -1 leaves the runtime default; 0 auto, 1 core0, 2 core1, 3 core0+1, 4 core2
     int pose_core_mask = -1;
     bool async_capture = false;      // Latest-frame capture worker; opt in with --async-capture.
@@ -79,13 +81,14 @@ struct Config {
     // Live MCU link: one exclusive RDWR port for motion output and A6 feedback (implies feedback).
     bool hardware = false;
     bool imu = false;
-    std::string imu_port = "/dev/ttyUSB0";
+    std::string imu_port = "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0";
     int imu_baud = 115200;
     uint32_t imu_timeout_ms = 200;
     bool telemetry = false;
     int telemetry_fps = 10;
     std::string telemetry_file = "/dev/shm/rescue-telemetry.bin";
     bool auto_run = false;
+    bool start_on_a7 = false; // initialize first, then wait for a fresh MCU button
     std::string single_phase; // startup/search/capture/transport; empty = full match
     bool capture_after_first = false; // capture-only test: seed first ordinary delivery history
     bool step_phases = false; // explicit four-phase debugging checkpoints

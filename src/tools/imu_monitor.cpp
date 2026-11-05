@@ -9,7 +9,7 @@ int main(int argc, char** argv) {
     try {
         if (argc > 4)
             throw std::runtime_error("Usage: rescue_imu_monitor [port] [baud] [seconds]");
-        const std::string port = argc > 1 ? argv[1] : "/dev/ttyUSB0";
+        const std::string port = argc > 1 ? argv[1] : "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0";
         const int baud = argc > 2 ? std::stoi(argv[2]) : 115200;
         const int seconds = argc > 3 ? std::stoi(argv[3]) : 30;
         if (seconds <= 0)
@@ -43,7 +43,8 @@ int main(int argc, char** argv) {
         std::cout << "frames=" << s.valid_frames << " bytes=" << s.bytes
                   << " crc_errors=" << s.crc_errors << " invalid_frames=" << s.invalid_frames
                   << " duplicate_times=" << s.duplicate_times
-                  << " backward_times=" << s.backward_times << " io_errors=" << s.io_errors << '\n';
+                  << " backward_times=" << s.backward_times << " io_errors=" << s.io_errors
+                  << " reconnects=" << s.reconnects << '\n';
         return s.fresh && s.sample.measurements_valid ? 0 : 2;
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';

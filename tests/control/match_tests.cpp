@@ -10,8 +10,112 @@
 #include <sys/stat.h>
 #include <unistd.h>
 using namespace rescue;
+void buttonRestartsCreateFreshRounds() {
+    MatchConfig c;
+    c.duration_us = 1000000;
+    c.require_measured_progress = false;
+    MatchControl m(c);
+    assert(!m.restartFromButton(1000000, 1000001, true));
+    m.health(1100000, true, "");
+    assert(!m.restartFromButton(1050000, 1100001, true));
+    assert(!m.restartFromButton(1100003, 1100002, true));
+    assert(m.restartFromButton(1100002, 1100003, true));
+    auto status = m.status(1100004);
+    assert(status.state == MatchState::RESTARTING && !status.permit && !status.started_us);
+    assert(!m.completeButtonRestart(1100005)); // require new evidence after reset
+    m.health(1100010, true, "");
+    assert(!m.restartFromButton(1100011, 1100012, true)); // no queued press
+    assert(!m.command(MatchCommand::START, 1100013));
+    assert(!m.command(MatchCommand::RESUME, 1100014));
+    assert(m.completeButtonRestart(1100020));
+    status = m.status(1100021);
+    assert(status.permit && status.run_id == 1 && status.started_us == 1100020);
+    assert(!m.restartFromButton(1100011, 1100022, true));
+    uint64_t t = 1200000;
+    // RUNNING, PAUSED, FAULT, FINISHED all become new rounds, not resumes.
+    for (int state = 0; state < 4; ++state) {
+        if (state == 1) assert(m.command(MatchCommand::STOP, t));
+        if (state == 2) m.health(t, false, "task_fault");
+        if (state == 3) assert(m.command(MatchCommand::FINISH, t));
+        if (state != 2) m.health(t + 1, true, "");
+        assert(m.restartFromButton(t + 2, t + 3, true));
+        assert(!m.status(t + 4).started_us && !m.status(t + 4).permit);
+        m.health(t + 5, true, "");
+        assert(m.completeButtonRestart(t + 6));
+        status = m.status(t + 7);
+        assert(status.run_id == uint64_t(state + 2) && status.started_us == t + 6);
+        assert(status.elapsed_us == 1 && status.remaining_us == c.duration_us - 1);
+        t += 100000;
+    }
+    m.health(t, false, "mcu_feedback_stale");
+    assert(!m.restartFromButton(t + 1, t + 2, false));
+    m.health(t + 3, true, "");
+    assert(!m.restartFromButton(t + 1, t + 4, true)); // rejected event cannot start later
+    assert(!m.restartFromButton(t + 5, t + 400006, true));
+    m.health(t + 500000, true, "");
+    assert(m.restartFromButton(t + 500001, t + 500002, true));
+    assert(m.command(MatchCommand::STOP, t + 500003));
+    m.health(t + 500004, true, "");
+    assert(!m.completeButtonRestart(t + 500005) && !m.status(t + 500005).permit);
+    assert(m.restartFromButton(t + 500006, t + 500007, true));
+    assert(m.command(MatchCommand::FINISH, t + 500008));
+    assert(!m.completeButtonRestart(t + 500009));
+    m.health(t + 500009, true, ""); // every new request needs a current hardware observation
+    assert(m.restartFromButton(t + 500010, t + 500011, true));
+    m.failButtonRestart(t + 500012, "restart_preparation_timeout");
+    m.health(t + 500013, true, "");
+    assert(!m.completeButtonRestart(t + 500014));
+    assert(m.status(t + 500014).reason == "restart_preparation_timeout");
+    assert(m.restartFromButton(t + 500015, t + 500016, true));
+    m.health(t + 500017, true, "");
+    assert(m.completeButtonRestart(t + 500018));
+    assert(m.status(t + 1500018).state == MatchState::FINISHED);
+    m.health(t + 1500020, true, "");
+    assert(m.restartFromButton(t + 1500021, t + 1500022, true));
+    m.health(t + 1500023, true, "");
+    assert(m.completeButtonRestart(t + 1500024));
+    assert(m.status(t + 1500025).elapsed_us == 1);
+    std::cout << "PASS A7 new-round timing, faults, replay rejection and cancellation\n";
+}
 int main() {
+    buttonRestartsCreateFreshRounds();
     assert(Config{}.match_seconds == 180);
+    {
+        MatchControl m({180000000});
+        assert(!m.startFromButton(999999, 1000000));
+        m.health(1000000, true, "");
+        assert(m.status(1000000).ready && !m.status(1000000).permit);
+        assert(!m.startFromButton(999999, 1000001));
+        // Ten minutes of preparation consume none of the 180-second match.
+        for (uint64_t t = 1100000; t <= 601000000; t += 100000)
+            m.health(t, true, "");
+        const auto waiting = m.status(601000000);
+        assert(waiting.state == MatchState::WAITING && waiting.ready && !waiting.permit &&
+               waiting.started_us == 0 && waiting.elapsed_us == 0);
+        assert(!m.startFromButton(999999, 601000001));
+        assert(!m.startFromButton(601000010, 601000001));
+        assert(m.startFromButton(601000001, 601000002));
+        const auto start = m.status(601000002).started_us;
+        assert(!m.startFromButton(601000003, 601000004));
+        assert(m.status(601000004).started_us == start);
+        assert(m.command(MatchCommand::STOP, 601000005));
+        assert(!m.startFromButton(601000006, 601000007));
+        assert(!m.status(601000007).permit);
+        assert(m.command(MatchCommand::RESUME, 601000008));
+        m.health(601000009, false, "camera_pitch_feedback_invalid");
+        assert(!m.status(601000009).ready && !m.status(601000009).permit);
+        m.health(601000010, true, "");
+        assert(!m.startFromButton(601000011, 601000012));
+    }
+    {
+        MatchControl m({180000000});
+        m.health(1000000, true, "");
+        m.health(1100000, false, "mcu_feedback_stale");
+        assert(!m.startFromButton(1100001, 1100002));
+        m.health(1200000, true, "");
+        assert(!m.startFromButton(1100001, 1200001));
+        assert(m.startFromButton(1200001, 1200002));
+    }
     {
         MatchConfig c;
         c.time_limit_enabled = false;
@@ -192,18 +296,29 @@ int main() {
                 assert(n > 0);
                 return std::string(buffer, size_t(n));
             };
-            assert(request("status").find("OK WAITING") != std::string::npos);
+            const auto waiting = request("status");
+            assert(waiting.find("OK WAITING") != std::string::npos);
+            assert(waiting.find("ready=0") != std::string::npos);
             assert(request("start").find("REJECTED") != std::string::npos);
             const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
                                  std::chrono::steady_clock::now().time_since_epoch())
                                  .count();
             m.health(now, true, "");
+            assert(request("status").find("ready=1") != std::string::npos);
             assert(request("start").find("OK RUNNING") != std::string::npos);
             assert(m.pauseForPhase("SEARCH", now));
             assert(request("status").find("phase_waiting=1") != std::string::npos);
             assert(request("resume").find("REJECTED PAUSED") != std::string::npos);
             assert(request("next").find("OK RUNNING") != std::string::npos);
             assert(request("next").find("REJECTED RUNNING") != std::string::npos);
+            const auto fault_now = std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch()).count();
+            m.health(fault_now, false, "startup_handoff_identity_uncertain");
+            const auto fault = request("status");
+            assert(fault.find("OK FAULT reason=startup_handoff_identity_uncertain") != std::string::npos);
+            assert(fault.find("ready=0 permit=0") != std::string::npos);
+            assert(request("next").find("REJECTED FAULT") != std::string::npos);
+            assert(request("resume").find("REJECTED FAULT") != std::string::npos);
             assert(request("stop").find("OK PAUSED") != std::string::npos);
             assert(request("finish").find("OK FINISHED") != std::string::npos);
             assert(request("resume").find("REJECTED FINISHED") != std::string::npos);

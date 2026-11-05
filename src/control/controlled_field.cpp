@@ -1,4 +1,5 @@
 #include "rescue/control/controlled_field.hpp"
+#include "rescue/perception/capture_monitor.hpp"
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cmath>
@@ -122,6 +123,63 @@ void ControlledField::update(PushObservation& in,
     // Explicit operator contact-test permission; never claim this is sensed clearance.
     if (ignore_clearance)
         in.path_safe = in.retreat_safe = in.turn_safe = in.arc_safe = in.jaw_open_safe = true;
+    in.transport_external_blocked = in.transport_review_clear = false;
+    in.transport_front_objects.clear();
+    in.transport_clearance_reason.clear();
+    const bool carrying = previous.phase == TaskPhase::Transport &&
+        previous.state == PushState::CARRY && previous.run_status == RunStatus::Running;
+    if (carrying) {
+        const bool image_fresh = in.capture_scene_valid && in.capture_scene_us &&
+            in.capture_scene_us <= in.now_us && in.now_us - in.capture_scene_us <= 200000;
+        // Inspect the forward image strip using the existing jaw lateral limits.
+        // This does not depend on a selected target, a closure region or old cargo IDs.
+        const cv::Rect2f front{in.layout_count_region_px.x, 0.f,
+                              in.layout_count_region_px.width, float(size.height)};
+        const bool near = image_fresh && in.camera_pitch_stable &&
+            in.camera_pitch_cdeg == kTransportReviewPitchCdeg && !front.empty();
+        const bool injured_trip = previous.transported_inventory.injured > 0;
+        std::vector<const SegDetection*> first_trip_supplies;
+        for (const auto& object : detections) {
+            if (object.label == "blue_safe_zone" || object.label == "red_safe_zone" ||
+                !std::isfinite(object.confidence) || object.confidence < .25f)
+                continue;
+            const auto kind = targetKind(object.label);
+            if (kind == TargetKind::CORE && object.confidence < .6f)
+                continue;
+            const bool wanted = injured_trip ? kind == TargetKind::INJURED
+                : kind == TargetKind::ORDINARY ||
+                  (kind == TargetKind::CORE && previous.first_ordinary_delivered);
+            if (!near || !PushObservation::imageBoxCenterInRegion(object.box, front))
+                continue;
+            // Count the current image once, including held and forward objects. Old
+            // cargo inventory/IDs cannot distinguish another visible ordinary here.
+            if (!previous.first_ordinary_delivered && !injured_trip &&
+                kind == TargetKind::ORDINARY)
+                first_trip_supplies.push_back(&object);
+            if (wanted)
+                continue;
+            in.transport_external_blocked = true;
+            in.transport_front_objects.push_back({object.track_id, object.label, object.box,
+                                                  captureBoxComplete(object.box, size)});
+            note("transport_review", object, "forbidden_in_destination");
+        }
+        const bool first_trip_over_limit =
+            first_trip_supplies.size() > kMaxSuppliesFirstTrip;
+        if (first_trip_over_limit) {
+            in.transport_external_blocked = true;
+            // Retain all current evidence for the pre-push retreat/turn decision.
+            for (const auto* object : first_trip_supplies) {
+                in.transport_front_objects.push_back({object->track_id, object->label, object->box,
+                                                      captureBoxComplete(object->box, size)});
+                note("transport_review", *object, "first_trip_too_many_supplies");
+            }
+        }
+        in.transport_review_clear = near && !in.transport_external_blocked;
+        in.transport_clearance_reason = first_trip_over_limit ? "first_trip_too_many_supplies"
+            : in.transport_external_blocked ? "forbidden_front_object"
+            : !image_fresh ? "image_missing"
+            : in.transport_review_clear ? "near_review_clear" : "near_review_required";
+    }
     // Short pushing is a separate, explicitly authorized contact operation.
     // Require an observed own-zone boundary, never infer it from an empty image.
     in.clear_push_safe = mapping && in.directional_clearance_valid && in.zone_own &&
@@ -167,9 +225,10 @@ void ControlledField::update(PushObservation& in,
         }
         in.clear_push_safe = in.clear_push_safe && contact;
     }
-    if (!previous.first_ordinary_delivered && !in.target_region_valid && in.geometry_valid) {
-        // Initial objects are explicitly placed outside the only zone. Once a trip
-        // was delivered, unseen-zone candidates stay unknown to prevent re-picking.
+    if (previous.phase != TaskPhase::Search && !previous.first_ordinary_delivered &&
+        !in.target_region_valid && in.geometry_valid) {
+        // Startup retains its initial placement permission. Search evaluates the
+        // current locked image separately, without changing measured membership.
         in.target_region_valid = true;
         in.target_in_zone = false;
     }

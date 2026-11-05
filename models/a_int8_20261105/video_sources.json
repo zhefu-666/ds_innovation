@@ -1,0 +1,18 @@
+[
+  {
+    "distance": "near",
+    "original_path": "/home/liu/Model-Training-Tool/videos/v5_20261104_090636_833575.mp4",
+    "sha256": "1fbebe620c7b5d8826110e60bb28a5e1c83ffdaea2c891e9850ccbc077de8d71",
+    "frames": 373,
+    "fps": 30,
+    "included_in_this_bundle": false
+  },
+  {
+    "distance": "far",
+    "original_path": "/home/liu/Model-Training-Tool/videos/v5_20261104_090658_188871.mp4",
+    "sha256": "d15dc1173e21eb6cb950cddd7474a7327ec80bc11c39b049ae93d52337a948c6",
+    "frames": 432,
+    "fps": 30,
+    "included_in_this_bundle": false
+  }
+]

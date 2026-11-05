@@ -24,13 +24,15 @@
       "file": "models/zone_pose_fp.rknn",
       "role": "pose",
       "status": "active",
-      "sha256": "fb60b26d4390f37df6b6826647a4025018204576c3c75665c86bca88c7d50b12"
+      "sha256": "fb60b26d4390f37df6b6826647a4025018204576c3c75665c86bca88c7d50b12",
+      "default": false
     },
     {
       "file": "models/zone_pose_int8_split_20261022.rknn",
       "role": "pose",
       "status": "active",
-      "sha256": "54b9420a0c6be709ad1594bd2ffdce394fe18759ef5e0a31441a805ce5f4b3e2"
+      "sha256": "54b9420a0c6be709ad1594bd2ffdce394fe18759ef5e0a31441a805ce5f4b3e2",
+      "default": false
     },
     {
       "file": "models/detect_int8.rknn",
@@ -51,20 +53,22 @@
       "role": "pose",
       "status": "archived_candidate",
       "sha256": "878c510995bf3aba012f9311ff02f3eaadf68fb37a9762b4fb2d2be783b71863",
-      "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_red_v2_fp.rknn"
+      "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_red_v2_fp.rknn",
+      "default": false
     },
     {
       "file": "models/zone_pose_v3_int8.rknn",
       "role": "pose",
       "status": "archived_candidate",
       "sha256": "68194965028a1653eab7d48d764e2a565e790d3aa2095fd5652d6d29e528fdad",
-      "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_v3_int8.rknn"
+      "archive_path": "/home/cat/ds_innovation_archive_20261026/models-candidates/zone_pose_v3_int8.rknn",
+      "default": false
     },
     {
       "file": "models/detect_v5_int8.rknn",
       "role": "detector",
       "status": "active",
-      "sha256": "a269e1d7a4479e71b5f84386be40ea868e8889d5b59303b1f95e1cdfa945749d",
+      "sha256": "e98dd8fb06b8b83a8e0b77ae7f1b985431741df761d602fa23dabdfeceddd52b",
       "classes": [
         "blue",
         "orange",
@@ -73,17 +77,51 @@
         "zone_blue",
         "zone_red"
       ],
-      "source_file": "blocks_v5.7_int8.rknn"
+      "source_file": "blocks_dense_candidate_int8.rknn"
     },
     {
       "file": "models/zone_pose_int8.rknn",
       "role": "pose",
       "status": "active",
-      "sha256": "03351043a9138bd239ebb20f93790da5a8268b8176553bde7925b8ba1cf96ccf",
+      "sha256": "d18a968f217a9c5585d502ba22027191d96b0897a71170809105fa8e7fee6a9b",
       "classes": [
         "zone_left",
         "zone_right"
-      ]
+      ],
+      "source_file": "retrained_B_int8.rknn",
+      "default": false
+    },
+    {
+      "file": "models/a_int8_20261105/A_INT8_confidence_fixed_EXPERIMENTAL.rknn",
+      "role": "pose",
+      "status": "experimental_board_geometry_failed",
+      "sha256": "0e95f08d1b62a2fa5b03a0f410ebe3b966d243cd9c7337db66ce3a2c8b017a21",
+      "classes": [
+        "zone_left",
+        "zone_right"
+      ],
+      "decoder": "dual_expert_26",
+      "board_load_verified": true,
+      "sdk_geometry_consistency": false,
+      "default": false,
+      "evidence": "telemetry_logs/model-import-20261105/image_comparison.json"
+    },
+    {
+      "file": "models/a_rawxy_20261105/A_rawxy_INT8_EXPERIMENTAL.rknn",
+      "role": "pose",
+      "status": "experimental_default",
+      "sha256": "d0249684fed94195f56e4ce273acb6f9997aaae04f6af3c7d8bbb6e7db2458ea",
+      "classes": [
+        "zone_left",
+        "zone_right"
+      ],
+      "decoder": "rawxy_5_to_dual_expert_26",
+      "board_load_verified": true,
+      "main_pipeline_verified": true,
+      "business_acceptance_passed": false,
+      "default": true,
+      "evidence": "telemetry_logs/pose-rawxy-20261105/verification.json",
+      "known_limit": "far-scene duplicate instances and localization acceptance remain unresolved"
     }
   ]
 }

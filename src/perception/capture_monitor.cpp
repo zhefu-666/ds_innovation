@@ -58,6 +58,7 @@ void CaptureMonitor::update(PushObservation& in,
     in.pixel_grasp_target_valid = in.pixel_grasp_ready = in.pixel_grasp_aligned = false;
     in.pixel_grasp_steering = in.pixel_grasp_error_px = 0;
     in.pixel_grasp_sample_us = 0;
+    in.pixel_grasp_image_height_px = 0;
     in.target_center_px = {};
     in.target_center_px_valid = in.pixel_view_handoff_ready = false;
     if (c_.pixel_grasp_enabled && in.camera_pitch_cdeg != kCameraPitchInvalid) {
@@ -170,6 +171,7 @@ void CaptureMonitor::update(PushObservation& in,
     };
     if (c_.pixel_grasp_enabled && !c_.grasp_center_ranges.empty()) {
         const auto& ref = c_.grasp_center_ranges.front();
+        in.pixel_grasp_image_height_px = ref.image_height_px;
         in.capture_scene_valid = true;
         in.capture_scene_us = now; // observation_builder replaces this with source image time
         for (const auto* d : fresh) {
@@ -179,7 +181,6 @@ void CaptureMonitor::update(PushObservation& in,
                  d->box,
                  d->track_id >= 0 && d->confidence >= c_.min_confidence &&
                      captureBoxComplete(d->box, {ref.image_width_px, ref.image_height_px})});
-            in.capture_image_objects.back().selectable = !d->injured_upright_rejected;
         }
         if (in.pixel_grasp_near_view && in.target_grasp_range_valid)
             for (const auto& range : c_.grasp_center_ranges) {
@@ -198,6 +199,13 @@ void CaptureMonitor::update(PushObservation& in,
                 break;
             }
     }
+    // UI130 transport review keeps the existing horizontal image-strip policy.
+    // This is inspection only: UI140 grasp/inventory boundaries remain unavailable.
+    if (in.transport_checks_enabled && in.camera_pitch_cdeg == kTransportReviewPitchCdeg)
+        for (const auto& range : c_.grasp_center_ranges)
+            if (range.label == "ordinary_supply" && range.lateral_measured)
+                in.layout_count_region_px = {range.area.x1, 0.f,
+                    range.area.x2 - range.area.x1, float(range.image_height_px)};
     // At UI140 the supplied box-centre limits replace ground projection for both
     // the capture inventory and post-close image evidence. UI120 never borrows them.
     if (in.pixel_grasp_near_view) {

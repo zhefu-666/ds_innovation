@@ -47,17 +47,5 @@ int main() {
         assert(orangeSilhouetteAspect(img, {390, 290, 180, 100}) < 0 &&
                orangeSilhouetteAspect(img, {690, 290, 100, 180}) < 0);
     }
-    {                                                        // decision rule
-        assert(silhouetteAdjustedDiff(-.02f, .7f) == -.11f); // wide: pushed to clearly lying
-        assert(silhouetteAdjustedDiff(-.30f, .7f) == -.30f); // already clearly lying: untouched
-        assert(silhouetteAdjustedDiff(-.02f, 1.4f) == .10f); // tall: clearly upright
-        assert(silhouetteAdjustedDiff(.2f, 1.4f) == .2f);
-        for (float a : {.9f, 1.0f, 1.15f})
-            assert(silhouetteAdjustedDiff(-.03f, a) == -.03f); // grey zone defers to the box fit
-        for (float a : {-1.f, 0.f, NAN, INFINITY})
-            assert(silhouetteAdjustedDiff(-.03f, a) == -.03f); // unavailable or non-finite: ignored
-        const float adjusted = silhouetteAdjustedDiff(-.02f, .7f);
-        assert(adjusted < -.06f); // below the confirm line: candidate
-    }
     std::cout << "silhouette tests passed\n";
 }

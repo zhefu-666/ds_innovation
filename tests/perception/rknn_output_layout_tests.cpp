@@ -42,6 +42,17 @@ void layoutTests() {
         "four", {{1, 4, 8400}, {1, 2, 8400}, {1, 4, 2, 8400}, {1, 4, 1, 8400}});
     assert(four.channels == 18 && four.anchors == 8400);
 
+    auto raw = validateRknnOutputLayout(
+        "raw", {{1, 4, 8400}, {1, 2, 8400}, {1, 8, 8400}, {1, 8, 8400}, {1, 4, 8400}});
+    assert(raw.channels == 26 && raw.anchors == 8400);
+    rejects([] {
+        validateRknnOutputLayout(
+            "raw anchors", {{1, 4, 8399}, {1, 2, 8399}, {1, 8, 8399}, {1, 8, 8399}, {1, 4, 8399}});
+    });
+    rejects([] {
+        validateRknnOutputLayout(
+            "raw channels", {{1, 4, 8400}, {1, 2, 8400}, {1, 16, 8400}, {1, 8, 8400}, {1, 4, 8400}});
+    });
     rejects([] {
         validateRknnOutputLayout("none", {});
     });
@@ -119,11 +130,43 @@ void mergeTests() {
     });
 }
 
+void rawXyTests() {
+    std::vector<cv::Mat> branches;
+    for (int channels : {4, 2, 8, 8, 4})
+        branches.push_back(tensor({1, channels, 8400}, float(branches.size())));
+    auto merged = mergeRknnOutputBranches(branches);
+    const auto* values = merged.ptr<float>();
+    for (int row = 0; row < 26; ++row) {
+        for (int i = 0; i < 8400; ++i) {
+            float expected;
+            if (row < 6) {
+                const int b = row < 4 ? 0 : 1;
+                expected = branches[b].ptr<float>()[(row < 4 ? row : row - 4) * 8400 + i];
+            } else if (row >= 22) {
+                expected = branches[4].ptr<float>()[(row - 22) * 8400 + i];
+            } else {
+                const int b = row < 14 ? 2 : 3;
+                const int channel = (row - 6) % 8;
+                const int side = i < 6400 ? 80 : (i < 8000 ? 40 : 20);
+                const int offset = i < 6400 ? 0 : (i < 8000 ? 6400 : 8000);
+                const int cell = i - offset;
+                const int grid = channel % 2 == 0 ? cell % side : cell / side;
+                expected = (2 * branches[b].ptr<float>()[channel * 8400 + i] + grid) * (640 / side);
+            }
+            assert(values[row * 8400 + i] == expected);
+        }
+    }
+    // The returned matrix owns its data after the SDK branch buffers are released.
+    branches.clear();
+    assert(merged.size[1] == 26 && values[0] == 0);
+}
+
 } // namespace
 
 int main() {
     layoutTests();
     mergeTests();
+    rawXyTests();
     std::cout << "rknn output layout tests passed\n";
     return 0;
 }

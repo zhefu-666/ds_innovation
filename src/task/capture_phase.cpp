@@ -265,6 +265,9 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
             break;
         }
         case CaptureAction::LowerFrame: {
+            auto preclose_inventory = tick.in.corridor;
+            if (startup_first_capture_)
+                preclose_inventory.ordinary = std::min(preclose_inventory.ordinary, 1);
             if (frame_raised_ != 0 && search_entry_.handoff && !entryPositionValid(tick.in)) {
                 tick.immediate_motion_stop = true;
                 invalidateEntryPosition();
@@ -275,7 +278,7 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                 (!tick.in.pixel_grasp_near_view || !tracking(tick.in) ||
                  (search_entry_.handoff ? !entryPositionValid(tick.in)
                                         : (!pixelCaptureReady(tick.in) || !pixelLateralAccepted(tick.in))) ||
-                 checkCorridor(tick.in.corridor,
+                 checkCorridor(preclose_inventory,
                                tick.in.corridor_complete,
                                tick.in.corridor_occlusion_free,
                                trip_context_.label_,
@@ -376,6 +379,12 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                     split.runs = split_runs;
                     split.corner_runs = corner_runs;
                     trip_context_.trip_ = verification.inventory;
+                    trip_context_.transported_objects.clear();
+                    trip_context_.transported_view_pitch = tick.in.camera_pitch_cdeg;
+                    for (const auto& object : tick.in.capture_image_objects)
+                        if (object.complete && tick.in.captureInventoryOverlaps(object.box, object.label) &&
+                            verification.inventory.count(targetKind(object.label)) > 0)
+                            trip_context_.transported_objects.push_back(object);
                     capture_load_.active = false;
                     transport_phase_.carry_us_ = tick.now;
                     transport_phase_.zone_search_started_us_ = 0;

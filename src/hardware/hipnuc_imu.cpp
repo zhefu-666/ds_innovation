@@ -5,6 +5,8 @@
 #include <cstring>
 #include <cerrno>
 #include <stdexcept>
+#include <iostream>
+#include <sstream>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -154,17 +156,35 @@ bool Hi91Parser::consume(uint8_t byte, uint64_t received_us, ImuSample& out) {
     }
     return false;
 }
-HipnucImu::HipnucImu(const std::string& port, int baud, uint32_t timeout_ms) {
-    const auto baud_code = speed(baud);
+void Hi91Parser::resetStream() {
+    buffer_.clear();
+    last_byte_us_ = 0;
+}
+HipnucImu::HipnucImu(const std::string& port, int baud, uint32_t timeout_ms)
+    : port_(port), baud_(baud) {
     if (!timeout_ms || timeout_ms > 10000)
         throw std::runtime_error("IMU timeout must be 1..10000 ms");
     state_.timeout_ms = timeout_ms;
-    fd_ = ::open(port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    openPort();
+    try {
+        state_.connected = true;
+        running_ = true;
+        reader_ = std::thread(&HipnucImu::readLoop, this);
+    } catch (...) {
+        closePort();
+        throw;
+    }
+}
+void HipnucImu::openPort() {
+    const auto baud_code = speed(baud_);
+    fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (fd_ < 0)
-        throw std::runtime_error("Cannot open IMU " + port + ": " + std::strerror(errno));
+        throw std::runtime_error("Cannot open IMU " + port_ + ": " + std::strerror(errno));
+    bool exclusive = false;
     try {
         if (::flock(fd_, LOCK_EX | LOCK_NB) < 0 || ::ioctl(fd_, TIOCEXCL) < 0)
             throw std::runtime_error("IMU port is already owned or cannot be locked");
+        exclusive = true;
         termios tty{};
         if (::tcgetattr(fd_, &tty) < 0)
             throw std::runtime_error("Cannot read IMU serial settings");
@@ -178,24 +198,26 @@ HipnucImu::HipnucImu(const std::string& port, int baud, uint32_t timeout_ms) {
         if (::tcsetattr(fd_, TCSANOW, &tty) < 0)
             throw std::runtime_error("Cannot configure IMU serial port");
         ::tcflush(fd_, TCIFLUSH);
-        state_.connected = true;
-        running_ = true;
-        reader_ = std::thread(&HipnucImu::readLoop, this);
     } catch (...) {
-        ::ioctl(fd_, TIOCNXCL);
+        if (exclusive)
+            ::ioctl(fd_, TIOCNXCL);
         ::close(fd_);
         fd_ = -1;
         throw;
+    }
+}
+void HipnucImu::closePort() {
+    if (fd_ >= 0) {
+        ::ioctl(fd_, TIOCNXCL);
+        ::close(fd_);
+        fd_ = -1;
     }
 }
 HipnucImu::~HipnucImu() {
     running_ = false;
     if (reader_.joinable())
         reader_.join();
-    if (fd_ >= 0) {
-        ::ioctl(fd_, TIOCNXCL);
-        ::close(fd_);
-    }
+    closePort();
 }
 std::vector<ImuSample> HipnucImu::samplesAfter(uint64_t sequence) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -211,7 +233,8 @@ ImuSnapshot HipnucImu::snapshot() const {
     result.sampled_at_us = imuNowUs();
     if (result.sample.received_us && result.sampled_at_us >= result.sample.received_us)
         result.age_ms = (result.sampled_at_us - result.sample.received_us) / 1000.0;
-    result.fresh = result.connected && result.age_ms >= 0 && result.age_ms <= result.timeout_ms;
+    result.fresh = result.connected && result.sample.sequence != 0 && result.age_ms >= 0 &&
+                   result.age_ms <= result.timeout_ms;
     return result;
 }
 ImuSnapshot HipnucImu::snapshotAt(uint64_t capture_us, uint32_t max_skew_ms) const {
@@ -235,15 +258,84 @@ ImuSnapshot HipnucImu::snapshotAt(uint64_t capture_us, uint32_t max_skew_ms) con
 void HipnucImu::readLoop() {
     Hi91Parser parser;
     uint8_t bytes[4096];
+    // CP210x can stop submitting receive URBs after EPIPE while poll reports no
+    // error. A lack of advancing frames must therefore also reopen the tty.
+    const uint64_t recovery_after_us =
+        std::max<uint64_t>(1000000, uint64_t(state_.timeout_ms) * 2000);
+    uint64_t last_progress_us = imuNowUs();
+    uint64_t next_open_us = 0;
+    bool awaiting_recovery_sample = false;
+    const auto recover = [&](const char* reason) {
+        std::ostringstream detail;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            detail << "[IMU_RECOVERY] event=lost reason=" << reason << " at_us=" << imuNowUs()
+                   << " port=" << port_ << " seq=" << state_.sample.sequence
+                   << " bytes=" << state_.bytes << " valid_frames=" << state_.valid_frames
+                   << " crc_errors=" << state_.crc_errors
+                   << " invalid_frames=" << state_.invalid_frames
+                   << " duplicate_times=" << state_.duplicate_times
+                   << " backward_times=" << state_.backward_times
+                   << " io_errors=" << state_.io_errors << " reconnects=" << state_.reconnects
+                   << "\n";
+            state_.connected = false;
+            // Retain the failure timestamp so SensorFusion accepts the invalid
+            // state immediately instead of ignoring a timestamp-zero update.
+            // No old measurement or capture history can cross a reconnect.
+            const auto received_us = state_.sample.received_us;
+            state_.sample = {};
+            state_.sample.received_us = received_us;
+            history_.clear();
+        }
+        std::cerr << detail.str();
+        closePort();
+        parser.resetStream();
+        next_open_us = imuNowUs() + 250000;
+    };
     while (running_) {
+        if (fd_ < 0) {
+            if (imuNowUs() < next_open_us) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+            try {
+                openPort();
+            } catch (const std::exception& e) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ++state_.io_errors;
+                }
+                std::cerr << "[IMU_RECOVERY] event=open_failed port=" << port_
+                          << " error=" << e.what() << "\n";
+                next_open_us = imuNowUs() + 1000000;
+                continue;
+            }
+            uint64_t reconnects;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                state_.connected = true;
+                reconnects = ++state_.reconnects;
+            }
+            last_progress_us = imuNowUs();
+            awaiting_recovery_sample = true;
+            std::cerr << "[IMU_RECOVERY] event=reopened port=" << port_
+                      << " reconnects=" << reconnects << " awaiting_sample=1\n";
+        }
+        if (imuNowUs() - last_progress_us >= recovery_after_us) {
+            recover("no_advancing_frames");
+            continue;
+        }
         pollfd pfd{fd_, POLLIN, 0};
         int ready = ::poll(&pfd, 1, 50);
         if (ready < 0 && errno == EINTR)
             continue;
         if (ready < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++state_.io_errors;
-            break;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++state_.io_errors;
+            }
+            recover("poll_error");
+            continue;
         }
         if (!ready)
             continue;
@@ -251,38 +343,53 @@ void HipnucImu::readLoop() {
         if (n < 0 && (errno == EAGAIN || errno == EINTR))
             continue;
         if (n <= 0) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++state_.io_errors;
-            break;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++state_.io_errors;
+            }
+            recover("read_error");
+            continue;
         }
         const auto now = imuNowUs();
-        std::lock_guard<std::mutex> lock(mutex_);
-        state_.bytes += n;
-        for (ssize_t i = 0; i < n; ++i) {
-            ImuSample sample;
-            if (!parser.consume(bytes[i], now, sample))
-                continue;
-            if (state_.sample.received_us) {
-                const uint32_t delta = sample.device_time_ms - state_.sample.device_time_ms;
-                if (delta == 0) {
-                    ++state_.duplicate_times;
+        std::ostringstream resumed;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            state_.bytes += n;
+            for (ssize_t i = 0; i < n; ++i) {
+                ImuSample sample;
+                if (!parser.consume(bytes[i], now, sample))
                     continue;
+                if (state_.sample.sequence) {
+                    const uint32_t delta = sample.device_time_ms - state_.sample.device_time_ms;
+                    if (delta == 0) {
+                        ++state_.duplicate_times;
+                        continue;
+                    }
+                    if (delta >= 0x80000000U) {
+                        ++state_.backward_times;
+                        continue;
+                    }
                 }
-                if (delta >= 0x80000000U) {
-                    ++state_.backward_times;
-                    continue;
+                // Bad numeric data replaces the last sample so cached healthy
+                // values cannot mask faults, including after reopening the port.
+                state_.sample = sample;
+                last_progress_us = now;
+                history_.push_back(sample);
+                while (history_.size() > 512)
+                    history_.pop_front();
+                if (awaiting_recovery_sample) {
+                    resumed << "[IMU_RECOVERY] event=resumed seq=" << sample.sequence
+                            << " device_time_ms=" << sample.device_time_ms
+                            << " numeric_ok=" << sample.measurements_valid << "\n";
+                    awaiting_recovery_sample = false;
                 }
             }
-            // Bad numeric data replaces the last sample, so healthy cached values never mask a
-            // fault.
-            state_.sample = sample;
-            history_.push_back(sample);
-            while (history_.size() > 512)
-                history_.pop_front();
+            state_.valid_frames = parser.valid_frames;
+            state_.crc_errors = parser.crc_errors;
+            state_.invalid_frames = parser.invalid_frames;
         }
-        state_.valid_frames = parser.valid_frames;
-        state_.crc_errors = parser.crc_errors;
-        state_.invalid_frames = parser.invalid_frames;
+        if (!resumed.str().empty())
+            std::cerr << resumed.str();
     }
     std::lock_guard<std::mutex> lock(mutex_);
     state_.connected = false;

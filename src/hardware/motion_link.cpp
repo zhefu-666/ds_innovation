@@ -11,8 +11,10 @@ uint64_t nowUs() {
 }
 } // namespace
 
-MotionLink::MotionLink(UARTController& uart, MotionLinkConfig config, std::function<bool()> permit)
-    : permit_(std::move(permit)), uart_(uart), config_(config), ramp_(config) {
+MotionLink::MotionLink(UARTController& uart, MotionLinkConfig config,
+                       std::function<bool()> permit, std::function<bool()> preparation_permit)
+    : permit_(std::move(permit)), preparation_permit_(std::move(preparation_permit)),
+      uart_(uart), config_(config), ramp_(config) {
     if (config_.period_ms == 0 || config_.command_timeout_ms == 0 ||
         config_.command_timeout_ms >= 200)
         throw std::invalid_argument("MotionLink needs period > 0 and command timeout in 1..199 ms");
@@ -54,12 +56,19 @@ void MotionLink::submit(const MotionCommand& command,
 void MotionLink::write(MotionCommand command,
                        bool stale,
                        bool immediate_stop,
-                       bool preserve_angular_tuning) {
+                       bool preserve_angular_tuning,
+                       bool allow_preparation) {
     MotionCommand guarded = command;
     if (permit_ && !permit_()) {
-        if (!ever_authorized_)
-            return; // no implicit gripper close or pitch move before START
-        guarded = stopped(authorized_);
+        if (allow_preparation && preparation_permit_ && preparation_permit_()) {
+            guarded = stopped(command);
+            authorized_ = guarded;
+            ever_authorized_ = true;
+        } else {
+            if (!ever_authorized_)
+                return; // no implicit gripper close or pitch move before START
+            guarded = stopped(authorized_);
+        }
         immediate_stop = true;
     } else {
         authorized_ = guarded;
@@ -139,7 +148,7 @@ void MotionLink::stop() {
         sent = has_command_;
     }
     if (sent)
-        write(stopped(last), false, true, false);
+        write(stopped(last), false, true, false, false);
 }
 bool MotionLink::healthy() const {
     uint64_t submitted;

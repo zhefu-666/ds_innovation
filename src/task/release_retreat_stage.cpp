@@ -28,7 +28,7 @@ ReleaseRetreatResult ReleaseRetreatStage::update(const TaskTuning& t,
         return result;
     };
     if (t.pixel_grasp_enabled && (t.field_carry || t.assume_all_safe)) {
-        // Use the existing speed-integrated travel in metres; jaw retreat needs no IMU calibration.
+        // The parent supplies device-timed IMU displacement after stationary calibration.
         // Do not apply the legacy visual dead-reckoning ratio.
         // Mouth clearance or early delivery sightings must not shorten this leg.
         const float target = .15f;
@@ -38,7 +38,7 @@ ReleaseRetreatResult ReleaseRetreatStage::update(const TaskTuning& t,
         if (context.travel_m >= target)
             return finish(ReleaseRetreatOutcome::VerifyDelivery, "jaw_backed_out_015m");
         if (context.elapsed_us > budget)
-            return finish(ReleaseRetreatOutcome::Fault, "retreat_blocked");
+            return finish(ReleaseRetreatOutcome::Fault, "jaw_retreat_motion_timeout");
         result.reverse = true;
         result.reason = "jaw_back_out_015m";
         return result;

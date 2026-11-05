@@ -36,6 +36,34 @@ void drawZone(cv::Mat& frame, const std::vector<ZoneKeypoint>& points) {
     }
 }
 
+void drawPosePreview(cv::Mat& frame, const ZoneHalves& raw, const PosePreview& preview,
+                     const std::string& mode) {
+    const auto draw = [&](const ZoneHalves& halves, cv::Scalar color, int radius) {
+        // Model slots: far_left,near_left,far_right,near_right.
+        const int edges[][2]={{0,1},{0,2},{1,3},{2,3}};
+        for (int c=0;c<2;++c) {
+            for (const auto& edge:edges)
+                if (posePreviewVisible(halves[c],edge[0],frame.size()) &&
+                    posePreviewVisible(halves[c],edge[1],frame.size()))
+                    cv::line(frame,halves[c].keypoints[edge[0]],halves[c].keypoints[edge[1]],
+                             color,1,cv::LINE_AA);
+            for (int k=0;k<4;++k) if (posePreviewVisible(halves[c],k,frame.size())) {
+                const auto p=halves[c].keypoints[k];
+                cv::circle(frame,p,radius,color,1,cv::LINE_AA);
+                cv::putText(frame,std::to_string(c)+":"+std::to_string(k),
+                            p+cv::Point2f(5,-5),cv::FONT_HERSHEY_SIMPLEX,.4,color,1);
+            }
+        }
+    };
+    if (mode=="raw" || mode=="overlay" || !preview.ok) draw(raw,{255,0,255},5);
+    if (mode!="raw" && preview.ok) draw(preview.halves,{0,255,255},3);
+    const std::string label=!preview.ok ? "PREVIEW ERROR / DISPLAY RAW / CONTROL RAW: "+preview.error :
+        mode=="raw" ? "DISPLAY RAW / CONTROL RAW" :
+                      "DISPLAY SMOOTHED / CONTROL RAW"+std::string(mode=="overlay" ? " / MAGENTA RAW" : "");
+    cv::putText(frame,label,{10,25},cv::FONT_HERSHEY_SIMPLEX,.55,
+                preview.ok ? cv::Scalar(0,255,255) : cv::Scalar(0,0,255),1);
+}
+
 void drawZoneProjection(cv::Mat& frame,
                         const std::vector<ZoneKeypoint>& points,
                         const CameraCalibration& calibration,

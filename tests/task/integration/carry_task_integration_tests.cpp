@@ -142,16 +142,17 @@ struct DepositRig {
     Rig rig{0};
     uint64_t sequence = 0;
     float velocity = 0;
-    float position = 0;
+    float position = 0, gyro_noise = 0;
     PushOutput out;
     DepositRig() {
         rig.task.t_.pixel_grasp_enabled = true;
         rig.task.beginCarryPlacement(rig.input.now_us, "deposit_test");
     }
-    PushOutput tick(bool moving = true, bool samples = true, float drift = 0) {
+    PushOutput tick(bool moving = true, bool samples = true, float drift = 0, float physical_scale = 1) {
         auto& in = rig.input;
         in.imu_translation_samples.clear();
-        const float target = moving ? out.motion.vx_mps : 0;
+        const float sent_target = moving ? out.motion.vx_mps : 0;
+        const float target = sent_target * physical_scale;
         const float accel = (target - velocity) / .04f;
         for (int i = 0; i < 4; ++i) {
             in.now_us += 10000;
@@ -165,11 +166,12 @@ struct DepositRig {
                 sample.device_time_ms = in.now_us / 1000;
                 sample.valid = true;
                 sample.acceleration_mps2 = {accel + .01f + drift, 0, 9.8f};
+                sample.angular_velocity_rps = {0,0,sample.sequence%2 ? gyro_noise : -gyro_noise};
                 sample.quaternion_wxyz = {1, 0, 0, 0};
                 in.imu_translation_samples.push_back(sample);
             }
         }
-        in.sent_vx_mps = target;
+        in.sent_vx_mps = sent_target;
         in.sent_wz_rps = 0;
         in.camera_pitch_cdeg = rig.task.desiredPitch();
         out = rig.task.update(in);
@@ -666,7 +668,7 @@ struct JawRig {
     bool region_inside = false, region_found = true, repeat_region_frame = false;
     uint64_t region_stamp = 0;
     bool pose = true, fresh = true, heading = true, view = true;
-    bool half_entrance = false;
+    bool half_entrance = false, stale_half = false;
     bool ramped_dead_zone = false;
     float angular_response = 1;
     MotionCommand wire;
@@ -682,6 +684,7 @@ struct JawRig {
     bool view_evidence = true, inside = true;
     bool supply_visible = true, injured_visible = true;
     float robot_x = -.15f, image_error = 0;
+    float left_margin = -1, right_margin = -1;
     float edge_override = std::numeric_limits<float>::quiet_NaN();
     PushOutput out;
     JawRig() {
@@ -714,7 +717,7 @@ struct JawRig {
         const float captured_yaw=yaw-capture_yaw_offset;
         z.origin_body_m = {-std::cos(captured_yaw)*robot_x+std::sin(captured_yaw)*gap,
                            std::sin(captured_yaw)*robot_x+std::cos(captured_yaw)*gap};
-        in.subzone_view_us = in.now_us;
+        in.subzone_view_us = stale_half ? in.now_us-1000000 : in.now_us;
         in.supply_view = {view_evidence && supply_visible,inside,-.15f,image_error,image_error*(gap+.15f)/.625f};
         in.injured_view = {view_evidence && injured_visible,inside,.15f,image_error,image_error*(gap+.15f)/.625f};
         // Pitched-camera projection: image edge slope follows measured chassis yaw.
@@ -724,6 +727,7 @@ struct JawRig {
             v->entrance_valid = (pose || half_entrance) && v->valid;
             v->entrance_origin_body_m = z.origin_body_m;
             v->entrance_yaw_rad = half_entrance ? -captured_yaw : z.yaw_body_rad;
+            v->left_margin_fraction=left_margin;v->right_margin_fraction=right_margin;
         }
         in.zone_own = in.zone_identity_verified = true;
         in.zone_valid = pose;
@@ -746,6 +750,19 @@ struct JawRig {
         }
         return out;
     }
+    PushOutput waitForHalfSearch() {
+        const auto start=rig.input.now_us;
+        for(int i=0;i<100;++i) {
+            const auto result=step();
+            assert(result.state==PushState::CARRY && result.motion.vx_mps==0);
+            if(result.reason=="carry_half_reacquire_turn" && result.motion.wz_rps!=0) {
+                assert(rig.input.now_us-start>=250000);
+                return result;
+            }
+        }
+        assert(false && "near-entry landmark loss did not start a stationary search");
+        return out;
+    }
     PushOutput waitForDirectionalRecovery() {
         using Recovery = TransportPhaseData::JawSequence::Recovery;
         const auto start = rig.input.now_us;
@@ -763,7 +780,7 @@ struct JawRig {
         return out;
     }
     void reachColourLeg() {
-        gap = .20f; yaw=.2f;
+        gap = .20f; yaw=.65f;
         bool aligned = false;
         for (int i=0;i<180;++i) {
             step();
@@ -771,7 +788,7 @@ struct JawRig {
             aligned |= out.reason == "carry_entry_image_align" || out.reason == "carry_entry_pose_imu_align" ||
                        out.reason == "carry_entry_forward_correction";
             if (out.motion.vx_mps > 0 && rig.task.desiredPitch()==0) {
-                assert(aligned && std::abs(yaw) <= std::atan(.14f)+.00001f);
+                assert(aligned && std::abs(yaw) <= std::atan(.60f)+.00001f);
                 assert(rig.task.desiredPitch() == 0);
                 return;
             }
@@ -794,11 +811,11 @@ void independentHalfEntranceAcceptsDeliverableEntry() {
             const auto out=p.step();
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
             assert(out.motion.vx_mps==0);
-            if(std::abs(p.image_error)>.07f)
+            if(std::abs(p.image_error)>.10f)
                 assert(p.image_error*out.motion.wz_rps<=0);
             assert(d.jaw_sequence_.recovery==TransportPhaseData::JawSequence::Recovery::Idle);
             if(out.reason=="carry_pre_entry_aligned") {
-                assert(std::abs(p.image_error)<.07f && std::abs(p.rig.input.supply_view.edge_slope)<=.07f);
+                assert(std::abs(p.image_error)<.10f && std::abs(p.rig.input.supply_view.edge_slope)<=.30f);
                 accepted=true;break;
             }
         }
@@ -824,7 +841,7 @@ void offsetImageCannotStartATurnAwayFromTheSelectedHalf() {
     for (bool injured : {false,true}) for (float side : {1.f,-1.f})
         for (auto stage : {Stage::EntryStop,Stage::AlignStop}) for (bool metric : {true,false}) {
             JawRig p; p.gap=.2f; p.yaw=-.55f*side;
-            p.image_error=.251739f*side; p.edge_override=-.0882353f*side;
+            p.image_error=.251739f*side; p.edge_override=-.35f*side;
             p.inside=false; p.bearing=-.409557f*side; p.pose=metric;
             auto& d=p.rig.task.transport_phase_;
             d.half_locked_=true; d.half_injured_=injured; d.half_x_=injured ? .15f : -.15f;
@@ -850,7 +867,7 @@ void offsetImageCannotStartATurnAwayFromTheSelectedHalf() {
 void confirmedAlignmentDirectlyStartsNearViewPush() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for (bool injured : {false,true}) for (float side : {-1.f,1.f})
-        for (float offset : {.0438403f,.05f,.0617388f,.06999f,.07f,.07001f,.10f}) {
+        for (float offset : {.0438403f,.07f,.09999f,.10f,.10001f,.11999f,.12f,.12001f,.15f}) {
             JawRig p; p.gap=.35f; p.yaw=0; p.image_error=side*offset;
             p.edge_override=0;
             p.sight=false; // No box-centre handoff is required after alignment.
@@ -864,7 +881,7 @@ void confirmedAlignmentDirectlyStartsNearViewPush() {
                 assert(out.reason!="carry_entry_forward_correction");
                 assert(out.reason!="carry_pre_entry_confirm");
                 if (out.reason=="carry_pre_entry_aligned") {
-                    assert(offset<.07f);
+                    assert(offset<.10f);
                     assert(p.rig.input.now_us>=1360000);
                     assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
                     assert(p.rig.task.desiredPitch()==0);
@@ -874,7 +891,7 @@ void confirmedAlignmentDirectlyStartsNearViewPush() {
                 assert(out.motion.vx_mps==0 && out.motion.wz_rps*side<=0);
                 assert(p.rig.task.desiredPitch()==-3000);
             }
-            assert(accepted==(offset<.07f));
+            assert(accepted==(offset<.10f));
             if (!accepted) {
                 assert(p.out.state==PushState::CARRY);
                 continue;
@@ -887,19 +904,19 @@ void confirmedAlignmentDirectlyStartsNearViewPush() {
             p.fresh=true; p.region_inside=false;
             auto out=p.step();
             assert(out.reason=="carry_ui120_region_advance");
-            assert(std::abs(out.motion.vx_mps-.04f)<1e-6f);
+            assert(std::abs(out.motion.vx_mps-.06f)<1e-6f);
             assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
             p.region_inside=true;
             out=p.step();
-            for(int i=0;i<3;++i) {
-                assert(out.motion.vx_mps==.04f && out.reason=="carry_ui120_region_overrun");
+            for(int i=0;i<8;++i) {
+                assert(out.motion.vx_mps==.06f && out.reason=="carry_ui120_region_overrun");
                 out=p.step();
             }
             assert(out.motion.vx_mps==0 && out.immediate_motion_stop);
             assert(d.jaw_sequence_.stage==Stage::ColourStop);
             assert(out.motion.gripper_offset==20);
         }
-    std::cout<<"PASS strict <7% confirmation directly switches to UI120 push; no correction or box gate\n";
+    std::cout<<"PASS strict <10% confirmation directly switches to UI120 push; no correction or box gate\n";
 }
 
 void directNearViewPushKeepsColourSpeed() {
@@ -923,30 +940,32 @@ void directNearViewPushKeepsColourSpeed() {
         assert(p.step().motion.vx_mps==0);
         p.view=true; p.region_inside=false;
         auto out=p.step();
-        assert(std::abs(out.motion.vx_mps-.04f)<1e-6f);
+        assert(std::abs(out.motion.vx_mps-.06f)<1e-6f);
         p.region_inside=true;
         out=p.step();
         const auto reached_us=p.rig.input.now_us;
-        for(int i=0;i<3;++i) {
-            assert(p.rig.input.now_us-reached_us<100000);
-            assert(out.motion.vx_mps==.04f && !out.immediate_motion_stop);
+        for(int i=0;i<8;++i) {
+            assert(p.rig.input.now_us-reached_us<300000);
+            assert(out.motion.vx_mps==.06f && !out.immediate_motion_stop);
             assert(out.motion.gripper_offset==20);
+            // Use a final 20 ms tick to check the exact 300 ms boundary.
+            if(i==7) p.rig.input.now_us-=20000;
             out=p.step();
         }
-        assert(p.rig.input.now_us-reached_us>=100000);
+        assert(p.rig.input.now_us-reached_us==300000);
         assert(out.motion.vx_mps==0 && out.immediate_motion_stop);
         assert(q.stage==Stage::ColourStop && out.motion.gripper_offset==20);
     }
-    std::cout << "PASS alignment switches directly to UI120 0.04m/s -> colour brake\n";
+    std::cout << "PASS alignment switches to UI120 0.06m/s -> reached contour 0.06m/s for 0.3s -> brake\n";
 }
 
 void transportScanUsesConfiguredAngularSpeed() {
-    for (float scan_wz : {.25f, .4f, .6f, .9f}) {
+    for (float scan_wz : {.25f, .4f, .6f, .9f, 1.1f}) {
         JawRig plant;
         plant.pose = plant.sight = plant.view_evidence = false;
         plant.rig.task.t_.scan_wz = scan_wz;
-        if (scan_wz == .9f) {
-            plant.rig.task.t_.transport_scan_wz = .9f;
+        if (scan_wz >= .9f) {
+            plant.rig.task.t_.transport_scan_wz = scan_wz;
             plant.rig.task.t_.transport_align_min_wz = .6f;
         }
         plant.rig.task.t_.min_turn_wz = .2f;
@@ -966,7 +985,7 @@ void transportScanUsesConfiguredAngularSpeed() {
 void tiltedImageConvergesThroughSenderRamp() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(float direction : {-1.f,1.f}) {
-        JawRig p;p.pose=false;p.gap=.2f;p.yaw=.35f*direction;
+        JawRig p;p.pose=false;p.gap=.2f;p.yaw=.70f*direction;
         p.ramped_dead_zone=true;p.rig.task.t_.scan_wz=.4f;
         auto& q=p.rig.task.transport_phase_.jaw_sequence_;
         q.stage=Stage::EntryStop;
@@ -976,7 +995,7 @@ void tiltedImageConvergesThroughSenderRamp() {
             assert(out.motion.vx_mps>=0);
             effective |= std::abs(p.wire.wz_rps)>.25f;
             if(p.rig.task.desiredPitch()==0) {
-                assert(std::abs(p.yaw)<=std::atan(.14f)+.00001f); reached=true;break;
+                assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f); reached=true;break;
             }
         }
         assert(effective && reached);
@@ -987,7 +1006,7 @@ void tiltedImageConvergesThroughSenderRamp() {
 void visibleTiltTakesPriorityOverMetricHeading() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(float direction : {-1.f,1.f}) {
-        JawRig p;p.gap=.2f;p.yaw=.3f*direction;p.metric_yaw_bias=.8f*direction;
+        JawRig p;p.gap=.2f;p.yaw=.70f*direction;p.metric_yaw_bias=.8f*direction;
         auto& q=p.rig.task.transport_phase_.jaw_sequence_;
         q.stage=Stage::Align;q.normal_valid=true;q.normal_heading=.8f*direction;
         q.normal_seen_us=p.rig.input.now_us;q.normal_geometry_id="test-entry";
@@ -1035,12 +1054,12 @@ void rejectedNormalCannotReturnDuringTheSameEntry() {
     q.stage=Stage::Align;
     q.normal_valid=true;q.normal_heading=0;q.normal_seen_us=p.rig.input.now_us;
     q.normal_geometry_id="test-entry";
-    p.edge_override=.0756f;
+    p.edge_override=.35f;
     bool rejected=false;
     for(int i=0;i<100;++i) {
         if(rejected) {
             p.yaw=0;
-            p.edge_override=i%2 ? 0.f : .0756f;
+            p.edge_override=i%2 ? 0.f : .35f;
         }
         auto out=p.step();
         if(out.reason=="carry_entry_pose_image_conflict") {rejected=true;continue;}
@@ -1067,7 +1086,7 @@ void detectorBearingConvergesInTheBodyFrame() {
 
 void stablePoseNormalSurvivesLandmarkDropout() {
     using Stage=TransportPhaseData::JawSequence::Stage;
-    for (float initial : {-.3f,.3f}) {
+    for (float initial : {-.70f,.70f}) {
         JawRig p; p.gap=.2f; p.yaw=initial;
         p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::EntryStop;
         // Establish the stationary zone normal before removing all pose landmarks.
@@ -1101,7 +1120,7 @@ void stablePoseNormalSurvivesLandmarkDropout() {
 void poseNormalRejectsJumpsAndUsesCaptureHeading() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(float offset : {0.f, 3.13f, -3.13f}) {
-        JawRig p; p.gap=.2f; p.yaw=.3f; p.imu_offset=offset;
+        JawRig p; p.gap=.2f; p.yaw=.70f; p.imu_offset=offset;
         // A delayed image sees a different chassis yaw. Pair it with capture IMU.
         p.capture_yaw_offset=.08f;
         p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::EntryStop;
@@ -1160,7 +1179,7 @@ void stableImageConflictFallsBackFromBiasedMetricNormal() {
             const auto out=p.step();
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
             if(p.rig.task.desiredPitch()==0) {
-                assert(std::abs(p.yaw)<=std::atan(.14f)+.00001f); reached=true; break;
+                assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f); reached=true; break;
             }
         }
         assert(reached);
@@ -1170,7 +1189,7 @@ void stableImageConflictFallsBackFromBiasedMetricNormal() {
 
 void poseNormalExpiresAndStillNeedsFreshCentring() {
     using Stage=TransportPhaseData::JawSequence::Stage;
-    JawRig p; p.gap=.2f; p.yaw=.3f;
+    JawRig p; p.gap=.2f; p.yaw=.70f;
     p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::EntryStop;
     for(int i=0;i<22;++i)p.step();
     p.pose=p.view_evidence=p.sight=false;
@@ -1256,7 +1275,7 @@ void entryLandmarkLossTurnsTowardFreshOwnZone() {
 }
 
 void imageAlignmentIgnoresMetricYawAndSurvivesMappingLoss() {
-    for(float yaw : {-.2f,0.f,.2f}) {
+    for(float yaw : {-.70f,0.f,.70f}) {
         JawRig p; p.yaw=yaw; p.gap=.2f;
         using Stage=TransportPhaseData::JawSequence::Stage;
         p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::EntryStop;
@@ -1270,7 +1289,7 @@ void imageAlignmentIgnoresMetricYawAndSurvivesMappingLoss() {
                 turned=true;
             }
             if(p.rig.task.desiredPitch()==0) {
-                assert(std::abs(p.yaw)<=std::atan(.14f)+.00001f);
+                assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f);
                 advanced=true; break;
             }
         }
@@ -1444,9 +1463,9 @@ void twentyCentimetreEntryAndColourRelease() {
     plant.fresh = false;
     out = plant.step(); assert(out.motion.vx_mps == 0 && out.state == PushState::CARRY);
     plant.fresh = true; plant.region_inside=true;
-    for(int i=0;i<3;++i) {
+    for(int i=0;i<8;++i) {
         out=plant.step();
-        assert(out.motion.vx_mps==.04f && out.motion.gripper_offset==20);
+        assert(out.motion.vx_mps==.06f && out.motion.gripper_offset==20);
     }
     plant.force_sent = true; plant.forced_vx = .05f;
     for (int i=0;i<12;++i) {
@@ -1460,7 +1479,7 @@ void twentyCentimetreEntryAndColourRelease() {
     assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
     plant.region_inside=true;
     plant.forced_vx = 0;
-    for (int i=0;i<20 && out.state == PushState::CARRY;++i) out=plant.step();
+    for (int i=0;i<45 && out.state == PushState::CARRY;++i) out=plant.step();
     assert(out.state == PushState::RAISE_RELEASE && plant.rig.task.desiredPitch()==0);
     assert(out.reason == "carry_ui120_region_stopped");
     out=plant.step(); assert(out.motion.gripper_offset==0 && out.state==PushState::RAISE_RELEASE);
@@ -1468,7 +1487,8 @@ void twentyCentimetreEntryAndColourRelease() {
     out=plant.step(); assert(out.state==PushState::BACK_OUT);
     assert(plant.rig.task.desiredPitch()==0);
     out=plant.step();
-    assert(out.motion.vx_mps<0 && out.reason=="jaw_back_out_015m");
+    assert(out.motion.vx_mps==0 && out.immediate_motion_stop);
+    assert(out.reason=="jaw_retreat_stop_imu_calibrate");
     plant.rig.task.enter(PushState::CARRY,plant.rig.input.now_us,"next_trip");
     assert(!plant.rig.task.transport_phase_.jaw_sequence_.active);
 }
@@ -1542,26 +1562,24 @@ void approachWithoutLocalEvidenceUsesZoneDirection() {
         }
         assert(parked);
         assert(p.rig.task.transport_phase_.jaw_sequence_.stage==Stage::EntryStop);
-        p.pose=p.view_evidence=false; p.bearing=bearing; out=p.waitForDirectionalRecovery();
-        assert(out.reason=="carry_pose_recovery_turn");
+        p.pose=p.view_evidence=false; p.bearing=bearing; out=p.waitForHalfSearch();
+        assert(out.reason=="carry_half_reacquire_turn");
         assert(out.motion.wz_rps*bearing>0);
     }
     JawRig p; p.yaw=0; p.gap=.2f;
     p.step();
     p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::Align;
     p.pose=false; p.view_evidence=false; p.bearing=.4f;
-    auto entry=p.waitForDirectionalRecovery();
-    assert(entry.reason=="carry_pose_recovery_turn");
-    assert(p.rig.task.transport_phase_.jaw_sequence_.recovery==Recovery::Turn);
-    const float target=p.rig.task.transport_phase_.jaw_sequence_.recovery_heading;
-    assert(std::abs(wrapAngle(target-p.yaw)-float(CV_PI)*.5f)<.02f);
-    // Reappearing landmarks and a changed detector direction must not reverse the turn.
-    p.pose=true; p.view_evidence=true; p.bearing=-.4f;
-    for(int i=0;i<15;++i) {
-        auto out=p.step();
-        assert(out.motion.vx_mps==0 && out.motion.wz_rps>0);
-        assert(p.rig.task.transport_phase_.jaw_sequence_.recovery_heading==target);
+    auto entry=p.waitForHalfSearch();
+    assert(entry.reason=="carry_half_reacquire_turn" && entry.motion.wz_rps>0);
+    assert(p.rig.task.transport_phase_.jaw_sequence_.recovery==Recovery::Idle);
+    p.pose=true; p.view_evidence=true; p.bearing=-.4f;p.image_error=0;p.edge_override=0;
+    bool recovered=false;
+    for(int i=0;i<30;++i) {
+        const auto out=p.step();assert(out.motion.vx_mps==0);
+        if(out.reason=="carry_half_reacquired") {recovered=true;break;}
     }
+    assert(recovered && p.rig.task.transport_phase_.jaw_sequence_.stage==Stage::AlignStop);
     JawRig repeat; repeat.yaw=0; repeat.pose=false; repeat.view_evidence=false;
     repeat.bearing=-.4f;
     repeat.rig.task.transport_phase_.jaw_sequence_.recovery=Recovery::Search;
@@ -1570,15 +1588,15 @@ void approachWithoutLocalEvidenceUsesZoneDirection() {
     assert(repeat.rig.task.transport_phase_.jaw_sequence_.recovery==Recovery::Turn);
     out=repeat.step();
     assert(out.reason=="carry_pose_recovery_turn" && out.motion.wz_rps<0);
-    std::cout<<"PASS approach and entry missing-local directional recovery\n";
+    std::cout<<"PASS approach direction, stationary entry search and stopped selected-half recovery\n";
 }
 
 void poseLossStartsDirectionalRecovery() {
     JawRig p; p.gap=.2f; p.yaw=0;
     p.step();
     p.pose=false; p.view_evidence=false; p.bearing=.4f;
-    auto out=p.waitForDirectionalRecovery();
-    assert(out.reason=="carry_pose_recovery_turn");
+    auto out=p.waitForHalfSearch();
+    assert(out.reason=="carry_half_reacquire_turn");
     assert(out.motion.vx_mps==0 && out.motion.wz_rps>0);
     out=p.step();
     assert(out.motion.vx_mps==0 && out.motion.wz_rps>0);
@@ -1588,8 +1606,9 @@ void poseLossStartsDirectionalRecovery() {
 void poseLossMeasuredRecoveryAndSearch() {
     using Recovery=TransportPhaseData::JawSequence::Recovery;
     for(float bearing : {-.4f,.4f}) {
-        JawRig p; p.gap=.2f; p.yaw=0;
-        p.step(); // establish an actual selected-half observation
+        JawRig p; p.gap=.5f; p.yaw=0;
+        p.step(); // legacy recovery outside the near-entry parking branch
+        p.rig.task.transport_phase_.jaw_sequence_.stage=TransportPhaseData::JawSequence::Stage::AlignStop;
         p.pose=false; p.view_evidence=false; p.bearing=bearing;
         uint64_t seq=0;
         float velocity=0, position=0;
@@ -1672,7 +1691,9 @@ void poseLossMeasuredRecoveryAndSearch() {
         }
     }
     // IMU data is mandatory, not a command-duration estimate.
-    JawRig noimu;noimu.gap=.2f;noimu.yaw=0;noimu.step();noimu.pose=false;noimu.view_evidence=false;noimu.bearing=.4f;
+    JawRig noimu;noimu.gap=.5f;noimu.yaw=0;noimu.step();
+    noimu.rig.task.transport_phase_.jaw_sequence_.stage=TransportPhaseData::JawSequence::Stage::AlignStop;
+    noimu.pose=false;noimu.view_evidence=false;noimu.bearing=.4f;
     for(int i=0;i<350;++i) {
         auto out=noimu.step();assert(out.motion.vx_mps==0);
     }
@@ -1681,7 +1702,7 @@ void poseLossMeasuredRecoveryAndSearch() {
 }
 
 void selectedSubzoneMustBeCentred() {
-    for (int cargo : {0,1}) for (float offset : {-.10f,.10f}) {
+    for (int cargo : {0,1}) for (float offset : {-.15f,.15f}) {
         JawRig p; p.yaw=0; p.gap=.20f;
         p.rig.task.transport_phase_.half_locked_=true;
         p.rig.task.transport_phase_.half_injured_=cargo;
@@ -1702,7 +1723,7 @@ void selectedSubzoneMustBeCentred() {
         JawRig p; p.yaw=0; p.gap=.20f;
         if(invalid==0)p.view_evidence=false;
         if(invalid==1)p.inside=false;
-        if(invalid==2)p.image_error=.08f;
+        if(invalid==2)p.image_error=.15f;
         for(int i=0;i<40;++i) {
             p.step();
             assert(p.rig.task.desiredPitch()==-3000);
@@ -1732,7 +1753,8 @@ void loggedOffsetApproachConvergesWithoutRetreatLoop() {
         MotionVelocityRamp ramp{MotionLinkConfig{}};
         MotionCommand sent;
         ramp.accept(sent,p.rig.input.now_us);
-        bool advanced=false;
+        bool advanced=false, reversing=false;
+        int reverse_legs=0;
 
         for(int i=0;i<2200;++i) {
             p.robot_x-=std::sin(p.yaw)*sent.vx_mps*kDt;
@@ -1749,10 +1771,17 @@ void loggedOffsetApproachConvergesWithoutRetreatLoop() {
                 assert(out.reason=="carry_entry_path_review");
                 assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
             }
-            assert(out.motion.vx_mps>=0 && "approach must never reverse");
+            const bool reverse=out.motion.vx_mps<0;
+            if(reverse && !reversing) ++reverse_legs;
+            reversing=reverse;
+            assert(reverse_legs<=1 && "backoff must not repeat on the same entrance");
+            if(reverse) {
+                assert(d.jaw_sequence_.stage==TransportPhaseData::JawSequence::Stage::Backoff);
+                assert(out.motion.vx_mps>=-.05f && out.motion.wz_rps==0);
+            }
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
             if(p.rig.task.desiredPitch()==0) {
-                assert(std::abs(p.yaw)<=std::atan(.14f)+.00001f && std::abs(p.image_error)<.07f);
+                assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f && std::abs(p.image_error)<.10f);
                 advanced=true; break;
             }
             sent=ramp.next(out.motion,p.rig.input.now_us,out.immediate_motion_stop);
@@ -1763,7 +1792,7 @@ void loggedOffsetApproachConvergesWithoutRetreatLoop() {
             <<" error="<<p.image_error<<" reason="<<p.out.reason<<std::endl;
         assert(advanced);
         std::cout<<"PASS logged offset converges side="<<side<<" injured="<<injured
-                 <<" reverse=0 x_error="<<p.robot_x-target<<"\n";
+                 <<" reverse_legs="<<reverse_legs<<" x_error="<<p.robot_x-target<<"\n";
     }
 }
 
@@ -1790,7 +1819,7 @@ void centredApproachClosedLoop() {
             p.image_error=bx/by*.625f; // simulated 800 px focal length / 1280 width
             auto o=p.step();
             if(p.rig.task.desiredPitch()==0) {
-                assert(std::abs(p.yaw)<=std::atan(.14f)+.00001f && std::abs(p.image_error)<.07f);
+                assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f && std::abs(p.image_error)<.10f);
                 advanced=true;break;
             }
             assert(o.state==PushState::CARRY && o.motion.gripper_offset==20);
@@ -1861,59 +1890,204 @@ void metricAndHeadingAreRequiredForEntry() {
     assert(out.state==PushState::SAFE_STOP && out.motion.gripper_offset==20);
 }
 
-void imuReturnTurnsNet180BeforeSearch() {
-    for (float initial : {0.f, 3.0f, -3.0f}) {
+void deliveryReturnsDirectlyToSearch() {
+    for (bool active : {false, true}) {
         JawRig plant;
-        plant.yaw=initial;
-        plant.rig.task.transport_phase_.jaw_sequence_.active=true;
-        plant.rig.task.enter(PushState::TURN_AROUND,plant.rig.input.now_us,"return-test");
-        float net=0,last=plant.yaw;
-        bool turned=false, braking=false;
-        for (int i=0;i<600;++i) {
-            auto out=plant.step();
-            net += wrapAngle(plant.yaw-last); last=plant.yaw;
-            assert(out.motion.vx_mps==0);
-            turned |= out.motion.wz_rps!=0;
-            braking |= out.reason=="return_turn_180_stop";
-            if (out.state==PushState::SCAN) {
-                assert(turned && braking && std::abs(net-float(CV_PI))<=.035f);
-                assert(out.phase==TaskPhase::Search && out.motion.wz_rps==0);
-                break;
-            }
-            assert(out.state==PushState::TURN_AROUND);
-            assert(i<599);
-        }
+        plant.rig.task.transport_phase_.jaw_sequence_.active=active;
+        plant.rig.task.enter(PushState::VERIFY_DELIVERY,plant.rig.input.now_us,"delivery-test");
+        const auto out=plant.step();
+        assert(out.state==PushState::SCAN && out.phase==TaskPhase::Search);
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        assert(plant.rig.task.trip_context_.trip_.total()==0);
     }
-    // Commanded turn without measured heading change cannot finish.
-    JawRig stuck;
-    stuck.rig.task.transport_phase_.jaw_sequence_.active=true;
-    stuck.rig.task.enter(PushState::TURN_AROUND,stuck.rig.input.now_us,"stuck-test");
-    for (int i=0;i<200;++i) {
-        stuck.yaw=0;
-        stuck.out.motion.wz_rps=0;
-        auto out=stuck.step();
-        assert(out.state==PushState::TURN_AROUND);
-    }
-}
-void releasedCargoRetreatsEstimatedFifteenCentimetres() {
-    DepositRig plant;
-    auto& rig=plant.rig;
-    rig.task.enter(PushState::BACK_OUT,rig.input.now_us,"retreat-test");
-    rig.task.commandFrame(1,rig.input.now_us);
-    rig.input.gripper_feedback_open=1;
-    bool reversed=false;
-    PushOutput out;
-    for(int i=0;i<1000;++i) {
-        out=plant.tick();
-        assert(out.motion.wz_rps==0 && out.motion.gripper_offset==0);
-        reversed |= out.motion.vx_mps<0;
-        if(out.state!=PushState::BACK_OUT)break;
-    }
-    assert(reversed && plant.position<=-.145f && plant.position>=-.165f && out.state==PushState::VERIFY_DELIVERY);
-    assert(out.immediate_motion_stop && out.motion.vx_mps==0);
+    std::cout << "PASS delivery enters search without a return turn\n";
 }
 
-void completeJawTransportLifecycle() {
+// The 16:11 run spent almost all of BACK_OUT's wall budget calibrating,
+// then faulted while completing the final 250 ms stopped confirmation.
+void retreatUsesIndependentStageBudgets() {
+    DepositRig p;
+    auto& task=p.rig.task;
+    task.t_.back_speed=task.t_.max_speed=.4f;
+    task.t_.retreat_budget_us=600000;
+    task.enter(PushState::BACK_OUT,p.rig.input.now_us,"logged-calibration-delay");
+    task.commandFrame(1,p.rig.input.now_us);
+    p.rig.input.gripper_feedback_open=1;
+    const auto start=p.rig.input.now_us;
+    for(int i=0;i<28;++i) {
+        auto out=p.tick(true,false);
+        assert(out.state==PushState::BACK_OUT && out.motion.vx_mps==0);
+    }
+    // Waiting without samples must not count toward a 500 ms stationary window.
+    for(int i=0;i<10;++i) {
+        const auto out=p.tick();
+        assert(out.state==PushState::BACK_OUT && out.motion.vx_mps==0);
+    }
+    for(int i=0;i<100 && p.out.state==PushState::BACK_OUT;++i) p.tick();
+    assert(p.out.state==PushState::VERIFY_DELIVERY);
+    assert(p.rig.input.now_us-start>2000000);
+    assert(p.position<=-.145f && p.position>=-.18f);
+    std::cout<<"PASS retreat calibration, movement and stopped confirmation own their budgets\n";
+}
+
+void retreatTimeoutsIdentifyTheFailedStage() {
+    for(int mode=0;mode<3;++mode) {
+        DepositRig p;auto& task=p.rig.task;
+        task.t_.back_speed=task.t_.max_speed=.4f;
+        task.t_.retreat_budget_us=600000;
+        task.enter(PushState::BACK_OUT,p.rig.input.now_us,"retreat-stage-timeout");
+        task.commandFrame(1,p.rig.input.now_us);
+        p.rig.input.gripper_feedback_open=1;
+        for(int i=0;i<160;++i) {
+            // Keep acceleration at zero despite reverse commands for mode 1.
+            if(mode==2 && task.transport_phase_.jaw_retreat_.stage==
+                    TransportPhaseData::JawRetreat::Stage::Stopping)
+                p.out.motion.vx_mps=-.02f; // sender never reports zero
+            p.tick(true,mode!=0,0,mode==1 ? 0.f : 1.f);
+            if(p.out.state!=PushState::BACK_OUT)break;
+        }
+        const char* reasons[]={"jaw_retreat_calibration_timeout","jaw_retreat_motion_timeout",
+                               "jaw_retreat_stop_timeout"};
+        assert(p.out.state==PushState::SAFE_STOP && p.out.reason==reasons[mode]);
+        assert(p.out.motion.vx_mps==0 && p.out.immediate_motion_stop);
+    }
+    // Field-calibration candidate: .10 rad/s gyro and .12 m/s² alternating
+    // projected acceleration noise, with unchanged 200 ms freshness requirements.
+    DepositRig p;auto& task=p.rig.task;
+    p.gyro_noise=.10f;
+    task.enter(PushState::BACK_OUT,p.rig.input.now_us,"quiet-noisy-imu");
+    task.commandFrame(1,p.rig.input.now_us);
+    for(int i=0;i<25 && p.out.motion.vx_mps>=0;++i)
+        p.tick(true,true,i%2 ? -.12f : .12f);
+    assert(p.out.motion.vx_mps<0 && p.out.state==PushState::BACK_OUT);
+    std::cout<<"PASS calibration/movement/stop timeouts are distinct; stopped noise converges\n";
+}
+
+void retreatPreparationSurvivesReleaseAndRejectsOpeningMotion() {
+    for(bool disturbed : {false,true}) {
+        DepositRig p;
+        auto& task=p.rig.task;auto& in=p.rig.input;
+        task.enter(PushState::CARRY,in.now_us,"precalibrated-release");
+        task.transport_phase_.placing_=false;
+        task.transport_phase_.jaw_sequence_.stage=TransportPhaseData::JawSequence::Stage::ColourStop;
+        task.transport_phase_.jaw_sequence_.heading=0;
+        task.pitch_cmd_=in.camera_pitch_cdeg=task.t_.track_pitch_cdeg;
+        for(int i=0;i<40;++i) {
+            in.transport_floor.valid=in.transport_floor.region_valid=in.transport_floor.inside=true;
+            in.transport_floor.sample_us=in.now_us+40000;
+            p.tick();
+            if(p.out.state==PushState::RAISE_RELEASE)break;
+        }
+        assert(p.out.state==PushState::RAISE_RELEASE);
+        // Delay the open acknowledgement while continuing to supply quiet samples.
+        in.gripper_feedback_open=0;
+        for(int i=0;i<10;++i) p.tick();
+        assert(task.transport_phase_.jaw_retreat_.imu.ready());
+        if(disturbed) {
+            // A strong acceleration during opening invalidates the cached bias.
+            for(int i=0;i<4;++i) p.tick(true,true,(i%2 ? -2.f : 2.f));
+        }
+        in.gripper_feedback_open=1;
+        p.tick();assert(p.out.state==PushState::BACK_OUT);
+        const auto ack=in.now_us;
+        p.tick();
+        if(disturbed) assert(p.out.motion.vx_mps==0);
+        for(int i=0;i<30 && p.out.motion.vx_mps>=0;++i) p.tick();
+        assert(p.out.state==PushState::BACK_OUT && p.out.motion.vx_mps<0);
+        if(!disturbed) assert(in.now_us-ack<=80000);
+    }
+    std::cout<<"PASS stopped placement prepares retreat; opening motion revokes preparation\n";
+}
+
+void releasedCargoRetreatsImuFifteenCentimetres() {
+    for (float physical_scale : {1.f, .5f}) {
+        DepositRig plant;
+        auto& rig=plant.rig;
+        rig.task.enter(PushState::BACK_OUT,rig.input.now_us,"retreat-test");
+        rig.task.commandFrame(1,rig.input.now_us);
+        rig.input.gripper_feedback_open=1;
+        bool reversed=false;
+        PushOutput out;
+        for(int i=0;i<1000;++i) {
+            out=plant.tick(true,true,0,physical_scale);
+            assert(out.motion.wz_rps==0 && out.motion.gripper_offset==0);
+            reversed |= out.motion.vx_mps<0;
+            if(out.state!=PushState::BACK_OUT)break;
+        }
+        assert(reversed && plant.position<=-.145f && plant.position>=-.17f);
+        assert(out.state==PushState::VERIFY_DELIVERY);
+        assert(out.immediate_motion_stop && out.motion.vx_mps==0);
+        std::cout << "PASS IMU retreat physical_scale=" << physical_scale
+                  << " position=" << plant.position << "\n";
+    }
+    // Nonzero sent commands and arbitrarily large command travel cannot finish a blocked leg.
+    DepositRig stuck;
+    stuck.rig.task.enter(PushState::BACK_OUT,stuck.rig.input.now_us,"stuck-retreat");
+    stuck.rig.task.commandFrame(1,stuck.rig.input.now_us);
+    stuck.rig.input.gripper_feedback_open=1;
+    bool requested=false;
+    for(int i=0;i<80;++i) {
+        stuck.rig.task.actionProgress().travel=10;
+        const auto out=stuck.tick(true,true,0,0);
+        assert(out.state==PushState::BACK_OUT);
+        requested |= out.motion.vx_mps<0;
+    }
+    assert(requested && stuck.position==0);
+    // No valid acceleration samples means no initial reverse request.
+    DepositRig missing;
+    missing.rig.task.enter(PushState::BACK_OUT,missing.rig.input.now_us,"missing-imu");
+    missing.rig.task.commandFrame(1,missing.rig.input.now_us);
+    for(int i=0;i<25;++i) {
+        const auto out=missing.tick(true,false);
+        assert(out.state==PushState::BACK_OUT && out.motion.vx_mps==0);
+    }
+    // Lost IMU data while reversing must stop, never fall back to sent-speed travel.
+    DepositRig interrupted;
+    interrupted.rig.task.enter(PushState::BACK_OUT,interrupted.rig.input.now_us,"imu-gap");
+    interrupted.rig.task.commandFrame(1,interrupted.rig.input.now_us);
+    for(int i=0;i<25 && interrupted.out.motion.vx_mps>=0;++i) interrupted.tick();
+    assert(interrupted.out.motion.vx_mps<0);
+    for(int i=0;i<8 && interrupted.out.state!=PushState::SAFE_STOP;++i)
+        interrupted.tick(true,false);
+    assert(interrupted.out.state==PushState::SAFE_STOP);
+    assert(interrupted.out.reason=="jaw_retreat_imu_gap" && interrupted.out.motion.vx_mps==0);
+
+    // A stopped sender cannot accumulate acceleration drift into retreat distance.
+    DepositRig zero_sent;
+    zero_sent.rig.task.enter(PushState::BACK_OUT,zero_sent.rig.input.now_us,"zero-sent");
+    zero_sent.rig.task.commandFrame(1,zero_sent.rig.input.now_us);
+    for(int i=0;i<25 && zero_sent.out.motion.vx_mps>=0;++i) zero_sent.tick();
+    assert(zero_sent.out.motion.vx_mps<0);
+    for(int i=0;i<60;++i) {
+        const auto out=zero_sent.tick(false,true,1.f);
+        assert(out.state==PushState::BACK_OUT);
+    }
+    assert(zero_sent.rig.task.transport_phase_.jaw_retreat_.imu.distance()==0);
+
+    // A pause retains measured progress, then requires a new stationary calibration.
+    DepositRig paused;
+    paused.rig.task.enter(PushState::BACK_OUT,paused.rig.input.now_us,"paused-retreat");
+    paused.rig.task.commandFrame(1,paused.rig.input.now_us);
+    for(int i=0;i<80 && paused.position>-.06f;++i) paused.tick();
+    assert(paused.position<-.05f && paused.position>-.1f);
+    paused.rig.input.run=false;
+    auto out=paused.tick();
+    assert(out.state==PushState::WAIT_START && out.motion.vx_mps==0);
+    const float retained=paused.rig.task.transport_phase_.jaw_retreat_.completed_m;
+    assert(retained>.04f && retained<.1f);
+    for(int i=0;i<10;++i) paused.tick();
+    paused.rig.input.run=true;
+    paused.tick();
+    assert(paused.out.state==PushState::BACK_OUT && paused.out.motion.vx_mps==0);
+    assert(paused.rig.task.transport_phase_.jaw_retreat_.completed_m==retained);
+    for(int i=0;i<300 && paused.out.state==PushState::BACK_OUT;++i) paused.tick();
+    assert(paused.out.state==PushState::VERIFY_DELIVERY);
+    assert(paused.position<=-.145f && paused.position>=-.18f);
+    std::cout << "PASS IMU gap stops; zero sent holds distance; pause retains IMU progress\n";
+    std::cout << "PASS sent travel cannot replace IMU samples or physical displacement\n";
+}
+
+void completeJawTransportLifecycle(bool inspected = false) {
     DepositRig plant;
     auto& rig=plant.rig;
     auto& in=rig.input;
@@ -1923,16 +2097,10 @@ void completeJawTransportLifecycle() {
     task.transport_phase_.carry_us_=in.now_us;
     task.pitch_cmd_=in.camera_pitch_cdeg=-3000;
     in.heading_rad=0;
-    bool opened=false,reversed=false,verified=false,turned=false;
-    float release_position=0, turn_net=0;
+    bool opened=false,reversed=false,verified=false;
+    float release_position=0;
     for (int i=0;i<1800;++i) {
         const auto before=plant.out.state;
-        if (before==PushState::TURN_AROUND) {
-            const float delta=plant.out.motion.wz_rps*.04f;
-            in.heading_rad=wrapAngle(in.heading_rad+delta);
-            turn_net+=delta;
-            turned |= delta!=0;
-        }
         auto& z=in.zone_estimate;
         z.valid=true;z.source=ZoneEstimate::Source::MULTI_POINT;
         z.zone_label="blue_safe_zone";z.geometry_id="full-trip";
@@ -1952,13 +2120,24 @@ void completeJawTransportLifecycle() {
         in.transport_floor.sample_us=in.now_us+40000;
         in.transport_floor.valid=in.transport_floor.region_valid=true;
         in.transport_floor.inside=plant.position>.025f;
+        if (inspected) {
+            in.transport_checks_enabled = true;
+            in.pixel_grasp_near_view = task.desiredPitch() == task.t_.near_pitch_cdeg;
+            in.capture_scene_valid = true;
+            in.capture_scene_us = in.now_us + 40000;
+            in.pixel_grasp_view = task.desiredPitch() == task.t_.track_pitch_cdeg ||
+                                  in.pixel_grasp_near_view;
+            in.transport_review_clear = task.desiredPitch() == kTransportReviewPitchCdeg;
+        }
         if(opened)in.gripper_feedback_open=1;
         if(before==PushState::VERIFY_DELIVERY) {
-            in.delivery_observed=true;in.delivery_box_count=1;
-            in.delivery_box_sample_us=in.now_us+40000;
+            // Completed IMU retreat hands off directly to search without image acceptance.
+            in.delivery_observed=false;in.delivery_box_count=0;
+            in.delivery_box_sample_us=0;
             verified=true;
         }
         const auto out=plant.tick();
+        if(out.state==PushState::SAFE_STOP) std::cerr<<"transport lifecycle failed: "<<out.reason<<std::endl;
         assert(out.state!=PushState::SAFE_STOP);
         if(out.motion.gripper_offset==0 && !opened) {
             assert(before==PushState::RAISE_RELEASE);
@@ -1969,15 +2148,12 @@ void completeJawTransportLifecycle() {
             assert(opened && out.state==PushState::BACK_OUT && out.motion.wz_rps==0);
             reversed=true;
         }
-        if(out.state==PushState::TURN_AROUND) {
-            assert(opened && reversed && verified && plant.position-release_position<=-.145f);
-            assert(out.motion.vx_mps==0);
-        }
+        assert(out.state!=PushState::TURN_AROUND && out.state!=PushState::TURN_SCAN);
         if(out.state==PushState::SCAN) {
-            assert(opened && reversed && verified && turned);
-            assert(std::abs(turn_net-float(CV_PI))<=.035f);
+            assert(opened && reversed && verified);
+            assert(plant.position-release_position<=-.145f);
             assert(task.total_==1 && out.motion.vx_mps==0 && out.motion.wz_rps==0);
-            std::cout<<"PASS complete 20cm -> IMU normal -> UI120 half contour -> open ack -> speed15cm -> IMU180 -> search"<<std::endl;
+            std::cout<<"PASS complete 20cm -> IMU normal -> UI120 half contour -> open ack -> IMU15cm -> search"<<std::endl;
             return;
         }
     }
@@ -2024,7 +2200,7 @@ void loggedApproachKeepsSelectedHalfAsSteeringTarget() {
         d.half_locked_=true; d.half_injured_=injured; d.half_x_=injured ? .15f : -.15f;
         p.robot_x=d.half_x_;
         p.supply_visible=!injured; p.injured_visible=injured;
-        p.image_error=-.12f*side; p.bearing=.5f*side;
+        p.image_error=-.18f*side; p.bearing=.5f*side;
         // Isolate half priority on a feasible curve; large inconsistent offsets
         // now stop for the separate stationary path review.
         p.metric_yaw_bias=.12f*side; p.edge_override=-.045f*side;
@@ -2045,7 +2221,7 @@ void loggedApproachKeepsSelectedHalfAsSteeringTarget() {
     }
     // A single projected-normal jump after convergence cannot take over steering.
     for (float side : {-1.f,1.f}) {
-        JawRig p; p.gap=.8f; p.yaw=0; p.image_error=-.12f*side;
+        JawRig p; p.gap=.8f; p.yaw=0; p.image_error=-.18f*side;
         for(int i=0;i<4;++i) p.step();
         p.metric_yaw_bias=.6f*side;
         p.edge_override=-.045f*side;
@@ -2058,9 +2234,11 @@ void loggedApproachKeepsSelectedHalfAsSteeringTarget() {
         for(int i=0;i<4;++i) p.step();
         p.pose=false; p.view_evidence=false; p.bearing=.5f;
         p.enemy=invalid==1; p.stale_sight=invalid==2;
-        for(int i=1;i<=8;++i) {
+        for(int i=1;i<=16;++i) {
             const auto out=p.step();
-            if(i<5) {
+            // Confirmed enemy evidence still revokes the route immediately;
+            // otherwise the accepted entrance expires after 500 ms.
+            if(i<(invalid==1 ? 5 : 13)) {
                 assert(out.reason=="carry_entry_route_hold" || out.reason=="carry_selected_half_wait");
                 if(invalid==1 && i>=3) assert(out.motion.vx_mps==0);
             } else {
@@ -2098,7 +2276,7 @@ void intermittentHalfApproachConvergesThroughSender() {
             const auto out=p.step();
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
             if(p.rig.task.desiredPitch()==0) {
-                assert(std::abs(p.yaw)<=std::atan(.14f)+.00001f && std::abs(p.image_error)<.07f);
+                assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f && std::abs(p.image_error)<.10f);
                 advanced=true;break;
             }
             sent=ramp.next(out.motion,p.rig.input.now_us,out.immediate_motion_stop);
@@ -2115,34 +2293,36 @@ void intermittentHalfApproachConvergesThroughSender() {
 
 
 void entryDropoutWaitsForStationaryObservation() {
-    using Stage=TransportPhaseData::JawSequence::Stage;
     using Recovery=TransportPhaseData::JawSequence::Recovery;
-    for (bool returns : {false,true}) {
-        // First observe the selected entrance at the stop line, then lose it.
-        // A whole-zone-only fix can no longer authorize this stage transition.
-        JawRig p; p.yaw=0; p.gap=.2f;
-        auto out=p.step();
-        assert(out.reason=="carry_pre_entry_stop");
-        p.pose=p.view_evidence=false; p.bearing=.24f;
+    for(bool returns : {false,true}) {
+        JawRig p;p.yaw=0;p.gap=.2f;
+        assert(p.step().reason=="carry_pre_entry_stop");
+        p.pose=p.view_evidence=false;p.bearing=.24f;
+        p.force_sent=true;p.forced_vx=.01f;
         auto& q=p.rig.task.transport_phase_.jaw_sequence_;
-        const auto start=p.rig.input.now_us;
-        for(int i=0;i<20;++i) {
-            out=p.step();
-            assert(q.stage==Stage::EntryStop && q.recovery==Recovery::Idle);
+        for(int i=0;i<12;++i) {
+            const auto out=p.step();
+            assert(q.recovery==Recovery::Idle);
             assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
         }
+        p.forced_vx=0;
+        const auto out=p.waitForHalfSearch();
+        assert(out.motion.wz_rps>0 && q.recovery==Recovery::Idle);
         if(returns) {
-            p.pose=true; p.view_evidence=true;
-            for(int i=0;i<12;++i) {
-                p.step(); assert(q.recovery==Recovery::Idle);
+            p.pose=p.view_evidence=true;p.edge_override=0;p.image_error=0;
+            bool aligned=false;
+            for(int i=0;i<40;++i) {
+                const auto next=p.step();assert(next.motion.vx_mps==0 && q.recovery==Recovery::Idle);
+                if(next.reason=="carry_pre_entry_aligned") {aligned=true;break;}
             }
+            assert(aligned);
         } else {
-            for(int i=0;i<35 && q.recovery==Recovery::Idle;++i) p.step();
-            assert(q.recovery==Recovery::Turn);
-            assert(p.rig.input.now_us-start>=1500000);
+            for(int i=0;i<20;++i) {
+                const auto next=p.step();assert(next.motion.vx_mps==0 && q.recovery==Recovery::Idle);
+            }
         }
     }
-    std::cout<<"PASS entry dropout observes a stationary window before directional recovery\n";
+    std::cout<<"PASS entry dropout brakes sent translation, searches in place and confirms fresh recovery\n";
 }
 
 // 12:21 trace: fresh half errors -5.25%, -8.83%, -10.90% were
@@ -2194,7 +2374,7 @@ void efficientEntryAcceptsSmallOffsets() {
 
 void outOfToleranceEntryCentresWithoutForwardCorrection() {
     for(bool injured : {false,true}) for(float side : {-1.f,1.f})
-        for(float error : {.07f,.07001f,.0865214f,.11f}) {
+        for(float error : {.10f,.10001f,.12f,.15f,.18f}) {
             JawRig p;p.yaw=0;p.gap=.30f;p.image_error=error*side;p.edge_override=0;
             auto& d=p.rig.task.transport_phase_;
             d.half_locked_=true;d.half_injured_=injured;d.half_x_=injured ? .15f : -.15f;
@@ -2215,7 +2395,7 @@ void outOfToleranceEntryCentresWithoutForwardCorrection() {
             }
             assert(accepted && p.rig.task.desiredPitch()==0);
         }
-    std::cout<<"PASS persistent >=7% entry centres without forward correction\n";
+    std::cout<<"PASS persistent >=10% entry centres without forward correction\n";
 }
 
 void earlyApproachScalesTurnBeforeTheStopLine() {
@@ -2236,15 +2416,17 @@ void earlyApproachScalesTurnBeforeTheStopLine() {
             out=p.step();
         }
         assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
-        assert(out.motion.vx_mps==0);
-        assert(out.motion.wz_rps*side<-.2f &&
-               "large initial offset needs more than the old 0.2 rad/s arc");
+        assert(metric ? out.motion.vx_mps>0 : out.motion.vx_mps==0);
+        assert(out.motion.wz_rps*side<0);
+        if(!metric) assert(std::abs(out.motion.wz_rps)>.2f);
+        // A measured forward target uses an arc; image-only direction still
+        // cannot authorize translation across an unmeasured parking line.
         assert(std::abs(out.motion.wz_rps)<=.4f);
         // A nearly aligned approach keeps speed and a proportional small turn.
         JawRig aligned; aligned.gap=.65f; aligned.yaw=0; aligned.pose=metric;
         aligned.robot_x=aligned.rig.task.halfX(); aligned.image_error=.002f;
         auto small=aligned.step();
-        assert(metric ? small.motion.vx_mps>out.motion.vx_mps : small.motion.vx_mps==0);
+        assert(metric ? small.motion.vx_mps>=out.motion.vx_mps : small.motion.vx_mps==0);
         assert(std::abs(small.motion.wz_rps)<.1f);
         // Runtime angular limits still apply to the stronger approach.
         p.rig.task.t_.max_wz=.12f;
@@ -2300,7 +2482,8 @@ void loggedSteeringDropoutsConvergeWithoutRetreatLoop() {
         p.supply_visible=!injured; p.injured_visible=injured;
         p.robot_x=d.half_x_-.35f*side;
 
-        bool advanced=false, confirmed_outside_deadline=false;
+        bool advanced=false, confirmed_outside_deadline=false, reversing=false;
+        int reverse_legs=0;
         for(int i=0;i<2200;++i) {
             p.robot_x-=std::sin(p.yaw)*p.wire.vx_mps*kDt;
             p.gap-=std::cos(p.yaw)*p.wire.vx_mps*kDt;
@@ -2317,10 +2500,17 @@ void loggedSteeringDropoutsConvergeWithoutRetreatLoop() {
                 confirmed_outside_deadline=true;
             }
             if(p.gap<=.20f) assert(confirmed_outside_deadline);
-            assert(out.motion.vx_mps>=0 && "capture dropouts must never reverse the approach");
+            const bool reverse=out.motion.vx_mps<0;
+            if(reverse && !reversing) ++reverse_legs;
+            reversing=reverse;
+            assert(reverse_legs<=1 && "backoff must not become a retreat loop");
+            if(reverse) {
+                assert(d.jaw_sequence_.stage==TransportPhaseData::JawSequence::Stage::Backoff);
+                assert(out.motion.vx_mps>=-.05f && out.motion.wz_rps==0);
+            }
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
             if(p.rig.task.desiredPitch()==0) {
-                assert(std::abs(p.yaw)<=std::atan(.14f)+.00001f && std::abs(p.image_error)<.07f);
+                assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f && std::abs(p.image_error)<.10f);
                 advanced=true;break;
             }
         }
@@ -2329,7 +2519,7 @@ void loggedSteeringDropoutsConvergeWithoutRetreatLoop() {
             <<" x="<<p.robot_x<<" image="<<p.image_error<<" reason="<<p.out.reason<<std::endl;
         assert(advanced && confirmed_outside_deadline);
         std::cout<<"PASS logged capture dropout converges injured="<<injured
-                 <<" side="<<side<<" reverse=0\n";
+                 <<" side="<<side<<" reverse_legs="<<reverse_legs<<"\n";
     }
 }
 
@@ -2356,7 +2546,7 @@ void preEntryAlignmentCompletesAndHoldsItsTarget() {
         p.pose=p.view_evidence=p.sight=false; p.bearing=-.5f;
         for(int i=0;i<50;++i) {
             const auto out=p.step();
-            assert(std::abs(out.motion.vx_mps-.04f)<1e-6f && out.motion.wz_rps==0);
+            assert(std::abs(out.motion.vx_mps-.06f)<1e-6f && out.motion.wz_rps==0);
             assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
             assert(p.rig.task.desiredPitch()==0);
         }
@@ -2380,17 +2570,16 @@ void alignmentMustFinishBeforeTwentyCentimetres() {
         assert(out.motion.vx_mps==0 && "final alignment must begin outside the 20 cm line");
         assert(out.reason=="carry_pre_entry_stop");
     }
-    // The 13:36 trace's 6.9% offset is now within tolerance; a 7.1%
-    // offset still cannot advance past the 20 cm line without centring.
-    for (float side : {-1.f,1.f}) for(float offset : {.069f,.071f}) {
+    // A 9.9% offset is within tolerance; a 10.1% offset still needs centring.
+    for (float side : {-1.f,1.f}) for(float offset : {.099f,.101f}) {
         JawRig p; p.gap=.2f; p.yaw=.15f*side; p.image_error=offset*side;
         bool aligned=false;
         for(int i=0;i<50;++i) {
             const auto out=p.step();
             aligned |= out.reason=="carry_pre_entry_aligned";
-            assert(out.motion.vx_mps<=0 || (aligned && offset<.07f));
+            assert(out.motion.vx_mps<=0 || (aligned && offset<.10f));
         }
-        assert(aligned==(offset<.07f));
+        assert(aligned==(offset<.10f));
     }
     std::cout<<"PASS alignment is required before the 20 cm line\n";
 }
@@ -2482,7 +2671,7 @@ void selectedHalfDropoutWithoutRouteWaitsForFiveFrames() {
 void imageTurnContinuesUntilFinalObservation() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(float side : {-1.f,1.f}) {
-        JawRig p;p.pose=false;p.yaw=0;p.image_error=-.1f*side;p.edge_override=-.15f*side;
+        JawRig p;p.pose=false;p.yaw=0;p.image_error=-.1f*side;p.edge_override=-.35f*side;
         p.capture_yaw_offset=.04f*side;
         auto& q=p.rig.task.transport_phase_.jaw_sequence_;
         q.stage=Stage::Align;q.image_turn_heading=.1f*side;q.image_turn_wz=.4f*side;
@@ -2553,15 +2742,14 @@ void unalignedEntryCentresWithoutTranslation() {
     std::cout<<"PASS unaligned entry centres without translation; fresh confirmation permits entry\n";
 }
 
-// 15:20 trace: a 7.8% offset and -0.077 edge repeatedly reset stationary
-// confirmation while every command remained zero. Both target halves and
-// mirrored geometry must terminate without authorizing entry or losing cargo.
-void loggedStationaryConflictTerminates() {
+// A conflict outside the relaxed centre and edge bounds must terminate
+// without authorizing entry or losing cargo on either half or mirrored side.
+void outOfToleranceStationaryConflictTerminates() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(bool injured : {false,true}) for(float side : {-1.f,1.f})
         for(auto stage : {Stage::EntryStop,Stage::AlignStop}) {
             JawRig p; p.yaw=0; p.gap=.35f;
-            p.image_error=.0782606f*side; p.edge_override=-.0769231f*side;
+            p.image_error=.15f*side; p.edge_override=-.35f*side;
             p.metric_yaw_bias=.337376f*side;
             auto& d=p.rig.task.transport_phase_;
             d.half_locked_=true;d.half_injured_=injured;
@@ -2584,14 +2772,14 @@ void loggedStationaryConflictTerminates() {
             const auto out=p.step();
             assert(out.state==PushState::SAFE_STOP && out.motion.vx_mps==0 && out.motion.wz_rps==0);
         }
-    std::cout<<"PASS logged stationary conflict terminates with cargo held\n";
+    std::cout<<"PASS out-of-tolerance stationary conflict terminates with cargo held\n";
 }
 
 void jointApproachReachesParkingPoseThroughSender() {
     for(bool injured : {false,true}) for(float side : {-1.f,1.f})
         for(float response : {1.f,6.f}) for(float speed : {.05f,.2f}) {
         JawRig p;p.gap=.8f;p.yaw=.2f*side;p.ramped_dead_zone=true;
-        p.rig.task.t_.carry_budget_us=120000000;
+        p.rig.task.t_.carry_budget_us=90000000; // actual controlled-field entry budget
         p.angular_response=response;p.rig.task.t_.carry_speed=speed;
         auto& d=p.rig.task.transport_phase_;
         d.half_locked_=true;d.half_injured_=injured;d.half_x_=injured ? .15f : -.15f;
@@ -2620,7 +2808,7 @@ void jointApproachReachesParkingPoseThroughSender() {
                 assert(std::abs(p.yaw)<.07f && "position and heading must converge before parking");
             }
             if(out.reason=="carry_pre_entry_aligned") {
-                assert(parked && p.gap>.20f && std::abs(p.image_error)<.07f);
+                assert(parked && p.gap>.20f && std::abs(p.image_error)<.10f);
                 confirmed=true;break;
             }
         }
@@ -2689,7 +2877,7 @@ void stationaryOffsetWithSpaceResumesJointApproach() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(bool injured : {false,true}) for(float side : {-1.f,1.f}) {
         JawRig p;p.gap=.55f;p.yaw=0;
-        p.image_error=.0714286f*side;p.edge_override=0;
+        p.image_error=.15f*side;p.edge_override=0;
         auto& d=p.rig.task.transport_phase_;
         d.half_locked_=true;d.half_injured_=injured;d.half_x_=injured ? .15f : -.15f;
         p.robot_x=d.half_x_-.08f*side;
@@ -2723,7 +2911,7 @@ void stationaryOffsetWithSpaceResumesJointApproach() {
 void reapproachNeedsStableRangeAndRoom() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(int scenario=0;scenario<3;++scenario) {
-        JawRig p;p.yaw=0;p.image_error=.088f;p.edge_override=0;
+        JawRig p;p.yaw=0;p.image_error=.15f;p.edge_override=0;
         p.robot_x=p.rig.task.halfX()-.08f;
         p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::AlignStop;
         if(scenario==0)p.pose=false;
@@ -2749,7 +2937,7 @@ void resumedApproachConvergesThroughSender() {
         p.rig.task.t_.scan_wz=.4f;
         p.rig.task.t_.carry_budget_us=120000000;
         const float target=p.rig.task.halfX();
-        p.robot_x=target-.08f*side;
+        p.robot_x=target-.16f*side;
         p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::AlignStop;
         bool resumed=false,confirmed=false;
         for(int i=0;i<2800;++i) {
@@ -2800,9 +2988,8 @@ void imageTurnBrakesBeforeNextImuStep() {
 }
 
 
-// 16:03 trace: the edge is already within 5%; an 8.24% right offset
-// must request a right turn, then re-observe instead of declaring failure.
-void loggedFivePercentEntryCentresBeforeAdvancing() {
+// The 16:03 trace's 8.24% in-half offset now confirms without a turn.
+void loggedInHalfEntryAcceptsWithoutTurning() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(bool injured : {false,true}) for(float side : {-1.f,1.f})
         for(bool biased_normal : {false,true}) {
@@ -2828,21 +3015,21 @@ void loggedFivePercentEntryCentresBeforeAdvancing() {
                 turned=true;brake_us=0;
             } else if(turned && !brake_us) brake_us=p.rig.input.now_us;
             if(out.reason=="carry_pre_entry_aligned") {
-                assert(turned && std::abs(p.image_error)<.07f);
-                assert(brake_us && p.rig.input.now_us-brake_us>=250000);
+                assert(!turned && std::abs(p.image_error)<.10f);
+                assert(p.rig.input.now_us>=1360000);
                 assert(q.stage==Stage::ColourAdvance);
                 accepted=true;break;
             }
         }
-        assert(turned && accepted);
+        assert(!turned && accepted);
     }
-    std::cout<<"PASS 16:03 offset turns toward the selected half and confirms before advancing\n";
+    std::cout<<"PASS 16:03 in-half offset confirms without another precision turn\n";
 }
 
-void entryEdgeSevenPercentBoundary() {
+void entryEdgeThirtyPercentBoundary() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(float gap : {.2f,.35f}) for(float side : {-1.f,1.f})
-        for(float slope : {.05f,.0574713f,.06999f,.07f,.07001f}) {
+        for(float slope : {.05f,.07f,.26062f,.29999f,.30f,.30001f}) {
         JawRig p;p.gap=gap;p.yaw=0;p.image_error=0;p.edge_override=side*slope;
         p.pose=false;
         p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::AlignStop;
@@ -2854,16 +3041,16 @@ void entryEdgeSevenPercentBoundary() {
             if(out.reason=="carry_pre_entry_aligned") {accepted=true;break;}
             if(turned)break;
         }
-        assert(accepted==(slope<=.07f));
-        assert(turned==(slope>.07f));
+        assert(accepted==(slope<=.30f));
+        assert(turned==(slope>.30f));
     }
-    std::cout<<"PASS entry slope accepts inclusive 7% at both distances\n";
+    std::cout<<"PASS entry slope accepts inclusive 0.30 at both distances\n";
 }
 
 void centreTurnBrakesOnBadSlopeOrBlockedClearance() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(int fault=0;fault<4;++fault) {
-        JawRig p;p.pose=false;p.yaw=0;p.image_error=.082391f;p.edge_override=-.0226f;
+        JawRig p;p.pose=false;p.yaw=0;p.image_error=.15f;p.edge_override=-.0226f;
         p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::AlignStop;
         bool turned=false;
         for(int i=0;i<30;++i) {
@@ -2872,7 +3059,7 @@ void centreTurnBrakesOnBadSlopeOrBlockedClearance() {
             if(out.motion.wz_rps<0) {turned=true;break;}
         }
         assert(turned);
-        if(fault==0)p.edge_override=-.07001f;
+        if(fault==0)p.edge_override=-.30001f;
         if(fault==1) {
             p.rig.input.directional_clearance_valid=true;p.rig.input.turn_safe=false;
         }
@@ -2891,7 +3078,7 @@ void centreTurnBrakesOnBadSlopeOrBlockedClearance() {
 }
 
 
-void fiveMissingHalvesKeepPlannedRouteBeforeSearching() {
+void briefMissingHalvesKeepPlannedRouteBeforeSearching() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for(bool injured : {false,true}) for(float side : {-1.f,1.f}) {
         JawRig p;p.gap=.8f;p.yaw=0;
@@ -2908,14 +3095,14 @@ void fiveMissingHalvesKeepPlannedRouteBeforeSearching() {
         const auto first=p.step();
         assert(first.reason=="carry_entry_route_hold" && first.motion.vx_mps>0);
         assert(first.motion.wz_rps*side>0 && !first.immediate_motion_stop);
-        // Repeated control ticks on one captured image do not spend the frame budget.
+        // Repeated control ticks cannot renew the accepted entrance timestamp.
         for(int i=0;i<8;++i) {
             p.rig.input.now_us+=1000;
             const auto duplicate=p.rig.task.update(p.rig.input);
             assert(duplicate.reason=="carry_entry_route_hold" && duplicate.motion.vx_mps>0);
         }
         bool curvature_updated=false;
-        for(int missing=2;missing<=4;++missing) {
+        for(int missing=2;missing<=12;++missing) {
             const auto out=p.step();
             assert(out.reason=="carry_entry_route_hold" && out.motion.vx_mps>0);
             assert(out.motion.wz_rps*side>0 && !out.immediate_motion_stop);
@@ -2944,7 +3131,7 @@ void fiveMissingHalvesKeepPlannedRouteBeforeSearching() {
         const auto blocked=p.step();
         assert(blocked.motion.vx_mps==0 && blocked.motion.wz_rps==0);
     }
-    std::cout<<"PASS four missing half frames follow planned route; fifth brakes for directed search; fresh half confirms; duplicates and blockers respected\n";
+    std::cout<<"PASS missing half keeps its planned route for 500ms, then brakes for directed search; fresh half confirms; duplicates and blockers respected\n";
 }
 
 // 17:13:58 trace: this observed in-half offset still delivers into the safe zone.
@@ -2982,7 +3169,7 @@ void loggedDeliverableEntryStartsNearViewPush() {
 void nearContourNeedsDistinctStoppedCaptures() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     JawRig p;p.yaw=0;p.reachColourLeg();p.region_inside=true;
-    for(int i=0;i<4;++i)p.step();
+    for(int i=0;i<9;++i)p.step();
     assert(p.rig.task.transport_phase_.jaw_sequence_.stage==Stage::ColourStop);
     p.force_sent=true;p.forced_vx=.04f;
     for(int i=0;i<20;++i)assert(p.step().state==PushState::CARRY);
@@ -3044,6 +3231,7 @@ void entryRangeReviewAndForwardReposition() {
     }
     for(float side : {-1.f,1.f}) {
         JawRig p;p.gap=.55f;p.yaw=0;p.image_error=.3f*side;
+        p.rig.task.t_.carry_budget_us=90000000;
         p.edge_override=-.10f*side;
         p.robot_x=p.rig.task.halfX()-.23f*side;
         p.rig.task.transport_phase_.jaw_sequence_.stage=Stage::AlignStop;
@@ -3055,12 +3243,12 @@ void entryRangeReviewAndForwardReposition() {
         assert(replanned);
         p.edge_override=std::numeric_limits<float>::quiet_NaN();
         bool advanced=false;
-        for(int i=0;i<300;++i) {
+        for(int i=0;i<1800;++i) {
             p.robot_x-=std::sin(p.yaw)*p.out.motion.vx_mps*.04f;
             p.gap-=std::cos(p.yaw)*p.out.motion.vx_mps*.04f;
             p.image_error=.625f*std::tan(p.yaw-std::atan2(p.robot_x-p.rig.task.halfX(),p.gap+.15f));
             out=p.step();
-            assert(out.state==PushState::CARRY && out.motion.vx_mps>=0);
+            assert(out.state==PushState::CARRY && out.motion.vx_mps>=-.05f);
             advanced |= out.motion.vx_mps>0;
             if(advanced && std::abs(p.robot_x-p.rig.task.halfX())<.08f) break;
         }
@@ -3103,7 +3291,11 @@ void repositionLossKeepsSearching() {
         bool directed=false;
         for(int i=0;i<60;++i) {
             const auto out=p.step();
-            assert(out.state==PushState::CARRY && out.motion.vx_mps==0);
+            assert(out.state==PushState::CARRY);
+            if(i<12) {
+                assert(out.motion.vx_mps>0 &&
+                       !p.rig.task.transport_phase_.jaw_sequence_.approach_resume_pending);
+            } else assert(out.motion.vx_mps==0);
             if(out.reason=="carry_half_reacquire_turn" && out.motion.wz_rps!=0 && !directed) {
                 if(box) assert(out.motion.wz_rps*side>0);
                 directed=true;
@@ -3152,10 +3344,10 @@ void lateralEntranceJumpsRequireStationaryReview() {
         }
         auto out=p.step();
         assert(out.reason=="carry_entry_route_hold" && out.motion.vx_mps>0);
-        for(int i=0;i<9;++i) {
+        for(int i=0;i<15;++i) {
             p.robot_x=p.rig.task.halfX()+side*(i%2 ? .30f : .50f);
             out=p.step();
-            if(q.approach_route.valid(p.rig.input.now_us,p.rig.task.t_.frame_timeout_us)) {
+            if(q.approach_route.valid(p.rig.input.now_us,500000)) {
                 assert(out.reason=="carry_entry_route_hold" && out.motion.vx_mps>0);
             } else {
                 assert(out.reason=="carry_entry_measurement_unstable");
@@ -3167,44 +3359,54 @@ void lateralEntranceJumpsRequireStationaryReview() {
         for(int i=0;i<6 && q.range_wait;++i) out=p.step();
         assert(!q.range_wait && out.state==PushState::CARRY);
         // Stable range now goes through the early curve review before movement.
-        for(int i=0;i<20 && !q.reposition;++i) out=p.step();
-        assert(q.reposition && out.motion.vx_mps>=0);
-        out=p.step();
-        assert(out.motion.vx_mps!=0 || out.motion.wz_rps!=0);
+        const auto replanned = [&] { return q.reposition || int(q.stage)>=9; };
+        for(int i=0;i<25 && !replanned();++i) out=p.step();
+        assert(replanned() && out.motion.vx_mps==0);
+        bool moved=false;
+        for(int i=0;i<160;++i) {
+            out=p.step();
+            if(out.motion.vx_mps!=0 || out.motion.wz_rps!=0) {moved=true;break;}
+        }
+        assert(moved);
     }
     std::cout<<"PASS lateral entrance jumps bridge briefly, expire and require three stable captures\n";
 }
 
 
-// Regression for 19:51:45: short parking room must not produce a crawling spin.
-void approachRejectsShortLargeOffsetWithoutReversing() {
+// Short parking room now stops for image alignment instead of reversing.
+void shortParkingEntryUsesStationaryAlignment() {
     for(float side : {-1.f,1.f}) {
         JawRig p;p.gap=.3796839f;p.robot_x=p.rig.task.halfX()+.201325f*side;
         p.yaw=.5f*side;p.image_error=.127826f*side;
-        bool reported=false;
-        for(int i=0;i<25;++i) {
+        bool turned=false;
+        for(int i=0;i<80;++i) {
             const auto out=p.step();
-            assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
-            if(out.state==PushState::SAFE_STOP) {
-                assert(out.reason=="carry_entry_forward_space_insufficient");reported=true;break;
-            }
+            assert(out.state==PushState::CARRY && out.motion.vx_mps==0);
+            assert(out.motion.gripper_offset==20);
+            if(out.motion.wz_rps!=0) {assert(out.motion.wz_rps*side<0);turned=true;break;}
         }
-        assert(reported);
+        assert(turned);
+        p.rig.input.directional_clearance_valid=true;p.rig.input.turn_safe=false;
+        auto out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 && out.immediate_motion_stop);
+        p.rig.input.turn_safe=true;p.heading=false;
+        out=p.step();assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
     }
-    std::cout<<"PASS logged short large-offset entrance stops without crawling or reversing\n";
+    std::cout<<"PASS short parking entry turns in place and obeys turn/heading gates\n";
 }
 
 void approachRepositionsBeforeReachingParkingLine() {
     for(float side : {-1.f,1.f}) {
         JawRig p;p.gap=.75f;p.yaw=0;
+        p.rig.task.t_.carry_budget_us=90000000; // match launcher controlled-field budget
         p.robot_x=p.rig.task.halfX()+.35f*side;
         bool repositioned=false,advanced=false;
-        for(int i=0;i<1200;++i) {
+        for(int i=0;i<1800;++i) {
             p.robot_x-=std::sin(p.yaw)*p.out.motion.vx_mps*.04f;
             p.gap-=std::cos(p.yaw)*p.out.motion.vx_mps*.04f;
             p.image_error=.625f*std::tan(p.yaw-std::atan2(p.robot_x-p.rig.task.halfX(),p.gap+.15f));
             const auto out=p.step();
-            assert(out.state==PushState::CARRY && out.motion.vx_mps>=0);
+            assert(out.state==PushState::CARRY && out.motion.vx_mps>=-.05f);
             repositioned |= p.rig.task.transport_phase_.jaw_sequence_.reposition;
             advanced |= out.motion.vx_mps>0;
             if(repositioned && advanced && std::abs(p.robot_x-p.rig.task.halfX())<.04f)break;
@@ -3221,7 +3423,7 @@ void lostHalfFindsFreshZoneAndBrakesBeforeResuming() {
         for(int i=0;i<6;++i)p.step();
         p.pose=p.view_evidence=false;p.bearing=.4f*side;
         bool directed=false;
-        for(int i=0;i<12;++i) {
+        for(int i=0;i<18;++i) {
             const auto out=p.step();assert(out.motion.vx_mps>=0);
             if(out.motion.wz_rps!=0) {
                 assert(out.motion.vx_mps==0 && out.motion.wz_rps*side>0);directed=true;
@@ -3283,7 +3485,7 @@ void intermittentHalfCannotPulseSearchBrakes() {
         p.view_evidence=false; p.bearing=.4f*side;
         auto& q=p.rig.task.transport_phase_.jaw_sequence_;
         bool searching=false;
-        for (int i=0;i<12;++i) {
+        for (int i=0;i<18;++i) {
             const auto out=p.step();
             if (out.reason=="carry_half_reacquire_turn") {searching=true;break;}
         }
@@ -3347,7 +3549,7 @@ void intermittentHalfCannotPulseSearchBrakes() {
 }
 
 void forwardEntryRegression() {
-    approachRejectsShortLargeOffsetWithoutReversing();
+    shortParkingEntryUsesStationaryAlignment();
     approachRepositionsBeforeReachingParkingLine();
     lostHalfFindsFreshZoneAndBrakesBeforeResuming();
     halfSearchIsBoundedWhenZoneDisappears();
@@ -3387,6 +3589,105 @@ void approachContinuityAcrossBriefEntranceNoise() {
     std::cout<<"PASS approach/reposition bridge repeated brief entrance dropouts for both halves\n";
 }
 
+// 13:39/13:44 board traces: 0.2--0.4 s range/half dropouts repeatedly
+// reset forward motion, although the last accepted entrance still had room.
+void initialApproachBridgesLoggedNoiseBursts() {
+    for (bool reposition : {false,true}) for (bool injured : {false,true})
+        for (bool image_missing : {false,true}) {
+        JawRig p;p.gap=1.2f;p.yaw=0;p.ramped_dead_zone=true;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=injured;d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_-(reposition ? .08f : 0.f);
+        p.supply_visible=!injured;p.injured_visible=injured;
+        auto& q=d.jaw_sequence_;
+        q.reposition=reposition;
+        for(int i=0;i<16;++i)p.step();
+        for(int cycle=0;cycle<6;++cycle) {
+            const auto accepted=q.route_fix_us;
+            for(int i=0;i<10;++i) {
+                p.pose=false;p.view_evidence=!image_missing;
+                const auto out=p.step();
+                assert(out.state==PushState::CARRY && out.motion.vx_mps>0 &&
+                       !out.immediate_motion_stop &&
+                       "400 ms projection/half dropout must keep the accepted approach moving");
+                assert(!q.approach_resume_pending && q.route_fix_us==accepted);
+                assert(p.wire.vx_mps>0);
+                if(i>=5)assert(out.motion.vx_mps<=.030001f);
+            }
+            p.pose=p.view_evidence=true;
+            for(int i=0;i<8;++i) {
+                const auto out=p.step();
+                assert(out.motion.vx_mps>0 && !out.immediate_motion_stop);
+            }
+        }
+        // Neither a repeated capture nor continuing box sightings renew the route.
+        p.pose=false;p.view_evidence=!image_missing;
+        for(int i=0;i<14;++i) {
+            const auto out=p.step();
+            assert(i<12 ? out.motion.vx_mps>0 : out.motion.vx_mps==0);
+        }
+        assert(p.out.motion.vx_mps==0);
+        assert(!q.approach_route.valid(p.rig.input.now_us,500000));
+        if(reposition || image_missing)assert(q.approach_resume_pending);
+    }
+    std::cout<<"PASS initial approach/reposition bridge repeated 400ms range/half loss at reduced speed, then stop on expiry\n";
+}
+
+void initialApproachFiltersRangeNoiseAndHonoursStops() {
+    for(bool reposition : {false,true}) for(float side : {-1.f,1.f}) {
+        JawRig p;p.gap=1.2f;p.yaw=0;p.angular_response=0;
+        const float base_x=p.rig.task.halfX()-(reposition ? .08f : 0.f)*side;
+        p.robot_x=base_x;
+        auto& q=p.rig.task.transport_phase_.jaw_sequence_;
+        for(int i=0;i<8;++i)p.step();
+        q.reposition=reposition;
+        for(int i=0;i<8;++i)p.step();
+        for(int cycle=0;cycle<6;++cycle) {
+            // Both range and lateral projection fluctuate, like the 13:44 trace.
+            for(int i=0;i<12;++i) {
+                const bool outlier=i<9;
+                p.gap=outlier ? (i%2 ? 1.45f : 1.7f) : 1.2f;
+                p.robot_x=base_x+(outlier ? (i%2 ? .3f : .55f)*side : 0.f);
+                const auto out=p.step();
+                assert(out.motion.vx_mps>0 && !out.immediate_motion_stop &&
+                       "360 ms range jumps followed by stable captures must not pulse the brakes");
+                assert(!q.approach_resume_pending);
+            }
+        }
+    }
+    // Small accepted position changes refine the trajectory rather than snap it.
+    JawRig blend;blend.yaw=0;blend.gap=1.2f;
+    for(int i=0;i<8;++i)blend.step();
+    auto& route=blend.rig.task.transport_phase_.jaw_sequence_.approach_route;
+    const float before=route.predicted(blend.rig.input.now_us).bodyToZone({0,0}).x;
+    blend.robot_x+=.04f;
+    blend.step();
+    const float correction=route.predicted(blend.rig.input.now_us).bodyToZone({0,0}).x-before;
+    assert(correction>.005f && correction<.03f);
+    // Missing evidence never overrides current heading/feedback/clearance or close range.
+    for(int fault=0;fault<6;++fault) {
+        JawRig p;p.yaw=0;p.gap=fault==5 ? .42f : 1.2f;p.angular_response=0;
+        p.robot_x=p.rig.task.halfX()-.08f;
+        auto& q=p.rig.task.transport_phase_.jaw_sequence_;
+        for(int i=0;i<8;++i)p.step();
+        q.reposition=true;p.step();
+        if(fault==5)p.gap=.34f;
+        else {p.pose=false;p.view_evidence=true;}
+        p.rig.input.directional_clearance_valid=true;
+        if(fault==0)p.rig.input.path_safe=false;
+        if(fault==1)p.rig.input.arc_safe=false;
+        if(fault==2)p.heading=false;
+        if(fault==3)p.rig.input.sent_velocity_valid=false;
+        if(fault==4) {
+            p.force_sent=true;p.forced_vx=std::numeric_limits<float>::quiet_NaN();
+        }
+        const auto out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 &&
+               "route hold must honour immediate clearance/feedback/entry stops");
+    }
+    std::cout<<"PASS range-jump bursts stay continuous, accepted poses blend and immediate stops still win\n";
+}
+
 void approachRangeReviewKeepsRecentTrajectory() {
     JawRig p;p.gap=.9f;p.yaw=0;
     for(int i=0;i<6;++i)p.step();
@@ -3410,7 +3711,756 @@ void approachRangeReviewKeepsRecentTrajectory() {
     std::cout<<"PASS short range review continues; persistent inconsistent measurements stop\n";
 }
 
+
+// A fresh longer range must not restart translation after near-entry parking.
+void nearEntryKeepsAlignmentAfterRangeChange() {
+    for(bool injured : {false,true}) for(float side : {-1.f,1.f}) {
+        JawRig p;p.gap=.38f;p.yaw=0;p.image_error=.15f*side;p.edge_override=0;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=injured;d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_-.15f*side;
+        p.supply_visible=!injured;p.injured_visible=injured;
+        bool turned=false;
+        for(int i=0;i<50;++i) {
+            const auto out=p.step();assert(out.state==PushState::CARRY && out.motion.vx_mps==0);
+            if(out.motion.wz_rps!=0) {turned=true;break;}
+        }
+        assert(turned && d.jaw_sequence_.stationary_entry);
+        p.gap=.70f;
+        for(int i=0;i<35;++i) {
+            const auto out=p.step();
+            assert(out.state==PushState::CARRY && out.motion.vx_mps==0);
+            assert(out.reason!="carry_entry_resume_approach");
+            assert(d.jaw_sequence_.recovery==TransportPhaseData::JawSequence::Recovery::Idle);
+        }
+        p.rig.task.t_.carry_budget_us=1;
+        const auto out=p.step();
+        assert(out.state==PushState::SAFE_STOP && out.reason=="carry_entry_alignment_timeout");
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 && out.immediate_motion_stop);
+    }
+    std::cout<<"PASS near-entry range changes cannot restart translation; timeout stops explicitly\n";
+}
+
+
+// 01:08:32 trace, frame 92607348: the first usable posture preceded the
+// first reverse. Reposition must brake here instead of turning through centre.
+void loggedPreBackoffPostureHoldsAcrossFrameNoise() {
+    using Stage=TransportPhaseData::JawSequence::Stage;
+    for(bool injured : {false,true}) for(float side : {-1.f,1.f}) {
+        JawRig p;p.gap=.633669f;p.yaw=-.126544f*side;
+        p.image_error=.0587386f*side;p.edge_override=-.040404f*side;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=injured;
+        d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_-.121052f*side;
+        p.supply_visible=!injured;p.injured_visible=injured;
+        d.jaw_sequence_.reposition=true;
+        auto out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 &&
+               "first deliverable posture must brake before it triggers backoff");
+        assert(out.immediate_motion_stop);
+        const auto started=p.rig.input.now_us;
+        // Changes below observed maxima rounded up to .03 and .05 retain the
+        // accepted decision, including a frame just outside the old 7% gate.
+        for(int i=0;i<25;++i) {
+            p.image_error=(i%2 ? .0717023f : .0639241f)*side;
+            p.edge_override=(i%2 ? -.0421053f : -.040404f)*side;
+            out=p.step();
+            assert(out.state==PushState::CARRY && out.motion.vx_mps==0 && out.motion.wz_rps==0);
+            assert(d.jaw_sequence_.stage!=Stage::BackoffReview);
+            if(out.reason=="carry_pre_entry_aligned")break;
+        }
+        assert(out.reason=="carry_pre_entry_aligned");
+        assert(p.rig.input.now_us-started>=250000);
+        assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
+        out=p.step();
+        assert(out.reason=="carry_ui120_region_advance" && out.motion.vx_mps>0);
+        assert(out.motion.gripper_offset==20);
+    }
+    std::cout<<"PASS logged first deliverable posture holds frame jitter and advances without backoff on both halves/sides\n";
+}
+
+
+void entryPostureHoldRespectsChangeAndFreshEvidence() {
+    using Stage=TransportPhaseData::JawSequence::Stage;
+    const auto seed=[](JawRig& p) {
+        p.gap=.633669f;p.yaw=-.126544f;
+        p.image_error=.0587386f;p.edge_override=-.040404f;
+        p.robot_x=p.rig.task.halfX()-.121052f;
+        p.rig.task.transport_phase_.jaw_sequence_.reposition=true;
+        assert(p.step().reason=="carry_entry_posture_brake");
+    };
+    // Exercise both measured bands almost to their boundary.
+    JawRig band;seed(band);
+    band.image_error+=.0299f;band.edge_override-=.0499f;
+    for(int i=0;i<25 && band.out.reason!="carry_pre_entry_aligned";++i)band.step();
+    assert(band.out.reason=="carry_pre_entry_aligned");
+    // Small per-frame drift accumulates against the accepted baseline.
+    for(int axis=0;axis<4;++axis) {
+        JawRig p;seed(p);
+        auto& q=p.rig.task.transport_phase_.jaw_sequence_;
+        if(axis<2) {
+            for(int i=1;i<=3;++i) {
+                if(axis==0)p.image_error=.0587386f+.009f*i;
+                else p.edge_override=-.040404f-.016f*i;
+                p.step();assert(q.entry_posture_held);
+            }
+            if(axis==0)p.image_error=.0587386f+.031f;
+            else p.edge_override=-.040404f-.051f;
+        } else if(axis==2) p.inside=false;
+        else p.stale_half=true;
+        const auto out=p.step();
+        assert(!q.entry_posture_held && q.stage!=Stage::ColourAdvance);
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+    }
+    // A held image must still wait for sent translation to stop.
+    JawRig moving;seed(moving);moving.force_sent=true;moving.forced_vx=.01f;
+    for(int i=0;i<20;++i) {
+        const auto out=moving.step();
+        assert(out.reason!="carry_pre_entry_aligned" && out.motion.vx_mps==0);
+    }
+    moving.forced_vx=0;
+    auto& q=moving.rig.task.transport_phase_.jaw_sequence_;
+    for(int i=0;i<20 && q.visual_frames==0;++i)moving.step();
+    assert(q.visual_frames==1);
+    const int frames=q.visual_frames;
+    // Repeated processing of one capture cannot buy three-frame permission.
+    for(int i=0;i<3;++i) {
+        auto& in=moving.rig.input;in.now_us+=20000;
+        const auto out=moving.rig.task.update(in);
+        assert(q.visual_frames==frames && out.reason!="carry_pre_entry_aligned");
+    }
+    moving.rig.input.path_safe=false;
+    for(int i=0;i<20;++i) {
+        const auto out=moving.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+    }
+    std::cout<<"PASS posture hold bands, accumulated drift, lost/stale half, sent-stop and distinct-capture/clearance gates\n";
+}
+
+
+// 01:58:33 trace: a differential-drive reposition must turn beyond image
+// centre before translating sideways. The final stationary alignment gate
+// must not cancel that manoeuvre on an instantaneous image-error sign.
+void differentialDriveRepositionAllowsTransientImageDeviation() {
+    using Stage=TransportPhaseData::JawSequence::Stage;
+    for(bool injured : {false,true}) for(float side : {-1.f,1.f}) {
+        JawRig p;p.gap=.7467f;p.yaw=-.54454f*side;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=injured;
+        d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_-.363158f*side;
+        p.image_error=-.0743061f*side;p.edge_override=-.0897436f*side;
+        p.supply_visible=!injured;p.injured_visible=injured;
+        d.jaw_sequence_.reposition=true;
+        auto out=p.step();
+        assert(out.state==PushState::CARRY && d.jaw_sequence_.stage==Stage::Approach);
+        assert(out.reason=="carry_entry_forward_reposition" &&
+               "transient image deviation must not cancel differential-drive reposition");
+        assert(out.motion.vx_mps>0 && out.motion.wz_rps*side<0);
+        assert(std::abs(out.motion.wz_rps)<p.rig.task.t_.min_turn_wz);
+        assert(p.image_error*out.motion.wz_rps>0);
+        p.heading=false;
+        out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        p.heading=true;
+        p.rig.input.sent_velocity_valid=false;
+        out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        p.rig.input.sent_velocity_valid=true;
+        p.rig.input.path_safe=false;
+        out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+    }
+    // Both the initial path review and stationary reapproach must choose
+    // reposition from available room, rather than the same image sign veto.
+    for(bool stationary : {false,true}) for(float side : {-1.f,1.f}) {
+        JawRig p;p.gap=.9153f;p.yaw=-.7822f*side;
+        p.robot_x=p.rig.task.halfX()-.411554f*side;
+        p.image_error=-.248218f*side;p.edge_override=-.0641025f*side;
+        p.angular_response=0;
+        auto& q=p.rig.task.transport_phase_.jaw_sequence_;
+        if(stationary) q.stage=Stage::AlignStop;
+        for(int i=0;i<30 && !q.reposition;++i) {
+            const auto out=p.step();
+            assert(out.state==PushState::CARRY && q.stage!=Stage::BackoffReview);
+        }
+        assert(q.reposition && q.stage==Stage::Approach);
+    }
+    // Exercise the real sender ramp and a nonholonomic plant: continuously
+    // curve forward, obtain lateral displacement, then restore entrance heading.
+    for(bool injured : {false,true}) for(float side : {-1.f,1.f}) {
+        JawRig p;p.gap=.75f;p.yaw=0;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=injured;
+        d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_+.35f*side;
+        p.supply_visible=!injured;p.injured_visible=injured;
+        p.rig.task.t_.carry_budget_us=90000000;
+        MotionVelocityRamp ramp{MotionLinkConfig{}};
+        MotionCommand sent;
+        ramp.accept(sent,p.rig.input.now_us);
+        bool curved=false,translated=false,temporary_deviation=false,aligned=false;
+        int reverses=0;bool reversing=false;
+        for(int i=0;i<2200;++i) {
+            p.robot_x-=std::sin(p.yaw)*sent.vx_mps*kDt;
+            p.gap-=std::cos(p.yaw)*sent.vx_mps*kDt;
+            p.out.motion=sent;
+            const float next_yaw=wrapAngle(p.yaw+sent.wz_rps*kDt);
+            p.image_error=.625f*std::tan(next_yaw-
+                std::atan2(p.robot_x-d.half_x_,p.gap+.15f));
+            p.inside=std::abs(p.image_error)<.1f;
+            const auto out=p.step();
+            assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
+            const bool reverse=out.motion.vx_mps<0;
+            if(reverse && !reversing) ++reverses;
+            reversing=reverse;
+            assert(reverses<=1 && "reposition must not repeat a backoff loop");
+            if(out.reason=="carry_entry_forward_reposition") {
+                curved |= out.motion.vx_mps>0 && std::abs(out.motion.wz_rps)>.01f;
+                translated |= out.motion.vx_mps>0;
+                temporary_deviation |= std::abs(p.image_error)>.10f &&
+                    p.image_error*out.motion.wz_rps>0;
+            }
+            if(out.reason=="carry_pre_entry_aligned") {
+                assert(std::abs(p.robot_x-d.half_x_)<.08f);
+                assert(std::abs(p.yaw)<=std::atan(.60f)+.0001f);
+                assert(std::abs(p.image_error)<.10f && p.gap>.20f);
+                aligned=true;break;
+            }
+            sent=ramp.next(out.motion,p.rig.input.now_us,out.immediate_motion_stop);
+            ramp.accept(sent,p.rig.input.now_us);
+        }
+        if(!aligned) std::cerr<<"differential reposition side="<<side<<" injured="<<injured
+            <<" x_error="<<p.robot_x-d.half_x_<<" gap="<<p.gap<<" yaw="<<p.yaw
+            <<" reason="<<p.out.reason<<std::endl;
+        assert(curved && translated && temporary_deviation && aligned);
+        std::cout<<"PASS differential reposition half="<<(injured ? "injured" : "supply")
+                 <<" side="<<side<<" lateral_error_m="<<p.robot_x-d.half_x_
+                 <<" yaw_rad="<<p.yaw<<" reverse_legs="<<reverses<<"\n";
+    }
+    std::cout<<"PASS differential-drive reposition tolerates transient image deviation and completes lateral travel/heading restoration\n";
+}
+
+
+// Stationary transport can retain IMU vibration after stopping. Exercise the
+// real pre-push calibration with noise above the old capture thresholds.
+void prePushCalibrationAcceptsStoppedImuNoise() {
+    using Stage=TransportPhaseData::JawSequence::PrePushReview::Stage;
+    for(int scenario=0;scenario<3;++scenario) {
+        JawRig p;p.yaw=0;
+        auto& q=p.rig.task.transport_phase_.jaw_sequence_;
+        q.active=true;
+        q.stage=TransportPhaseData::JawSequence::Stage::ColourAdvance;
+        q.prepush.stage=Stage::BackReady;
+        q.prepush.started_us=p.rig.input.now_us;
+        q.prepush.heading=0;
+        const auto started=p.rig.input.now_us;
+        uint64_t sequence=0;
+        bool ready=false;
+        for(int n=0;n<40;++n) {
+            auto& in=p.rig.input;
+            in.imu_translation_samples.clear();
+            for(int i=1;i<=4;++i) {
+                ImuTranslationSample sample;
+                sample.sequence=++sequence;
+                sample.received_us=in.now_us+i*10000;
+                sample.device_time_ms=sample.received_us/1000;
+                sample.valid=true;
+                const float noise=scenario==2 ? .35f : .20f;
+                sample.acceleration_mps2={sequence%2 ? noise : -noise,0,9.8f};
+                sample.angular_velocity_rps={0,0,scenario==1 ? .16f : .10f};
+                sample.quaternion_wxyz={1,0,0,0};
+                in.imu_translation_samples.push_back(sample);
+            }
+            const auto out=p.step();
+            assert(out.state==PushState::CARRY);
+            assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+            if(q.prepush.stage==Stage::Back) {
+                ready=true;
+                assert(q.prepush.imu.ready());
+                assert(in.now_us-started>=750000);
+                assert(in.now_us-started<=1000000);
+                break;
+            }
+            assert(q.prepush.stage==Stage::BackReady);
+        }
+        assert(ready==(scenario==0));
+    }
+    std::cout<<"PASS transport pre-push accepts stationary IMU noise and rejects excess gyro/acceleration\n";
+}
+
+
+// 2026-11-05 05:17:16: reposition turned away until its own entrance
+// clipped, then searched back and repeated the same turn without translation.
+void loggedRepositionAdvancesWithinCameraView() {
+    using Stage=TransportPhaseData::JawSequence::Stage;
+    for(bool injured : {false,true}) for(float side : {-1.f,1.f}) {
+        JawRig p;p.gap=.633881f;p.yaw=-.890489f*side;
+        p.pose=false;p.half_entrance=true;p.ramped_dead_zone=true;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=injured;d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_-.381314f*side;
+        p.supply_visible=!injured;p.injured_visible=injured;
+        d.jaw_sequence_.reposition=true;
+        p.rig.task.t_.carry_budget_us=60000000;
+        p.rig.task.t_.transport_scan_wz=.9f;
+        p.rig.task.t_.max_wz=.6f;
+        p.rig.task.t_.transport_align_min_wz=.6f;
+        int searches=0,reverse_legs=0,moving_ticks=0;
+        bool searching=false,reversing=false,aligned=false;
+        for(int i=0;i<1200;++i) {
+            p.robot_x-=std::sin(p.yaw)*p.wire.vx_mps*kDt;
+            p.gap-=std::cos(p.yaw)*p.wire.vx_mps*kDt;
+            const float rate=std::abs(p.wire.vx_mps)>.001f ||
+                std::abs(p.wire.wz_rps)>.25f ? p.wire.wz_rps : 0;
+            const float next_yaw=wrapAngle(p.yaw+rate*kDt);
+            const float dx=d.half_x_-p.robot_x;
+            // Synthetic pinhole camera: the entrance needs both near corners.
+            // The whole-zone box can remain visible after a corner clips.
+            const float left=-next_yaw-std::atan2(dx-.15f,p.gap);
+            const float right=-next_yaw-std::atan2(dx+.15f,p.gap);
+            p.view_evidence=std::max(std::abs(left),std::abs(right))<.70f;
+            const float left_x=.5f-.5f*std::tan(left)/std::tan(.70f);
+            const float right_x=.5f-.5f*std::tan(right)/std::tan(.70f);
+            p.left_margin=std::min(left_x,right_x);
+            p.right_margin=1.f-std::max(left_x,right_x);
+            p.bearing=-next_yaw-std::atan2(dx,p.gap);
+            p.sight=std::abs(p.bearing)<.85f;
+            p.image_error=.625f*std::tan(next_yaw+std::atan2(dx,p.gap+.15f));
+            p.inside=std::abs(p.image_error)<.10f;
+            const auto out=p.step();
+            assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
+            const bool search=out.reason.rfind("carry_half_reacquire_",0)==0;
+            if(search && !searching) ++searches;
+            searching=search;
+            const bool reverse=out.motion.vx_mps<0;
+            if(reverse && !reversing) ++reverse_legs;
+            reversing=reverse;
+            moving_ticks+=p.wire.vx_mps>.001f;
+            if(out.reason=="carry_pre_entry_aligned") {
+                assert(p.gap>.20f && std::abs(p.image_error)<.10f);
+                const auto& selected=injured ? p.rig.input.injured_view : p.rig.input.supply_view;
+                assert(selected.inside && std::abs(selected.edge_slope)<=.30f);
+                assert(std::abs(p.robot_x-d.half_x_)<.381314f*.5f);
+                aligned=true;break;
+            }
+            assert(p.gap>.20f && d.jaw_sequence_.stage!=Stage::ColourAdvance);
+        }
+        std::cout<<"logged continuous reposition injured="<<injured<<" side="<<side
+                 <<" aligned="<<aligned<<" searches="<<searches<<" reverse_legs="<<reverse_legs
+                 <<" moving_ticks="<<moving_ticks<<" gap="<<p.gap
+                 <<" offset="<<p.robot_x-d.half_x_<<" yaw="<<p.yaw<<std::endl;
+        assert(aligned && reverse_legs==0 && searches<=1 &&
+               "logged reposition must advance and align instead of repeating turn/search cycles");
+    }
+}
+
+
+void continuousRepositionRespectsLimitsAndRouteExpiry() {
+    for(float side : {-1.f,1.f}) {
+        const auto seed=[&](JawRig& p) {
+            p.gap=.8f;p.yaw=0;p.robot_x=p.rig.task.halfX()-.2f*side;
+            p.image_error=.25f*side;
+            p.rig.task.transport_phase_.jaw_sequence_.reposition=true;
+        };
+        JawRig curve;seed(curve);
+        curve.rig.task.t_.max_wz=.01f;
+        const auto limited=curve.step();
+        assert(limited.motion.vx_mps>0 && limited.motion.vx_mps<.05f);
+        assert(std::abs(limited.motion.wz_rps)<=.010001f);
+        JawRig normal;seed(normal);
+        const auto unlimited=normal.step();
+        const float expected=unlimited.motion.wz_rps/unlimited.motion.vx_mps;
+        assert(std::abs(limited.motion.wz_rps/limited.motion.vx_mps-expected)<1e-3f);
+
+        // Keep the full measured half in view instead of driving a corner out.
+        JawRig border;seed(border);
+        border.left_margin=side>0 ? .5f : .01f;
+        border.right_margin=side>0 ? .01f : .5f;
+        const auto inward=border.step();
+        assert(inward.motion.vx_mps>0 && inward.motion.wz_rps*side<0);
+        // The same path without a border constraint still has the route's sign.
+        // Here image and route agree; use a logged opposite-sign posture too.
+        JawRig conflict;seed(conflict);
+        conflict.yaw=-.89f*side;
+        conflict.robot_x=conflict.rig.task.halfX()-.38f*side;
+        conflict.gap=.634f;conflict.image_error=-.3f*side;
+        conflict.left_margin=side>0 ? .01f : .5f;
+        conflict.right_margin=side>0 ? .5f : .01f;
+        const auto guarded=conflict.step();
+        assert(guarded.motion.vx_mps>0 && guarded.motion.wz_rps*side>0);
+
+        for(int fault=0;fault<3;++fault) {
+            JawRig blocked;seed(blocked);
+            blocked.rig.input.directional_clearance_valid=true;
+            blocked.rig.input.arc_safe=fault!=0;
+            blocked.rig.input.path_safe=fault!=1;
+            blocked.heading=fault!=2;
+            const auto out=blocked.step();
+            assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        }
+        // Brief missing geometry keeps the accepted route, not an opposite
+        // box bearing. Persistent loss expires into a stopped bounded search.
+        JawRig loss;seed(loss);
+        loss.step();loss.view_evidence=loss.pose=false;loss.bearing=.5f*side;
+        for(int i=0;i<3;++i) {
+            const auto out=loss.step();
+            assert(out.motion.vx_mps>0 && !out.immediate_motion_stop);
+            assert(!loss.rig.task.transport_phase_.jaw_sequence_.approach_resume_pending);
+        }
+        loss.view_evidence=loss.pose=true;
+        assert(loss.step().motion.vx_mps>0);
+        loss.view_evidence=loss.pose=false;
+        for(int i=0;i<14;++i)loss.step();
+        assert(loss.out.motion.vx_mps==0);
+        assert(loss.rig.task.transport_phase_.jaw_sequence_.approach_resume_pending);
+    }
+    std::cout<<"PASS continuous reposition preserves curvature at speed limits, image margins, clearance, short dropout and search expiry\n";
+}
+
+
+// 2026-11-05 06:06:49: only 2.7 cm remained before the parking line.
+// The observed centre and edge both improve under a stationary turn.
+void loggedNearEntryTurnsWithoutRetreat() {
+    using Stage=TransportPhaseData::JawSequence::Stage;
+    for(bool injured : {false,true}) for(float side : {-1.f,1.f})
+        for(bool reposition : {false,true}) {
+        JawRig p;p.gap=.376977f;p.yaw=-.550276f*side;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=injured;d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_-.142585f*side;
+        p.supply_visible=!injured;p.injured_visible=injured;
+        d.jaw_sequence_.reposition=reposition;
+        const float start_yaw=p.yaw;
+        bool turned=false,accepted=false;
+        for(int i=0;i<200;++i) {
+            const float next_yaw=p.yaw+p.out.motion.wz_rps*.04f;
+            const float delta=wrapAngle(next_yaw-start_yaw);
+            p.image_error=-.184901f*side+.625f*delta;
+            p.edge_override=-.192547f*side+.5f*delta;
+            const auto out=p.step();
+            assert(out.state==PushState::CARRY && out.motion.vx_mps==0);
+            assert(d.jaw_sequence_.stage!=Stage::BackoffReview);
+            assert(out.motion.gripper_offset==20);
+            if(out.motion.wz_rps!=0) {
+                assert(out.motion.wz_rps*side>0);turned=true;
+            }
+            if(out.reason=="carry_pre_entry_aligned") {
+                assert(turned && std::abs(p.image_error)<.10f && std::abs(p.edge_override)<=.30f);
+                accepted=true;break;
+            }
+        }
+        assert(accepted && "logged near entrance must align by turning, without retreat");
+        assert(p.step().motion.vx_mps>0 && p.rig.task.desiredPitch()==0);
+    }
+    std::cout<<"PASS logged 37.7 cm entry turns in place and confirms for both halves/sides\n";
+}
+
+void nearEntryNeedsStoppedDistinctImages() {
+    JawRig p;p.gap=.377f;p.yaw=0;p.image_error=0;p.edge_override=0;
+    p.robot_x=p.rig.task.halfX()-.143f;
+    p.force_sent=true;p.forced_vx=.01f;
+    for(int i=0;i<20;++i) {
+        const auto out=p.step();assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        assert(out.reason!="carry_pre_entry_aligned");
+    }
+    p.forced_vx=0;
+    auto& q=p.rig.task.transport_phase_.jaw_sequence_;
+    for(int i=0;i<30 && q.visual_frames==0;++i)p.step();
+    assert(q.stationary_entry && q.visual_frames==1);
+    for(int i=0;i<5;++i) {
+        p.rig.input.now_us+=10000;
+        const auto out=p.rig.task.update(p.rig.input);
+        assert(q.visual_frames==1 && out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        assert(out.reason!="carry_pre_entry_aligned");
+    }
+    p.step();assert(q.visual_frames==2 && p.out.reason!="carry_pre_entry_aligned");
+    assert(p.step().reason=="carry_pre_entry_aligned");
+    p.rig.input.path_safe=false;
+    assert(p.step().motion.vx_mps==0);
+    std::cout<<"PASS near-entry requires sent stop and three distinct fresh images before forward motion\n";
+}
+
+void nearEntryReacquiresWithoutTranslation() {
+    using Stage=TransportPhaseData::JawSequence::Stage;
+    for(bool frozen : {false,true}) for(bool wide : {false,true}) {
+        JawRig p;p.gap=.377f;p.yaw=-.55f;p.image_error=-.185f;p.edge_override=-.193f;
+        p.robot_x=p.rig.task.halfX()-.143f;
+        bool aligning=false;
+        for(int i=0;i<30;++i) {
+            const auto out=p.step();assert(out.motion.vx_mps==0);
+            if(out.reason=="carry_entry_image_align" || out.reason=="carry_entry_centre_align") {aligning=true;break;}
+        }
+        assert(aligning);
+        p.view_evidence=p.pose=false;p.sight=false;
+        p.repeat_pose_frame=p.stale_half=frozen;
+        bool searched=false;int wide_ticks=0;
+        for(int i=0;i<300;++i) {
+            const auto out=p.step();assert(out.motion.vx_mps==0);
+            searched|=out.reason=="carry_half_reacquire_turn" && out.motion.wz_rps!=0;
+            assert(out.state==PushState::CARRY);
+            if(out.reason=="carry_entry_half_search") {
+                assert(out.motion.wz_rps!=0 && !out.immediate_motion_stop);++wide_ticks;
+            }
+            if((!wide && searched) || wide_ticks>=30)break;
+        }
+        assert(searched);
+        if(wide) assert(wide_ticks>=30);
+        p.rig.input.directional_clearance_valid=true;p.rig.input.turn_safe=false;
+        for(int i=0;i<4;++i) {
+            const auto out=p.step();assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        }
+        p.rig.input.turn_safe=true;
+        // Image recovery does not require a working metric entrance.
+        p.view_evidence=true;p.image_error=0;p.edge_override=0;
+        p.repeat_pose_frame=p.stale_half=false;
+        bool recovered=false;
+        for(int i=0;i<35;++i) {
+            const auto out=p.step();assert(out.motion.vx_mps==0);
+            if(out.reason=="carry_half_reacquired") {recovered=true;break;}
+        }
+        assert(recovered && p.rig.task.transport_phase_.jaw_sequence_.stage==Stage::AlignStop);
+        p.repeat_pose_frame=true;p.stale_half=true;
+        for(int i=0;i<10;++i) {
+            const auto out=p.step();assert(out.motion.vx_mps==0 && out.reason!="carry_pre_entry_aligned");
+        }
+        p.stale_half=false;p.repeat_pose_frame=false;
+        bool accepted=false;
+        for(int i=0;i<50;++i) {
+            const auto out=p.step();assert(out.motion.vx_mps==0);
+            if(out.reason=="carry_pre_entry_aligned") {accepted=true;break;}
+        }
+        assert(accepted);
+    }
+    std::cout<<"PASS near-entry loss searches without translation, expands its search and restores image alignment\n";
+}
+
+
+// A visible selected half can temporarily lose its ground projection. Treat
+// that as missing range, not as losing the visual target and starting a turn.
+void visibleHalfRecoversWithoutEntranceRange() {
+    for(bool intermittent_range : {false,true})
+        for(bool injured : {false,true}) for(float side : {-1.f,1.f}) {
+        JawRig p;p.yaw=0;p.gap=.8f;p.pose=false;p.half_entrance=true;
+        p.ramped_dead_zone=true;p.angular_response=0;p.bearing=.4f*side;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=injured;d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_;p.supply_visible=!injured;p.injured_visible=injured;
+        for(int i=0;i<6;++i)p.step();
+        p.view_evidence=false;p.half_entrance=false;
+        bool searching=false;
+        for(int i=0;i<18;++i) {
+            const auto out=p.step();
+            searching |= out.reason=="carry_half_reacquire_turn";
+        }
+        assert(searching);
+        p.view_evidence=true;
+        p.step();
+        // One capture reused by many control ticks must not finish search.
+        for(int i=0;i<8;++i) {
+            p.rig.input.now_us+=1000;
+            const auto out=p.rig.task.update(p.rig.input);
+            assert(out.reason!="carry_half_reacquired" && out.motion.vx_mps==0);
+        }
+        bool recovered=false;
+        for(int i=0;i<25;++i) {
+            p.half_entrance=intermittent_range && i%2==0;
+            const auto out=p.step();
+            assert(out.state==PushState::CARRY && out.motion.vx_mps==0);
+            assert(out.motion.gripper_offset==20);
+            if(out.reason=="carry_half_reacquired") {recovered=true;break;}
+        }
+        if(!recovered)std::cerr<<"visible half still searching without range: "<<p.out.reason<<std::endl;
+        assert(recovered && "visible half must stop search without waiting for entrance projection");
+        p.half_entrance=false;
+        for(int i=0;i<12;++i) {
+            const auto out=p.step();
+            assert(out.reason=="carry_selected_half_range_wait");
+            assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+            assert(d.jaw_sequence_.stage==TransportPhaseData::JawSequence::Stage::Approach);
+        }
+        p.half_entrance=true;
+        bool advanced=false;
+        for(int i=0;i<12;++i)advanced |= p.step().motion.vx_mps>0;
+        assert(advanced && "fresh entrance range must resume approach");
+    }
+    std::cout<<"PASS visible selected half stops search through missing projection; range still gates travel\n";
+}
+
+
+// Requested 13:19 camera postures and the 13:18 stopped transport trace.
+void requestedRelaxedEntryPostures() {
+    using Stage=TransportPhaseData::JawSequence::Stage;
+    for(bool injured : {false,true}) for(float side : {-1.f,1.f})
+        for(auto stage : {Stage::EntryStop,Stage::AlignStop})
+        for(const auto sample : {cv::Point2f(.009375f,.1368932f),
+                                 cv::Point2f(.075390625f,.26062f),
+                                 cv::Point2f(.0999155f,.11039f),
+                                 cv::Point2f(.09999f,.30f)}) {
+            JawRig p; p.yaw=.52f*side; p.gap=.35f;
+            p.image_error=sample.x*side; p.edge_override=sample.y*side;
+            auto& d=p.rig.task.transport_phase_;
+            d.half_locked_=true;d.half_injured_=injured;
+            d.half_x_=injured ? .15f : -.15f;
+            p.robot_x=d.half_x_;p.supply_visible=!injured;p.injured_visible=injured;
+            d.jaw_sequence_.stage=stage;
+            bool accepted=false;
+            for(int i=0;i<40;++i) {
+                const auto out=p.step();
+                assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
+                assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+                if(out.reason=="carry_pre_entry_aligned") {
+                    assert(p.rig.input.now_us>=1360000);
+                    assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
+                    assert(p.rig.task.desiredPitch()==0);
+                    accepted=true;break;
+                }
+                assert(p.rig.task.desiredPitch()==-3000);
+            }
+            assert(accepted && "requested in-half posture must enter without precision turns");
+        }
+    // The relaxed image thresholds still need the selected half and fresh,
+    // distinct captures after actual zero-speed feedback.
+    for(int missing=0;missing<5;++missing) {
+        JawRig p;p.yaw=0;p.gap=.35f;p.image_error=.095f;p.edge_override=.11f;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true;d.half_injured_=false;d.half_x_=-.15f;
+        d.jaw_sequence_.stage=Stage::AlignStop;
+        if(missing==0) p.inside=false;
+        if(missing==1) p.stale_half=true;
+        if(missing==2) p.repeat_pose_frame=true;
+        if(missing==3) {p.force_sent=true;p.forced_vx=.02f;}
+        if(missing==4) p.view=false;
+        // Repeat both image stamps while the control clock continues.
+        if(missing==2) p.step();
+        for(int i=0;i<25;++i) {
+            PushOutput out;
+            if(missing==2) {
+                p.rig.input.now_us+=40000;
+                out=p.rig.task.update(p.rig.input);
+            } else out=p.step();
+            assert(out.reason!="carry_pre_entry_aligned");
+            assert(p.rig.task.desiredPitch()==-3000 && out.motion.vx_mps==0);
+        }
+    }
+    std::cout<<"PASS requested camera postures accept <10% centre / 0.30 edge with stopped fresh-half evidence\n";
+}
+
+// 18:07 trace: range review remained latched after the entrance vanished,
+// although a fresh own-zone box still supplied a direction.
+void unstableRangeLossTurnsTowardOwnZone() {
+    for (bool injured : {false,true}) for (float side : {-1.f,1.f})
+        for (bool image_only : {false,true}) {
+        JawRig p; p.gap=.65f; p.yaw=0;
+        auto& d=p.rig.task.transport_phase_;
+        d.half_locked_=true; d.half_injured_=injured; d.half_x_=injured ? .15f : -.15f;
+        p.robot_x=d.half_x_; p.supply_visible=!injured; p.injured_visible=injured;
+        auto& q=d.jaw_sequence_;
+        for (int i=0;i<6;++i) p.step();
+        p.gap=.30f;
+        for (int i=0;i<8 && !q.range_wait;++i) p.step();
+        assert(q.range_wait && q.stage==TransportPhaseData::JawSequence::Stage::Approach);
+        p.pose=false; p.view_evidence=image_only; p.bearing=.687961f*side;
+        q.approach_route.reset(); q.route_fix_us=0; // no recent accepted anchor
+        p.rig.task.t_.transport_scan_wz=.6f;
+        p.rig.task.t_.transport_align_min_wz=.6f;
+        // Finish braking translation before using image direction to turn.
+        p.force_sent=true; p.forced_vx=.03f;
+        auto out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        p.forced_vx=0;
+        bool turned=false;
+        for (int i=0;i<12;++i) {
+            out=p.step();
+            assert(out.state==PushState::CARRY && out.motion.vx_mps==0);
+            assert(out.motion.gripper_offset==20);
+            if (out.motion.wz_rps!=0) {
+                assert(out.reason=="carry_half_reacquire_turn" && out.motion.wz_rps*side>0);
+                assert(std::abs(out.motion.wz_rps)<=.600001f);
+                turned=true; break;
+            }
+        }
+        assert(turned && "range loss must recover toward the own-zone box instead of staying stopped");
+        p.rig.input.directional_clearance_valid=true; p.rig.input.turn_safe=false;
+        out=p.step(); assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        p.rig.input.turn_safe=true; p.heading=false;
+        out=p.step(); assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        p.heading=true;
+        if (!image_only) {
+            // Exhausted local search still follows a fresh zone box; a stale
+            // box pauses it, and a new box restores it without an external reset.
+            q.half_search_leg=3;
+            out=p.step();
+            assert(out.motion.vx_mps==0 && out.motion.wz_rps*side>0);
+            p.stale_sight=true;
+            out=p.step(); assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+            p.stale_sight=false;
+            out=p.step(); assert(out.motion.vx_mps==0 && out.motion.wz_rps*side>0);
+        }
+        p.pose=p.view_evidence=true; p.rig.input.arc_safe=true;
+        p.bearing=0; p.image_error=0; p.gap=.65f;
+        bool resumed=false;
+        for (int i=0;i<50;++i) {
+            out=p.step();
+            if (out.motion.vx_mps>0) { resumed=true; break; }
+        }
+        assert(resumed && !q.range_wait && !q.approach_resume_pending);
+    }
+    std::cout<<"PASS unstable range loss turns toward own-zone direction, honours stop/clearance/IMU and resumes after fresh captures\n";
+}
+
 int main(int argc, char** argv) {
+    unstableRangeLossTurnsTowardOwnZone();
+    if(argc==2 && std::string(argv[1])=="--unstable-range-loss") return 0;
+    if(argc==2 && std::string(argv[1])=="--retreat-timing") {
+        retreatUsesIndependentStageBudgets();
+        retreatTimeoutsIdentifyTheFailedStage();
+        retreatPreparationSurvivesReleaseAndRejectsOpeningMotion();return 0;
+    }
+    retreatUsesIndependentStageBudgets();
+    retreatTimeoutsIdentifyTheFailedStage();
+    retreatPreparationSurvivesReleaseAndRejectsOpeningMotion();
+    if(argc==2 && std::string(argv[1])=="--initial-approach-continuity") {
+        initialApproachBridgesLoggedNoiseBursts();
+        initialApproachFiltersRangeNoiseAndHonoursStops();return 0;
+    }
+
+    if(argc==2 && std::string(argv[1])=="--relaxed-entry") {requestedRelaxedEntryPostures();return 0;}
+    requestedRelaxedEntryPostures();
+    if(argc==2 && std::string(argv[1])=="--visual-half-recovery") {visibleHalfRecoversWithoutEntranceRange();return 0;}
+    visibleHalfRecoversWithoutEntranceRange();
+    if(argc==2 && std::string(argv[1])=="--near-entry-turn") {
+        loggedNearEntryTurnsWithoutRetreat();nearEntryNeedsStoppedDistinctImages();nearEntryReacquiresWithoutTranslation();return 0;
+    }
+    loggedNearEntryTurnsWithoutRetreat();nearEntryNeedsStoppedDistinctImages();nearEntryReacquiresWithoutTranslation();
+    if(argc==2 && std::string(argv[1])=="--continuous-reposition") {
+        loggedRepositionAdvancesWithinCameraView();continuousRepositionRespectsLimitsAndRouteExpiry();return 0;
+    }
+    loggedRepositionAdvancesWithinCameraView();
+    continuousRepositionRespectsLimitsAndRouteExpiry();
+    if(argc==2 && std::string(argv[1])=="--prepush-calibration") {
+        prePushCalibrationAcceptsStoppedImuNoise();return 0;
+    }
+    prePushCalibrationAcceptsStoppedImuNoise();
+    if(argc==2 && std::string(argv[1])=="--diff-drive-reposition") {
+        differentialDriveRepositionAllowsTransientImageDeviation();return 0;
+    }
+    differentialDriveRepositionAllowsTransientImageDeviation();
+    if(argc==2 && std::string(argv[1])=="--entry-frame-hold") {
+        loggedPreBackoffPostureHoldsAcrossFrameNoise();entryPostureHoldRespectsChangeAndFreshEvidence();return 0;
+    }
+    loggedPreBackoffPostureHoldsAcrossFrameNoise();
+    entryPostureHoldRespectsChangeAndFreshEvidence();
+
+    if (argc==2 && std::string(argv[1])=="--transport-inspection") {
+        completeJawTransportLifecycle(true); return 0;
+    }
+    if (argc==2 && std::string(argv[1])=="--imu-retreat") { releasedCargoRetreatsImuFifteenCentimetres(); deliveryReturnsDirectlyToSearch(); return 0; }
+    if(argc==2 && std::string(argv[1])=="--reverse-reposition") {nearEntryKeepsAlignmentAfterRangeChange();return 0;}
+    nearEntryKeepsAlignmentAfterRangeChange();
+    initialApproachBridgesLoggedNoiseBursts();
+    initialApproachFiltersRangeNoiseAndHonoursStops();
     if(argc==2 && std::string(argv[1])=="--approach-continuity") {
         approachContinuityAcrossBriefEntranceNoise();
         approachRangeReviewKeepsRecentTrajectory();return 0;
@@ -3441,16 +4491,16 @@ int main(int argc, char** argv) {
     }
     loggedDeliverableEntryStartsNearViewPush();
     if(argc==2 && std::string(argv[1])=="--half-loss-five-frames") {
-        fiveMissingHalvesKeepPlannedRouteBeforeSearching();return 0;
+        briefMissingHalvesKeepPlannedRouteBeforeSearching();return 0;
     }
-    fiveMissingHalvesKeepPlannedRouteBeforeSearching();
+    briefMissingHalvesKeepPlannedRouteBeforeSearching();
     if(argc==2 && (std::string(argv[1])=="--entry-tolerance" || std::string(argv[1])=="--five-percent-entry")) {
-        loggedFivePercentEntryCentresBeforeAdvancing();
-        entryEdgeSevenPercentBoundary();
+        loggedInHalfEntryAcceptsWithoutTurning();
+        entryEdgeThirtyPercentBoundary();
         centreTurnBrakesOnBadSlopeOrBlockedClearance();return 0;
     }
-    loggedFivePercentEntryCentresBeforeAdvancing();
-    entryEdgeSevenPercentBoundary();
+    loggedInHalfEntryAcceptsWithoutTurning();
+    entryEdgeThirtyPercentBoundary();
     centreTurnBrakesOnBadSlopeOrBlockedClearance();
     if(argc==2 && std::string(argv[1])=="--parking-source") {
         selectedHalfDropoutCannotParkFromWholeZone();return 0;
@@ -3468,10 +4518,10 @@ int main(int argc, char** argv) {
     imageTurnBrakesBeforeNextImuStep();
 
     if(argc==2 && std::string(argv[1])=="--entry-loop-fix") {
-        loggedStationaryConflictTerminates(); jointApproachReachesParkingPoseThroughSender();
+        outOfToleranceStationaryConflictTerminates(); jointApproachReachesParkingPoseThroughSender();
         jointApproachPreservesClearanceAndStationaryEvidence(); return 0;
     }
-    loggedStationaryConflictTerminates();
+    outOfToleranceStationaryConflictTerminates();
     jointApproachReachesParkingPoseThroughSender();
     jointApproachPreservesClearanceAndStationaryEvidence();
     if(argc==2 && std::string(argv[1])=="--direct-push") { confirmedAlignmentDirectlyStartsNearViewPush(); return 0; }
@@ -3610,7 +4660,7 @@ int main(int argc, char** argv) {
     poseLossStartsDirectionalRecovery(); poseLossMeasuredRecoveryAndSearch();
     if(argc==2 && std::string(argv[1])=="--continuous-zone-scan") { missingZoneScanRemainsContinuous(); return 0; }
     missingZoneScanRemainsContinuous();
-    if(argc==2 && std::string(argv[1])=="--entry-colour-return") { centredApproachClosedLoop(); selectedSubzoneMustBeCentred(); twentyCentimetreEntryAndColourRelease(); metricAndHeadingAreRequiredForEntry(); imuReturnTurnsNet180BeforeSearch(); releasedCargoRetreatsEstimatedFifteenCentimetres(); completeJawTransportLifecycle(); return 0; }
+    if(argc==2 && std::string(argv[1])=="--entry-colour-return") { centredApproachClosedLoop(); selectedSubzoneMustBeCentred(); twentyCentimetreEntryAndColourRelease(); metricAndHeadingAreRequiredForEntry(); deliveryReturnsDirectlyToSearch(); releasedCargoRetreatsImuFifteenCentimetres(); completeJawTransportLifecycle(); return 0; }
     if (argc == 2 && std::string(argv[1]) == "--deposit-drift-blocked") {
         blockedStationaryImuDriftCannotRelease();
         return 0;
@@ -3621,8 +4671,8 @@ int main(int argc, char** argv) {
     }
     centredApproachClosedLoop(); selectedSubzoneMustBeCentred(); twentyCentimetreEntryAndColourRelease();
     metricAndHeadingAreRequiredForEntry();
-    imuReturnTurnsNet180BeforeSearch();
-    releasedCargoRetreatsEstimatedFifteenCentimetres();
+    deliveryReturnsDirectlyToSearch();
+    releasedCargoRetreatsImuFifteenCentimetres();
     completeJawTransportLifecycle();
     carryPlacesInSelectedHalfBeforeOpening();
     destinationIsLockedWhenCarryStarts();

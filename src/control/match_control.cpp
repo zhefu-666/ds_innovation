@@ -12,6 +12,8 @@ const char* MatchControl::name(MatchState s) {
     switch (s) {
         case MatchState::WAITING:
             return "WAITING";
+        case MatchState::RESTARTING:
+            return "RESTARTING";
         case MatchState::RUNNING:
             return "RUNNING";
         case MatchState::PAUSED:
@@ -33,7 +35,8 @@ void MatchControl::tick(uint64_t now) {
             status_.state = MatchState::FAULT;
             status_.reason = "clock_invalid";
         }
-        status_.permit = false;
+        status_.permit = status_.ready = false;
+        ready_since_us_ = 0;
         return;
     }
     now = std::max(now, last_tick_us_); // callers timestamp before acquiring the shared mutex
@@ -60,6 +63,11 @@ void MatchControl::tick(uint64_t now) {
             status_.reason = "no_measured_movement";
         }
     }
+    status_.ready = ready(now);
+    if (!status_.ready)
+        ready_since_us_ = 0;
+    else if (!ready_since_us_)
+        ready_since_us_ = now;
     status_.permit = status_.state == MatchState::RUNNING;
 }
 void MatchControl::health(uint64_t now, bool ok, const std::string& reason) {
@@ -103,6 +111,60 @@ void MatchControl::measuredPosition(
 }
 bool MatchControl::command(MatchCommand c, uint64_t now) {
     std::lock_guard<std::mutex> lock(mutex_);
+    return commandLocked(c, now);
+}
+bool MatchControl::startFromButton(uint64_t received_us, uint64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tick(now);
+    if (status_.state != MatchState::WAITING || status_.started_us || !status_.ready ||
+        !received_us || received_us <= ready_since_us_ || received_us > now ||
+        now - received_us > config_.evidence_timeout_us)
+        return false;
+    return commandLocked(MatchCommand::START, now);
+}
+bool MatchControl::restartFromButton(uint64_t received_us, uint64_t now,
+                                     bool current_preflight_ready) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tick(now);
+    if (!received_us || received_us <= last_restart_button_us_ || received_us > now ||
+        now - received_us > config_.evidence_timeout_us)
+        return false;
+    last_restart_button_us_ = received_us; // rejected presses never queue for later
+    if (status_.state == MatchState::RESTARTING || !current_preflight_ready ||
+        !health_us_ || now < health_us_ || now - health_us_ > config_.evidence_timeout_us ||
+        (!status_.run_id && (!status_.ready || received_us <= ready_since_us_)) ||
+        (config_.time_limit_enabled && !config_.duration_us))
+        return false;
+    const auto run_id = status_.run_id;
+    status_ = {};
+    status_.run_id = run_id;
+    status_.state = MatchState::RESTARTING;
+    status_.reason = "button_restart_preparing";
+    restart_requested_us_ = now;
+    health_us_ = ready_since_us_ = progress_us_ = pose_us_ = 0;
+    health_ok_ = pose_valid_ = false;
+    reference_.clear();
+    return true;
+}
+bool MatchControl::completeButtonRestart(uint64_t now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tick(now);
+    if (status_.state != MatchState::RESTARTING || !ready(now) ||
+        health_us_ <= restart_requested_us_)
+        return false;
+    status_.state = MatchState::WAITING;
+    return commandLocked(MatchCommand::START, now);
+}
+void MatchControl::failButtonRestart(uint64_t now, const std::string& reason) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tick(now);
+    if (status_.state == MatchState::RESTARTING) {
+        status_.state = MatchState::FAULT;
+        status_.reason = reason;
+        status_.permit = false;
+    }
+}
+bool MatchControl::commandLocked(MatchCommand c, uint64_t now) {
     tick(now);
     if (c == MatchCommand::FINISH) {
         status_.state = MatchState::FINISHED;
@@ -118,6 +180,8 @@ bool MatchControl::command(MatchCommand c, uint64_t now) {
         status_.permit = false;
         return true;
     }
+    if (status_.state == MatchState::RESTARTING)
+        return false; // STOP/FINISH above cancel the pending restart
     if (config_.time_limit_enabled && !config_.duration_us) {
         status_.reason = "match_duration_required";
         return false;
@@ -128,6 +192,7 @@ bool MatchControl::command(MatchCommand c, uint64_t now) {
     }
     if (c == MatchCommand::START && !status_.started_us &&
         (status_.state == MatchState::WAITING || status_.state == MatchState::PAUSED)) {
+        ++status_.run_id;
         status_.started_us = now;
         progress_us_ = now;
         pose_valid_ = false;

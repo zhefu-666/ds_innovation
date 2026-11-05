@@ -96,51 +96,23 @@ struct Fixture {
     }
 };
 
-void jawOrdinaryRequiresPostRetreatBoxContainment() {
+void jawTransportCompletesWithoutAcceptance() {
     for (bool assume : {false, true}) {
-        Fixture f;
-        f.field(assume);
-        f.tuning.pixel_grasp_enabled = true;
-        f.observation.sent_velocity_valid = true;
-        f.observation.delivery_observed = true;
-        f.observation.delivery_box_count = 1;
-        for (int i = 0; i < 5; ++i) {
-            auto elapsed = uint64_t(i + 1) * 100000;
-            f.observation.delivery_box_sample_us = f.clock_base + elapsed;
-            auto out = f.update(elapsed);
-            if (i < 3)
-                CHECK(out.outcome == DeliveryVerificationOutcome::Continue);
-            else {
-                CHECK(out.outcome == DeliveryVerificationOutcome::Complete);
-                CHECK(out.credited == 1 && out.visual && out.reason == "delivered_box_contained");
-                break;
-            }
-        }
-        for (int fault = 0; fault < 7; ++fault) {
-            Fixture bad;
-            bad.field(assume);
-            bad.tuning.pixel_grasp_enabled = true;
-            bad.observation.sent_velocity_valid = true;
-            bad.observation.delivery_observed = true;
-            bad.observation.delivery_box_count = 1;
-            bad.fixedCargo(); // Old geometric/assumed evidence must not override the box rule.
-            for (int i = 1; i <= 30; ++i) {
-                uint64_t elapsed = uint64_t(i) * 100000;
-                bad.observation.delivery_box_sample_us = bad.clock_base + elapsed;
-                if (fault == 0) bad.observation.delivery_observed = false;
-                if (fault == 1) bad.observation.delivery_box_count = 0;
-                if (fault == 2) bad.observation.delivery_box_sample_us = bad.clock_base - 1;
-                if (fault == 3) bad.observation.delivery_box_sample_us = bad.clock_base + 100000;
-                if (fault == 4) bad.observation.gripper_feedback_open = 0;
-                if (fault == 5) bad.observation.sent_vx_mps = -.02f;
-                if (fault == 6) bad.trip.ordinary = 2; // Insufficient contained cargo.
-                auto out = bad.update(elapsed);
-                CHECK(out.credited == 0 && !out.visual);
-                if (out.outcome == DeliveryVerificationOutcome::Complete) {
-                    CHECK(out.reason == "delivery_unverified");
-                    break;
-                }
-            }
+        for (const auto trip : {inventory(0), inventory(1), inventory(2), inventory(0, 0, 1)}) {
+            Fixture f;
+            f.field(assume);
+            f.tuning.pixel_grasp_enabled = true;
+            f.trip = trip;
+            f.observation.zone_counts_valid = false;
+            f.observation.zone_inventory_complete = false;
+            f.observation.delivery_observed = false;
+            f.observation.delivery_box_count = 0;
+            f.observation.delivery_box_sample_us = 0;
+            const auto out = f.update(1);
+            CHECK(out.outcome == DeliveryVerificationOutcome::Complete);
+            CHECK(out.credited == trip.total());
+            CHECK(!out.visual && out.reason == "transport_actions_complete");
+            CHECK(out.events.empty());
         }
     }
 }
@@ -526,13 +498,10 @@ void jawVerificationNeverRepushes() {
     Fixture jaw;
     jaw.field();
     jaw.tuning.pixel_grasp_enabled = true;
-    jaw.tuning.assume_verify_out_obs = 2;
     jaw.fixedCargo(-.02f);
-    expect(jaw.update(100, 1, 1), DeliveryVerificationOutcome::Continue);
-    expect(jaw.update(200, 2, 2), DeliveryVerificationOutcome::Continue);
-    const auto result = jaw.update(8000000, 3, 3);
-    expect(result, DeliveryVerificationOutcome::Complete, 0, false, "delivery_unverified");
-    CHECK(result.events.find("verify_outside_repush") == std::string::npos);
+    const auto result = jaw.update(1, 1, 1);
+    expect(result, DeliveryVerificationOutcome::Complete, 1, false, "transport_actions_complete");
+    CHECK(result.events.empty());
 }
 
 void outsideEvidenceAndRepushBudget() {
@@ -656,7 +625,7 @@ void clearTripPreservesInventoryAndCargoTimestamp() {
 
 int main() {
     try {
-        jawOrdinaryRequiresPostRetreatBoxContainment();
+        jawTransportCompletesWithoutAcceptance();
         independentInventoryFramesAndStableWindow();
         changedDeltaRestartsTheStableWindow();
         inventoryEvidenceGatesResetConfirmation();

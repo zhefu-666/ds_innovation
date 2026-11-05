@@ -41,8 +41,8 @@ struct ImuSample {
 };
 // 上位机生成的接收快照及诊断信息；下列管理字段不占HI91线上字节。
 struct ImuSnapshot {
-    ImuSample sample; // 最新被接受的测量；过期时仍保留旧值，使用前须检查fresh。
-    // connected：串口接收线程尚未报告断开；不等于已经收到有效消息。
+    ImuSample sample; // 恢复时清空测量，仅保留收帧时刻供安全判定；使用前须检查fresh。
+    // connected：串口已打开且未报告断开；恢复等待期间为false，不等于已有有效消息。
     // fresh：已连接且收到过设备时间推进的帧，数据年龄未超过timeout_ms。
     bool connected = false, fresh = false;
     uint64_t sampled_at_us = 0; // 获取快照时的主机单调时钟，us。
@@ -52,8 +52,9 @@ struct ImuSnapshot {
     // crc_errors：候选帧CRC失败次数；invalid_frames：非法长度/不支持类型/半包超时等次数。
     uint64_t bytes = 0, valid_frames = 0, crc_errors = 0, invalid_frames = 0;
     // duplicate_times：设备时间重复次数；backward_times：设备时间倒退次数。
-    // io_errors：串口poll/read错误或断开次数；以上均为本次接收会话的累计值。
+    // io_errors：串口poll/read/open错误或断开次数；以上均跨串口恢复累计。
     uint64_t duplicate_times = 0, backward_times = 0, io_errors = 0;
+    uint64_t reconnects = 0; // 成功重新打开串口次数；新鲜度仍取决于重新收到的测量。
 };
 uint64_t imuNowUs();
 // 2026-10-26用户确认：设备X向后、Y向左、Z向下；转车体FLU需绕Y轴180°。
@@ -63,6 +64,7 @@ void applyImuMounting(ImuSample& sample);
 class Hi91Parser {
   public:
     bool consume(uint8_t byte, uint64_t received_us, ImuSample& out);
+    void resetStream(); // 丢弃旧连接的半包，保留累计计数和帧序号。
     uint64_t valid_frames = 0, crc_errors = 0, invalid_frames = 0;
 
   private:
@@ -82,7 +84,11 @@ class HipnucImu {
 
   private:
     void readLoop();
+    void openPort();
+    void closePort();
     int fd_ = -1;
+    std::string port_;
+    int baud_;
     std::atomic<bool> running_{false};
     std::thread reader_;
     mutable std::mutex mutex_;

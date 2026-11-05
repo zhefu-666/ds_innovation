@@ -78,7 +78,8 @@ class MotionLink {
   public:
     explicit MotionLink(UARTController& uart,
                         MotionLinkConfig config = {},
-                        std::function<bool()> permit = {});
+                        std::function<bool()> permit = {},
+                        std::function<bool()> preparation_permit = {});
     ~MotionLink();
     MotionLink(const MotionLink&) = delete;
     MotionLink& operator=(const MotionLink&) = delete;
@@ -102,8 +103,10 @@ class MotionLink {
   private:
     void run();
     void
-    write(MotionCommand command, bool stale, bool immediate_stop, bool preserve_angular_tuning);
-    std::function<bool()> permit_;
+    write(MotionCommand command, bool stale, bool immediate_stop, bool preserve_angular_tuning,
+          bool allow_preparation = true);
+    // Preparation may change actuators, but the sender always forces zero velocity.
+    std::function<bool()> permit_, preparation_permit_;
     MotionCommand authorized_;
     bool ever_authorized_ = false;
     UARTController& uart_;

@@ -190,12 +190,6 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
     F(disperse_turn_clear_max);
     F(disperse_turn_clear_frames);
     F(disperse_turn_look_us);
-    F(row_select);
-    F(row_min_n);
-    F(row_resid_m);
-    F(row_max_tilt_rad);
-    F(row_half_along_m);
-    F(row_half_across_m);
     F(disperse_turn_push_m);
     F(disperse_turn_push_budget_us);
     F(disperse_turn_frame_check);
@@ -209,6 +203,9 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
     F(pile_max_runs);
     F(pile_budget_us);
     F(pile_cool_us);
+    F(split_capture_preempt);
+    F(split_speed_increment_mps);
+    F(split_wz_increment_rps);
     F(pile_turn_wz);
     F(pile_align_tol_rad);
     F(pile_advance_budget_us);
@@ -388,6 +385,11 @@ template <class Visit> void visitTask(const TaskTuning& t, Visit visit) {
     F(zone_search_budget_us);
     F(enter_budget_us);
     F(retreat_budget_us);
+    F(jaw_retreat_calibration_budget_us);
+    F(jaw_retreat_stop_budget_us);
+    F(jaw_retreat_calibration_window_us);
+    F(jaw_retreat_max_gyro_rps);
+    F(jaw_retreat_max_accel_std_mps2);
     F(delivery_budget_us);
     F(turn_budget_us);
     F(blacklist_us);
@@ -443,21 +445,7 @@ template <class Visit> void visitGround(const GroundContactConfig& c, Visit visi
     F(max_range_m);
     F(size_tolerance);
     F(accept_size_mismatch);
-    F(injured_lying_only);
-    F(upright_margin);
-    F(upright_vote_frames);
-    F(upright_vote_min);
-    F(upright_vote_window_us);
-    F(upright_vote_jump_m);
-    F(upright_release_ratio);
-    F(lying_confirm_diff);
-    F(use_silhouette);
-    F(lying_confirm_hysteresis);
 #undef F
-    visit("silhouette_lying_below", c.silhouette.lying_below);
-    visit("silhouette_upright_above", c.silhouette.upright_above);
-    visit("silhouette_lying_diff", c.silhouette.lying_diff);
-    visit("silhouette_upright_diff", c.silhouette.upright_diff);
 }
 
 template <class Visit> void visitRequest(const Config& c, Visit visit) {
@@ -478,6 +466,16 @@ template <class Visit> void visitRequest(const Config& c, Visit visit) {
     F(pose_model_red_path);
     F(pose_confidence);
     F(pose_keypoint_confidence);
+    F(pose_smoothing_preview);
+    visit("pose_smoothing_min_cutoff_hz", 1.2);
+    visit("pose_smoothing_max_cutoff_hz", 8.0);
+    visit("pose_smoothing_beta", .016);
+    visit("pose_smoothing_derivative_cutoff_hz", 1.0);
+    visit("pose_smoothing_max_gap_seconds", .2);
+    visit("pose_smoothing_box_reset_iou", .2);
+    visit("pose_smoothing_visibility", .5);
+    visit("pose_smoothing_detection", .5);
+    visit("pose_smoothing_nms", .45);
     F(detect_core_mask);
     F(pose_core_mask);
     F(parallel_inference);
@@ -515,6 +513,7 @@ template <class Visit> void visitRequest(const Config& c, Visit visit) {
     F(telemetry_fps);
     F(telemetry_file);
     F(auto_run);
+    F(start_on_a7);
     F(step_phases);
     F(single_phase);
     F(capture_after_first);
@@ -1136,7 +1135,6 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
         tuning.disperse_turn_rad = 1.4f + 30.f * float(CV_PI) / 180.f;
         tuning.disperse_turn_push_m = .2f;
         tuning.disperse_turn_frame_check = true;
-        tuning.row_select = true;
         tuning.disperse_single_turn = true;
         tuning.sweep_view_cap_mid = true;
         tuning.sweep_far_judge = true;
@@ -1158,7 +1156,7 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
         tuning.disperse_passes = 1;
         tuning.blind_scatter_passes = 1;
         tuning.enter_speed = .05f;
-        tuning.transport_scan_wz = .90f;
+        tuning.transport_scan_wz = .60f; // MotionLink applies angular_command_scale once.
         tuning.transport_align_min_wz = .60f;
         tuning.back_speed = .40f; // Operator-requested retreat speed: 0.4 m/s.
         tuning.assume_repush_speed_gain = 0.f; // keep repeated pushes at 0.05 m/s too
@@ -1222,7 +1220,6 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
               "task.disperse_turn_rad",
               "task.disperse_turn_push_m",
               "task.disperse_turn_frame_check",
-              "task.row_select",
               "task.disperse_single_turn",
               "task.sweep_view_cap_mid",
               "task.sweep_far_judge",
@@ -1331,16 +1328,6 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
     r.ground_contact.min_confidence = config.confidence;
     r.ground_contact.ui140_core_confidence = config.ui140_core_confidence;
     r.ground_contact.accept_size_mismatch = true;
-    r.ground_contact.injured_lying_only = true;
-    r.ground_contact.lying_confirm_diff = -.06f;
-    r.ground_contact.use_silhouette = true;
-    mark(r,
-         "legacy live ground-contact configuration",
-         {"ground_contact.min_confidence",
-          "ground_contact.accept_size_mismatch",
-          "ground_contact.injured_lying_only",
-          "ground_contact.lying_confirm_diff",
-          "ground_contact.use_silhouette"});
     r.match.duration_us = uint64_t(config.match_seconds) * 1000000;
     r.match.time_limit_enabled = !config.no_match_time_limit;
     r.match.require_measured_progress = !config.controlled_empty_field;
@@ -1367,7 +1354,7 @@ void printRuntimeTuning(const ResolvedRuntimeConfig& r, std::ostream& diagnostic
     diagnostics << "[CONTROL_TUNING] demo_capture_motion=" << tuning.demo_capture_motion
                 << " angular_command_scale=" << r.motion_link.angular_command_scale
                 << " legacy_phase_angular_gain=" << 1.f / r.motion_link.angular_command_scale
-                << " legacy_angular_phases=startup,search,capture"
+                << " legacy_angular_phases=startup,capture scaled_angular_phases=search,transport"
                 << " rush_speed=" << tuning.rush_speed << " rush_stall_us=" << tuning.rush_stall_us
                 << " precise_rush=" << tuning.precise_rush
                 << " sweep_frame_open=" << tuning.sweep_frame_open
@@ -1428,6 +1415,13 @@ void printRuntimeTuning(const ResolvedRuntimeConfig& r, std::ostream& diagnostic
                 << " pixel_align_stopped_wz=" << tuning.pixel_align_stopped_wz
                 << " pixel_align_stopped_vx=" << tuning.pixel_align_stopped_vx
                 << "\n";
+    if (tuning.pixel_grasp_enabled)
+        diagnostics << "[JAW_RETREAT_TUNING] calibration_budget_us=" << tuning.jaw_retreat_calibration_budget_us
+                    << " movement_budget_us=" << tuning.retreat_budget_us
+                    << " stop_budget_us=" << tuning.jaw_retreat_stop_budget_us
+                    << " calibration_window_us=" << tuning.jaw_retreat_calibration_window_us
+                    << " max_gyro_rps=" << tuning.jaw_retreat_max_gyro_rps
+                    << " max_accel_std_mps2=" << tuning.jaw_retreat_max_accel_std_mps2 << "\n";
 }
 
 void writeEffectiveConfig(const ResolvedRuntimeConfig& r, std::ostream& output) {

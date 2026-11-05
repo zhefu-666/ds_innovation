@@ -42,7 +42,6 @@
 #include <stdexcept>
 #include <cmath>
 #include <memory>
-#include <future>
 #include <filesystem>
 #include <ctime>
 #include <map>
@@ -285,6 +284,16 @@ int Runtime::run() {
     MatchControl match(match_config);
     MatchServer match_server(match, config.match_socket);
     bool auto_start_requested = false;
+    bool preparation_reported = false;
+    uint64_t last_button_us = 0;
+    const bool repeat_a7 = config.start_on_a7 && config.single_phase.empty() &&
+                           !config.step_phases && config.demo_mode == "none";
+    uint64_t restart_requested_us = 0, restart_preparation_us = 0;
+    uint64_t restart_hold_sent = 0;
+    MotionCommand restart_hold;
+    MotionCommand restart_preparation;
+    restart_preparation.gripper_offset = 20;
+    restart_preparation.camera_pitch_cdeg = tuning.far_pitch_cdeg;
     std::unique_ptr<MotionLink> link;
     int demo_hold_angle = -1;
     int16_t demo_hold_pitch = kCameraPitchInvalid;
@@ -324,9 +333,9 @@ int Runtime::run() {
                                        : "a6_state_mapping")
                       << "\n";
         }
-        link = std::make_unique<MotionLink>(*feedback, resolved.motion_link, [&match] {
-            return match.status(imuNowUs()).permit;
-        });
+        link = std::make_unique<MotionLink>(*feedback, resolved.motion_link,
+            [&match] { return match.status(imuNowUs()).permit; },
+            [&match] { return match.status(imuNowUs()).state == MatchState::RESTARTING; });
         std::cout
             << "[MCU] " << config.uart_port
             << " output enabled; 15-byte packets, 25 Hz resend, zero velocity after 150 ms stall"
@@ -407,6 +416,9 @@ int Runtime::run() {
 #endif
     bool vision_startup_saved = false, vision_match_saved = false, vision_first_lock_saved = false;
     std::string vision_last_state, vision_last_reason;
+    int last_out_id = -1;
+    std::string last_out_label;
+    cv::Point2f last_out_centre;
     std::map<std::string, uint64_t> vision_reason_last_us;
     int vision_event_count = 0;
     uint64_t frame_sequence = 0, rate_frames = 0;
@@ -464,9 +476,18 @@ int Runtime::run() {
                 now_us - timestamp > uint64_t(config.sensor_timeout_ms) * 1000)
                 throw std::runtime_error("Camera frame is stale");
         }
+        // A camera frame queued before reset must not reseed the new round's history.
+        if (restart_requested_us && timestamp <= restart_requested_us)
+            continue;
         // Detect and pose share this frame's id and capture time.
-        auto vision_result =
-            vision_frontend.infer(frame, timestamp, camera_capture ? &prepared_image : nullptr);
+        const auto preview_sensors = feedback ? feedback->feedbackAt(timestamp) : FrameSensors{};
+        PoseFrameIdentity pose_identity;
+        pose_identity.frame_id = frame_sequence;
+        pose_identity.source = "camera:" + std::to_string(config.camera_index);
+        pose_identity.pitch_valid = preview_sensors.actuator.valid;
+        pose_identity.pitch_cdeg = preview_sensors.actuator.camera_pitch_cdeg;
+        auto vision_result = vision_frontend.infer(
+            frame, timestamp, camera_capture ? &prepared_image : nullptr, pose_identity);
         AuditScope logic_audit("main.logic_and_logs");
         auto& raw = vision_result.detections;
         const auto threshold_sensors = feedback ? feedback->feedbackAt(timestamp) : FrameSensors{};
@@ -519,29 +540,28 @@ int Runtime::run() {
             std::ostringstream detail;
             detail << "[IMU_SAFETY] checked_at_us=" << checked_at
                    << " reason=" << observation.imu_safety_reason
-                   << " previous=" << last_imu_safety_reason
-                   << " safety_ok=" << input.safety_ok
+                   << " previous=" << last_imu_safety_reason << " safety_ok=" << input.safety_ok
                    << " observed_at_us=" << observed_at
                    << " sampled_at_us=" << imu_data.sampled_at_us
-                   << " received_us=" << p.received_us
-                   << " checked_age_ms=" << checked_age_ms
-                   << " snapshot_age_ms=" << imu_data.age_ms
-                   << " connected=" << imu_data.connected << " fresh=" << imu_data.fresh
-                   << " numeric_ok=" << p.measurements_valid << " sensor_valid=" << sensor.imu_valid
-                   << " seq=" << p.sequence << " device_time_ms=" << p.device_time_ms
+                   << " received_us=" << p.received_us << " checked_age_ms=" << checked_age_ms
+                   << " snapshot_age_ms=" << imu_data.age_ms << " connected=" << imu_data.connected
+                   << " fresh=" << imu_data.fresh << " numeric_ok=" << p.measurements_valid
+                   << " sensor_valid=" << sensor.imu_valid << " seq=" << p.sequence
+                   << " device_time_ms=" << p.device_time_ms
                    << " body_rpy_rad=" << p.body_rpy_rad[0] << "," << p.body_rpy_rad[1] << ","
-                   << p.body_rpy_rad[2]
-                   << " quaternion=" << p.quaternion_wxyz[0] << "," << p.quaternion_wxyz[1]
-                   << "," << p.quaternion_wxyz[2] << "," << p.quaternion_wxyz[3]
-                   << " status=" << p.status << " imu_timeout_ms=" << imu_data.timeout_ms
+                   << p.body_rpy_rad[2] << " quaternion=" << p.quaternion_wxyz[0] << ","
+                   << p.quaternion_wxyz[1] << "," << p.quaternion_wxyz[2] << ","
+                   << p.quaternion_wxyz[3] << " status=" << p.status
+                   << " imu_timeout_ms=" << imu_data.timeout_ms
                    << " sensor_timeout_ms=" << config.sensor_timeout_ms
-                   << " tilt_limit_deg=" << config.imu_tilt_limit_deg
-                   << " bytes=" << imu_data.bytes << " valid_frames=" << imu_data.valid_frames
+                   << " tilt_limit_deg=" << config.imu_tilt_limit_deg << " bytes=" << imu_data.bytes
+                   << " valid_frames=" << imu_data.valid_frames
                    << " crc_errors=" << imu_data.crc_errors
                    << " invalid_frames=" << imu_data.invalid_frames
                    << " duplicate_times=" << imu_data.duplicate_times
                    << " backward_times=" << imu_data.backward_times
-                   << " io_errors=" << imu_data.io_errors << "\n";
+                   << " io_errors=" << imu_data.io_errors << " reconnects=" << imu_data.reconnects
+                   << "\n";
             std::cerr << detail.str();
             last_imu_safety_reason = observation.imu_safety_reason;
         }
@@ -575,18 +595,26 @@ int Runtime::run() {
             preflight_reason = "mcu_write_failed";
         else if (!frame_sensors.actuator.valid || input.camera_pitch_cdeg == kCameraPitchInvalid)
             preflight_reason = "camera_pitch_feedback_invalid";
-        // 2026-10-08用户要求：开机静止位RX40（旧0°）也可启动，启动后由任务自行转到旧5°(RX45)再搜索。
+        // 提前准备使用 UI150（偏移+30°）；保留静止位和任务远视角的启动兼容。
+        // START 后仍由任务选择比赛视角。
         else if (config.single_phase != "capture" && config.single_phase != "transport" &&
                  !match.status(imuNowUs()).started_us &&
+                 match.status(imuNowUs()).state != MatchState::RESTARTING &&
                  (!frame_sensors.pitch_stable ||
                   (std::abs(int(input.camera_pitch_cdeg) - int(tuning.far_pitch_cdeg)) >
                        tuning.pitch_tolerance_cdeg &&
                    std::abs(int(input.camera_pitch_cdeg) - int(kStartupRestPitchCdeg)) >
+                       tuning.pitch_tolerance_cdeg &&
+                   std::abs(int(input.camera_pitch_cdeg) - int(cameraPitchFromWire(150))) >
                        tuning.pitch_tolerance_cdeg)))
-            preflight_reason = "startup_pitch_not_rest_or_5deg";
+            preflight_reason = "startup_pitch_not_ready";
         // 现场同步（用户要求）：起步预检不再要求ground mapping有效和起步通道/对方区域净空。
         input.now_us = imuNowUs();
-        match.health(input.now_us, preflight_reason.empty(), preflight_reason);
+        const bool task_fault = previous.run_status == RunStatus::Fault;
+        // Keep the old task fault latched. A7 supplies its separate current hardware
+        // preflight to restartFromButton without transiently advertising a healthy old round.
+        match.health(input.now_us, preflight_reason.empty() && !task_fault,
+                     task_fault ? previous.reason : preflight_reason);
         // Only independently identified, observed (not predicted) fixed-zone poses
         // can supply measured translation. Loss of the reference does not count as movement.
         if (input.zone_identity_verified && input.zone_estimate.trusted(input.now_us) &&
@@ -599,6 +627,121 @@ int Runtime::run() {
                                    position.y,
                                    input.zone_estimate.geometry_id,
                                    uncertainty);
+        }
+        const auto prepared = match.status(input.now_us);
+        if (!config.auto_run && !prepared.started_us && prepared.state == MatchState::WAITING) {
+            if (prepared.ready && !preparation_reported)
+                std::cout << "[PREPARED] ready=1 timestamp_us=" << input.now_us
+                          << " waiting=A7_or_match_ctl_start; 底盘保持停止，等待启动。\n";
+            preparation_reported = prepared.ready;
+        }
+        if (config.start_on_a7 && feedback) {
+            const auto button_us = feedback->latestStartUs();
+            if (button_us && button_us != last_button_us) {
+                last_button_us = button_us;
+                const auto handled_us = imuNowUs();
+                const bool accepted = repeat_a7
+                    ? match.restartFromButton(button_us, handled_us, preflight_reason.empty())
+                    : match.startFromButton(button_us, handled_us);
+                std::cout << "[A7_START] received_us=" << button_us
+                          << " handled_us=" << handled_us << " accepted=" << accepted << "\n";
+                if (accepted && repeat_a7) {
+                    std::cout << "[A7_RESTART] next_run_id=" << match.status(handled_us).run_id + 1
+                              << " previous_phase=" << phaseName(previous.phase) << "\n";
+                    // Join the old sender before installing any new-round targets. Its final
+                    // packet holds the last authorized actuators and bypasses velocity ramps.
+                    link->stop();
+                    const auto stopped = link->stats();
+                    if (stopped.sent && !stopped.last_ok)
+                        throw std::runtime_error("A7 restart: final zero-velocity write failed");
+                    const auto fb = feedback->latestActuatorFeedback();
+                    const auto ack = feedback->gripperAck();
+                    const int open = ack.target >= 0 ? ack.target : feedback->confirmedFrameOpen(fb);
+                    if (open < 0 || !fb.valid || fb.camera_pitch_cdeg == kCameraPitchInvalid)
+                        throw std::runtime_error("A7 restart: actuator hold state unavailable");
+                    restart_hold = {};
+                    restart_hold.gripper_offset = open ? 0 : 20;
+                    restart_hold.camera_pitch_cdeg = stopped.sent
+                        ? feedback->cameraPitchTarget() : fb.camera_pitch_cdeg;
+                    link = std::make_unique<MotionLink>(*feedback, resolved.motion_link,
+                        [&match] { return match.status(imuNowUs()).permit; },
+                        [&match] { return match.status(imuNowUs()).state == MatchState::RESTARTING; });
+                    restart_requested_us = imuNowUs();
+                    restart_preparation_us = restart_hold_sent = 0;
+                    link->submit(restart_hold, true);
+
+                    PushObservation reset;
+                    reset.now_us = restart_requested_us;
+                    reset.reset = true;
+                    previous = task.update(reset);
+                    tracker.reset();
+                    vision_frontend.resetForNewRun();
+                    if (geometry) geometry->resetForNewRun();
+                    controlled_field = ControlledField(zone_geometry, measured_body_radius, body_envelope);
+                    navigator = CarryNavigator(zone_geometry, tuning, measured_load_radius,
+                                               config.controlled_empty_field, load_half_width, load_half_depth);
+                    observations.resetForNewRun();
+                    motion_watch = MotionWatch{};
+                    vision_match_saved = vision_first_lock_saved = false;
+                    vision_event_count = 0;
+                    vision_last_state.clear();
+                    vision_last_reason.clear();
+                    vision_reason_last_us.clear();
+                    last_out_id = -1;
+                    last_out_label.clear();
+                    last_out_centre = {};
+                    last_stop_signature.clear();
+                    last_stale_count = 0;
+                    last_submit_time = Clock::now();
+                    // This observation was built with the previous task and must never run
+                    // startup or seed the new round's perception state.
+                    continue;
+                }
+            }
+        }
+        if (restart_requested_us && match.status(imuNowUs()).state != MatchState::RESTARTING) {
+            restart_requested_us = restart_preparation_us = 0; // STOP/FINISH canceled it
+            std::cout << "[A7_RESTART_CANCELLED] reason=" << match.status(imuNowUs()).reason << "\n";
+        }
+        if (restart_requested_us) {
+            const auto now_us = imuNowUs();
+            const auto sent = link->stats();
+            const auto budget = std::max(tuning.gripper_timeout_us, tuning.pitch_timeout_us) +
+                                uint64_t(config.sensor_timeout_ms) * 1000;
+            const std::string failure = !preflight_reason.empty() ? preflight_reason
+                : sent.failed ? "restart_mcu_write_failed"
+                : now_us - restart_requested_us > budget ? "restart_preparation_timeout" : "";
+            if (!failure.empty()) {
+                match.failButtonRestart(now_us, failure);
+                std::cout << "[A7_RESTART_FAILED] reason=" << failure << "\n";
+                restart_requested_us = restart_preparation_us = 0;
+                continue;
+            }
+            if (!restart_preparation_us) {
+                if (!sent.sent || !sent.last_ok || sent.sent_vx_mps != 0 || sent.sent_wz_rps != 0) {
+                    link->submit(restart_hold, true);
+                    continue;
+                }
+                restart_hold_sent = sent.sent;
+                restart_preparation_us = now_us;
+                std::cout << "[RESTART_STOP] zero_packet_sent=1 physical_stop_measured=0\n";
+                link->submit(restart_preparation, true);
+                continue;
+            }
+            link->submit(restart_preparation, true);
+            const bool actuators_ready = sent.sent > restart_hold_sent && sent.last_ok &&
+                timestamp > restart_preparation_us &&
+                frame_sensors.actuator.timestamp_us > restart_preparation_us &&
+                gripper_ack.result == ActionResult::Done && gripper_ack.target == 0 &&
+                feedback->cameraPitchTarget() == tuning.far_pitch_cdeg &&
+                input.camera_pitch_stable &&
+                std::abs(int(input.camera_pitch_cdeg) - int(tuning.far_pitch_cdeg)) <=
+                    tuning.pitch_tolerance_cdeg;
+            if (!actuators_ready || !match.completeButtonRestart(now_us))
+                continue;
+            restart_requested_us = restart_preparation_us = 0;
+            std::cout << "[RUN_START] run_id=" << match.status(now_us).run_id
+                      << " phase=STARTUP timer_reset=1\n";
         }
         if (config.auto_run && !auto_start_requested && preflight_reason.empty()) {
             auto_start_requested = true;
@@ -634,15 +777,18 @@ int Runtime::run() {
                 ? std::min(input.now_us, sent_motion.last_ok_us) : 0;
         }
         auto out = task.update(input);
+        if (out.run_status == RunStatus::Fault) {
+            // Report the task's stop immediately; later healthy sensor frames
+            // must not advertise readiness while the task fault is latched.
+            match.health(input.now_us, false, out.reason);
+            match_status = match.status(input.now_us);
+        }
         if (out.single_phase_done ||
             (!config.single_phase.empty() && (out.run_status == RunStatus::Fault ||
                                              match_status.state == MatchState::FAULT))) {
             const bool completed = out.single_phase_done;
-            const bool accepted = completed &&
-                (config.single_phase != "transport" ||
-                 (out.delivery_expected > 0 && out.delivery_credited == out.delivery_expected));
             std::cout << "[PHASE_RESULT] phase=" << config.single_phase
-                      << " completed=" << completed << " accepted=" << accepted
+                      << " completed=" << completed
                       << " reason=" << out.reason << " match=" << match_status.reason
                       << " failure_source=" << out.failure_source
                       << " original_reason=" << out.original_reason
@@ -650,9 +796,8 @@ int Runtime::run() {
                       << " review_stage=" << out.capture_review_stage
                       << " final_validation=" << out.final_validation
                       << " split_runs=" << out.capture_split_runs
-                      << " capture_evidence=" << int(out.capture_evidence)
-                      << " expected=" << out.delivery_expected << " credited=" << out.delivery_credited << "\n";
-            demo_exit = accepted ? 0 : 2;
+                      << " capture_evidence=" << int(out.capture_evidence) << "\n";
+            demo_exit = completed ? 0 : 2;
             match.command(MatchCommand::FINISH, input.now_us);
             match_status = match.status(input.now_us);
         } else if (out.phase_waiting && !match_status.phase_waiting) {
@@ -665,9 +810,6 @@ int Runtime::run() {
         }
         // Remember where the locked target was last seen, so an event can show which detection
         // replaced it.
-        static int last_out_id = -1;
-        static std::string last_out_label;
-        static cv::Point2f last_out_centre;
         if (out.target_id >= 0) {
             last_out_id = out.target_id;
             for (const auto& d : detections)
@@ -811,7 +953,7 @@ int Runtime::run() {
             const auto sent = link->stats();
             const bool residual_blocked = residualMotionBlocked(
                 input, out, sent.sent_vx_mps, sent.sent_wz_rps);
-            const bool preserve_angular_tuning = out.phase != TaskPhase::Transport;
+            const bool preserve_angular_tuning = preserveAngularTuning(out.phase);
             link->submit(out.motion,
                          hard_stop || residual_blocked || out.immediate_motion_stop,
                          preserve_angular_tuning);
@@ -840,6 +982,10 @@ int Runtime::run() {
                     << " geometry=" << input.geometry_valid
                     << " mapping=" << geometry_result.mapping_valid
                     << " geometry_reason=" << geometry_result.reason
+                    << " search_region=" << static_cast<int>(input.search_target_region)
+                    << " search_region_reason=" << (input.search_region_reason.empty()
+                        ? "none" : input.search_region_reason)
+                    << " search_region_sample_us=" << input.search_region_sample_us
                     << " region=" << input.target_region_valid
                     << " in_zone=" << input.target_in_zone << " path=" << input.path_safe
                     << " retreat=" << input.retreat_safe
@@ -848,12 +994,18 @@ int Runtime::run() {
                     << " arc=" << input.arc_safe << " jaw_open=" << input.jaw_open_safe
                     << " dir_clear_valid=" << input.directional_clearance_valid << " blockers=["
                     << controlled_field.blockers()
-                    << "] opponent_clear=" << input.opponent_zone_clear
+                    << "] transport_review_clear=" << input.transport_review_clear
+                    << " transport_blocked=" << input.transport_external_blocked
+                    << " transport_front_objects=" << input.transport_front_objects.size()
+                    << " transport_clearance=" << (input.transport_clearance_reason.empty()
+                        ? "none" : input.transport_clearance_reason)
+                    << " opponent_clear=" << input.opponent_zone_clear
                     << " pitch_stable=" << input.camera_pitch_stable
                     << " gripper_done=" << input.gripper_done
                     << " corridor_complete=" << input.corridor_complete
                     << " pixel_near=" << input.pixel_grasp_near_view
                     << " handoff=" << input.pixel_view_handoff_ready
+                    << " startup_lower_corners=" << input.startup_lower_corners_occupied
                     << " center_px=" << input.target_center_px.x << "," << input.target_center_px.y
                     << " error_px=" << input.pixel_grasp_error_px
                     << " lateral_measured=" << input.target_grasp_range_lateral_measured
@@ -919,6 +1071,14 @@ int Runtime::run() {
                         << " split_target_x=" << out.split_align_target_x
                         << " split_error_px=" << out.split_align_error_px
                         << " split_stage=" << out.split_align_stage
+                        << " split_branch=" << (out.split_upper_corner ? "upper_unwanted" : "lower_retained")
+                        << " split_target_center_y=" << out.split_target_center_y
+                        << " split_midpoint_y=" << out.split_midpoint_y
+                        << " split_turn_goal=" << out.split_turn_goal
+                        << " split_turn_error=" << out.split_turn_error
+                        << " split_turn_rate=" << out.split_turn_rate
+                        << " split_turn_braking=" << out.split_turn_braking
+                        << " split_turn_stopped_us=" << out.split_turn_stopped_us
                         << " split_retreat_reference_id=" << out.split_retreat_reference_id
                         << " split_retreat_reference_y=" << out.split_retreat_reference_y
                         << " split_margin_stage=" << out.split_margin_stage
@@ -927,7 +1087,9 @@ int Runtime::run() {
                         << " split_margin_complete=" << out.split_margin_complete
                         << " split_imu_ready=" << out.split_imu_ready
                         << " split_imu_distance_m=" << out.split_imu_distance_m
-                        << " split_imu_velocity_mps=" << out.split_imu_velocity_mps;
+                        << " split_imu_velocity_mps=" << out.split_imu_velocity_mps
+                        << " split_command_forward_m=" << out.split_command_forward_m
+                        << " split_command_reverse_m=" << out.split_command_reverse_m;
         }
         if (link) {
             const auto velocity = link->stats();
@@ -1005,14 +1167,6 @@ int Runtime::run() {
                     << " reason=" << d.ground_contact_reason << " xy=" << d.body_xy_m.x << ","
                     << d.body_xy_m.y << " conf=" << d.confidence << " box=" << d.box.x << ","
                     << d.box.y << "," << d.box.width << "," << d.box.height
-                    << (d.pose_err_lying >= 0
-                            ? " pose_err_lie=" + std::to_string(d.pose_err_lying) +
-                                  " pose_err_up=" + std::to_string(d.pose_err_upright) +
-                                  " pose_diff_med=" + std::to_string(d.pose_diff_med) +
-                                  " votes=" + std::to_string(d.pose_vote_n) +
-                                  " upright_rej=" + std::to_string(d.injured_upright_rejected) +
-                                  " sil_hw=" + std::to_string(d.silhouette_hw)
-                            : std::string())
                     << "\n";
             {
                 const auto ids = [&](const char* key, const std::vector<int>& v) {
@@ -1079,6 +1233,9 @@ int Runtime::run() {
                     << " reprojection_limit_px=4" << "\n";
             log << "[PERF] loop_fps=" << loop_fps << " inference_ms=" << inference_ms
                 << " detect_ms=" << vision_result.detect_ms << " pose_ms=" << vision_result.pose_ms
+                << " pose_preview_ms=" << vision_result.preview_ms
+                << " pose_preview_ok=" << vision_result.display.ok
+                << " pose_preview_error=" << vision_result.display.error
                 << " zone_points=" << zone_points.size() << " capture_ms=" << capture_ms
                 << " detections=" << detections.size() << "\n";
             if (vision_result.pose_ran) {
@@ -1102,7 +1259,14 @@ int Runtime::run() {
                     << " numeric_ok=" << p.measurements_valid << " seq=" << p.sequence
                     << " body_rpy_rad=" << p.body_rpy_rad[0] << "," << p.body_rpy_rad[1] << ","
                     << p.body_rpy_rad[2] << " status=" << p.status
-                    << " crc_errors=" << imu_data.crc_errors << " sensor_valid=" << sensor.imu_valid
+                    << " connected=" << imu_data.connected << " bytes=" << imu_data.bytes
+                    << " valid_frames=" << imu_data.valid_frames
+                    << " crc_errors=" << imu_data.crc_errors
+                    << " invalid_frames=" << imu_data.invalid_frames
+                    << " duplicate_times=" << imu_data.duplicate_times
+                    << " backward_times=" << imu_data.backward_times
+                    << " io_errors=" << imu_data.io_errors << " reconnects=" << imu_data.reconnects
+                    << " sensor_valid=" << sensor.imu_valid
                     << " estop=" << (observation.imu_safety_reason != "ok")
                     << " safety_reason=" << observation.imu_safety_reason
                     << " checked_at_us=" << observation.safety_checked_at_us << "\n";
@@ -1132,7 +1296,11 @@ int Runtime::run() {
             last_report = now;
         }
         vision.drawDetections(frame, detections);
-        drawZone(frame, zone_points);
+        if (vision_result.preview_enabled)
+            drawPosePreview(frame, vision_result.halves, vision_result.display,
+                            config.pose_smoothing_preview);
+        else
+            drawZone(frame, zone_points);
         if (resolved.pushboard_floor.enabled && input.pushboard_floor.sample_us) {
             const auto& f = input.pushboard_floor;
             for (int i = 0; i < 2; ++i) {

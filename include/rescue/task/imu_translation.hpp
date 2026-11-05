@@ -43,6 +43,9 @@ class ImuTranslation {
             float acceleration = 0;
             if (!project(sample, now, acceleration))
                 return rejectCalibration(CalibrationStatus::InvalidSample);
+            // A cached stationary bias must not survive a new opening impulse.
+            if (ready_ && std::abs(acceleration - bias_) > 3.f * max_accel_std_mps2)
+                return rejectCalibration(CalibrationStatus::AccelerationNoise);
             for (float w : sample.angular_velocity_rps)
                 if (!std::isfinite(w))
                     return rejectCalibration(CalibrationStatus::InvalidSample);
@@ -53,11 +56,12 @@ class ImuTranslation {
             sequence_ = sample.sequence;
             device_ms_ = sample.device_time_ms;
             received_us_ = sample.received_us;
+            if (!count_) first_sample_us_ = sample.received_us;
             sum_ += acceleration;
             sum2_ += acceleration * acceleration;
             ++count_;
         }
-        if (count_ < 10 || received_us_ < started_us_ + calibration_window_us ||
+        if (count_ < 10 || received_us_ < first_sample_us_ + calibration_window_us ||
             now < received_us_ || now - received_us_ > 200000)
             return false;
         const float mean = sum_ / count_;
@@ -142,7 +146,7 @@ class ImuTranslation {
         return std::isfinite(acceleration);
     }
     bool ready_ = false;
-    uint64_t started_us_ = 0, received_us_ = 0, sequence_ = 0;
+    uint64_t started_us_ = 0, first_sample_us_ = 0, received_us_ = 0, sequence_ = 0;
     uint32_t device_ms_ = 0;
     int count_ = 0;
     float heading_ = 0, sum_ = 0, sum2_ = 0, bias_ = 0;

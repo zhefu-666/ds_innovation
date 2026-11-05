@@ -3,6 +3,7 @@
 #include <rknn_api.h>
 #include <dlfcn.h>
 #include <stdexcept>
+#include <iostream>
 namespace rescue {
 namespace {
 void check(int code, const std::string& operation) {
@@ -69,6 +70,12 @@ RknnModel::RknnModel(const std::string& library, const std::string& model, int c
         input.dims[1] == 0 || input.dims[3] != 3 || input.fmt != RKNN_TENSOR_NHWC)
         throw std::runtime_error(
             "RKNN tensor contract mismatch (expected square NHWC RGB input): " + model);
+    rknn_sdk_version version{};
+    check(r.query(r.context, RKNN_QUERY_SDK_VERSION, &version, sizeof(version)), "query SDK");
+    std::clog << "[RKNN_MODEL] path=" << model << " api=" << version.api_version
+              << " driver=" << version.drv_version << " input=" << input.dims[1] << "x"
+              << input.dims[2] << " type=" << get_type_string(input.type) << " zp=" << input.zp
+              << " scale=" << input.scale << "\n";
     r.output_dims.resize(num.n_output);
     for (unsigned i = 0; i < num.n_output; ++i) {
         rknn_tensor_attr output{};
@@ -85,8 +92,32 @@ RknnModel::RknnModel(const std::string& library, const std::string& model, int c
         }
         if (count != output.n_elems)
             throw std::runtime_error("RKNN output element count mismatch: " + model);
+        std::clog << "[RKNN_OUTPUT] index=" << i << " name=" << output.name << " shape=";
+        for (auto dim : shape)
+            std::clog << dim << ",";
+        std::clog << " type=" << get_type_string(output.type)
+                  << " format=" << get_format_string(output.fmt) << " zp=" << output.zp
+                  << " scale=" << output.scale << " want_float=1\n";
     }
     const auto layout = validateRknnOutputLayout(model, r.output_dims);
+    if (layout.channels == 26) {
+        const char* decoded_names[] = {"boxes", "scores", "xy_experts", "old_visibility"};
+        const char* raw_names[] = {"boxes", "scores", "base_xy_raw", "far_xy_raw", "visibility"};
+        const bool raw_xy = num.n_output == 5;
+        const auto names = raw_xy ? raw_names : decoded_names;
+        for (unsigned i = 0; i < num.n_output; ++i) {
+            rknn_tensor_attr attr{};
+            attr.index = i;
+            check(r.query(r.context, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr)),
+                  "query expert name");
+            if (std::string(attr.name) != names[i])
+                throw std::runtime_error("Dual-expert output name/index mismatch: " + model);
+            if (raw_xy && attr.type != RKNN_TENSOR_INT8)
+                throw std::runtime_error("Raw-XY pose requires INT8 output tensors: " + model);
+        }
+        if (input.dims[1] != 640)
+            throw std::runtime_error("Dual-expert pose requires 640 RGB input");
+    }
     r.size = int(input.dims[1]);
     r.channels = layout.channels;
     r.anchors = layout.anchors;

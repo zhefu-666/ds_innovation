@@ -83,8 +83,10 @@ void MatchServer::run() {
         const auto s = control_.status(clockUs());
         const std::string response = std::string(accepted ? "OK " : "REJECTED ") +
                                      MatchControl::name(s.state) + " reason=" + s.reason +
+                                     " run_id=" + std::to_string(s.run_id) +
                                      " elapsed_ms=" + std::to_string(s.elapsed_us / 1000) +
                                      " remaining_ms=" + std::to_string(s.remaining_us / 1000) +
+                                     " ready=" + (s.ready ? "1" : "0") +
                                      " permit=" + (s.permit ? "1" : "0") +
                                      " phase_waiting=" + (s.phase_waiting ? "1" : "0");
         ::sendto(fd_,

@@ -8,7 +8,7 @@
 #   tools/match/match_main.sh --run --site-clear --frame open --clear-neighbours \
 #     --startup-advance-ms 12000 --startup-speed .4
 #
-# 原始脚本还会先等待 /dev/ttyACM0、/dev/ttyUSB0、/dev/video0 就绪再睡眠 5 秒；
+# 原始脚本还会先等待 /dev/ttyACM0、/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0、/dev/video0 就绪再睡眠 5 秒；
 # 恢复时需一并还原，不能只取消命令行注释。
 set -u
 

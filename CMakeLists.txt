@@ -77,6 +77,10 @@ endif()
 target_include_directories(rescue_rknn PUBLIC include ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(rescue_rknn PUBLIC ${OpenCV_LIBS} ${CMAKE_DL_LIBS})
 
+add_library(rescue_pose_smoothing STATIC src/perception/pose_temporal_smoother.cpp)
+target_include_directories(rescue_pose_smoothing PUBLIC include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rescue_pose_smoothing PUBLIC ${OpenCV_LIBS})
+
 add_executable(rescue_upper_host
     src/main.cpp
     src/app/runtime.cpp
@@ -135,6 +139,7 @@ target_include_directories(rescue_upper_host PRIVATE
 
 target_link_libraries(rescue_upper_host PRIVATE
     rescue_app_config
+    rescue_pose_smoothing
     nlohmann_json::nlohmann_json
     rescue_rknn
     ${OpenCV_LIBS}

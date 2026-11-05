@@ -1,0 +1,36 @@
+{
+  "file": "/home/liu/Model-Training-Tool/runs/pose_A_int8_confidence_fix_20261105T040334Z/authorized_repair_03/A_INT8_confidence_fixed_EXPERIMENTAL.rknn",
+  "sha256": "0e95f08d1b62a2fa5b03a0f410ebe3b966d243cd9c7337db66ce3a2c8b017a21",
+  "status": "EXPERIMENTAL_EXPORT_IDENTITY_AND_GEOMETRY_UNVERIFIED",
+  "export_identity_pass": false,
+  "SDK_graph_inference_is_file_reload": false,
+  "input": "RGB uint8 NHWC [1,640,640,3], letterbox114, internal /255",
+  "outputs": [
+    [
+      1,
+      4,
+      8400
+    ],
+    [
+      1,
+      2,
+      8400
+    ],
+    [
+      1,
+      16,
+      8400
+    ],
+    [
+      1,
+      4,
+      8400
+    ]
+  ],
+  "decoder": "host_decode.py; independent base/far XY, frozen training-area router, conf .5 vis .5 NMS .45",
+  "smoother": "host-side smoother.py + plan.filter; not embedded in RKNN",
+  "FP16_overrides": 0,
+  "confidence_collapse_fixed_in_SDK": true,
+  "board_tested": false,
+  "production_decoder_compatible": false
+}

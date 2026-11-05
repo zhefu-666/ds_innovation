@@ -9,6 +9,10 @@
 #include <stdexcept>
 
 namespace rescue {
+namespace {
+// Shared multiplier for all search motion; 1.0 keeps the original speeds.
+constexpr float kSearchSpeedScale = 1.0f;
+}
 const char* PushTask::name(PushState s) {
     switch (s) {
         case PushState::WAIT_START:
@@ -114,7 +118,10 @@ void PushTask::applyPhaseOutcome(uint64_t now) {
             return;
         case PhaseOutcome::CaptureReady: {
             const float limit = actionProgress().travel_limit;
-            enter(PushState::RUSH, now, phase_outcome_reason_.c_str());
+            // Startup already reached the calibrated close position at UI140.
+            enter(phase_ == TaskPhase::Startup && startup_first_capture_
+                      ? PushState::LOWER_FRAME : PushState::RUSH,
+                  now, phase_outcome_reason_.c_str());
             actionProgress().travel_limit = limit;
             break;
         }
@@ -130,7 +137,7 @@ void PushTask::applyPhaseOutcome(uint64_t now) {
                 search_phase_.approach_pitch_ = t_.near_pitch_cdeg;
             } else {
                 enter(phase_ == TaskPhase::Transport && !recovering_ &&
-                          state_ != PushState::TURN_AROUND ? PushState::TURN_SCAN
+                          !(t_.pixel_grasp_enabled && carryLogic()) ? PushState::TURN_SCAN
                                                                      : PushState::SCAN,
                       now,
                       phase_outcome_reason_.c_str());
@@ -139,6 +146,19 @@ void PushTask::applyPhaseOutcome(uint64_t now) {
     }
 }
 void PushTask::enter(PushState s, uint64_t now, const char* why) {
+    const bool prepared_release = state_ == PushState::RAISE_RELEASE && s == PushState::BACK_OUT;
+    if (s == PushState::SCAN || s == PushState::CARRY || s == PushState::CAPTURE_FAIL ||
+        s == PushState::ABORT_DROP || s == PushState::SAFE_STOP)
+        startup_first_capture_ = false;
+    search_phase_.far_region_wait_started_us_ = 0;
+    if (s != PushState::APPROACH && s != PushState::MID_APPROACH && s != PushState::WAIT_START) {
+        search_phase_.view_handoff_ = {};
+        search_phase_.pixel_handoff_retry_height_ = 0;
+    }
+    if (s == PushState::WAIT_START) {
+        search_phase_.view_handoff_.frames = 0;
+        search_phase_.view_handoff_.sample_us = search_phase_.view_handoff_.stable_us = 0;
+    }
     if (s == PushState::CAPTURE_FAIL || s == PushState::ABORT_DROP) {
         invalidateEntryPosition();
         if (s == PushState::ABORT_DROP && search_entry_.target_id >= 0)
@@ -245,6 +265,9 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
             case PushState::BACK_OUT:
                 phase_ = TaskPhase::Transport;
                 transport_phase_.action = TransportAction::BackOut;
+                if (stopped_from_ != PushState::BACK_OUT && !prepared_release)
+                    transport_phase_.jaw_retreat_ = {};
+                transport_phase_.jaw_retreat_.stage_started_us = now;
                 break;
             case PushState::TURN_AROUND:
                 phase_ = TaskPhase::Transport;
@@ -327,9 +350,22 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     if (s != PushState::LOST_HOLD)
         corridor_retreat_ = false;
     if (s == PushState::CARRY) {
+        const auto prepush = transport_phase_.jaw_sequence_.prepush;
+        using ReviewStage = TransportPhaseData::JawSequence::PrePushReview::Stage;
         transport_phase_.placing_ = false;
         transport_phase_.jaw_sequence_ = {};
         transport_phase_.approach_pitch_ = t_.far_pitch_cdeg;
+        // Resume the remaining retreat/turn before continuing this delivery.
+        if (stopped_from_ == PushState::CARRY && prepush.stage != ReviewStage::Idle &&
+            prepush.stage != ReviewStage::Review) {
+            auto& restored = transport_phase_.jaw_sequence_.prepush;
+            restored = prepush;
+            if (restored.paused_us) restored.started_us += now - restored.paused_us;
+            restored.paused_us = 0;
+            transport_phase_.approach_pitch_ = t_.track_pitch_cdeg;
+            transport_phase_.jaw_sequence_.stage =
+                TransportPhaseData::JawSequence::Stage::ColourAdvance;
+        }
         carry_alignment_ = {};
         if (trip_context_.trip_.total() > 0)
             lockDropHalf("carry_start");
@@ -338,6 +374,10 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
         reason_ = why;
 }
 void PushTask::clearTrip() {
+    startup_first_capture_ = false;
+    search_phase_.view_handoff_ = {};
+    search_phase_.pixel_handoff_retry_height_ = 0;
+    startup_handoff_ = {};
     search_entry_ = {};
     auto& split = search_phase_.first_trip_split_;
     if (!split.pending && !split.active && !split.reacquire && !split.capture_retry) {
@@ -349,12 +389,14 @@ void PushTask::clearTrip() {
     search_phase_.far_target_recovery_ = {};
     search_phase_.pixel_approach_started_us_ = 0;
     search_phase_.pixel_reselection_ = {};
+    search_phase_.far_region_wait_started_us_ = 0;
     capture_phase_.evidence = CaptureEvidence::None;
     transport_phase_.expected = transport_phase_.credited = 0;
     transport_phase_.visual = false;
     capture_phase_.capture_verification_.reset();
     transport_phase_.delivery_verification_.clearTrip();
     transport_phase_.release_retreat_.clearTrip();
+    transport_phase_.jaw_retreat_ = {};
     transport_phase_.push_in_.clearTrip();
     vref_used_ = false;
     transport_phase_.carry_approach_.reset();
@@ -381,6 +423,8 @@ void PushTask::clearTrip() {
     trip_context_.target_id_ = -1;
     trip_context_.label_.clear();
     trip_context_.trip_ = {};
+    trip_context_.transported_objects.clear();
+    trip_context_.transported_view_pitch = kCameraPitchInvalid;
     trip_context_.pending_ = {};
     trip_context_.seen_ = {};
     trip_context_.verdict_ = RuleVerdict::OK;
@@ -481,6 +525,17 @@ int PushTask::frameWait(const PushObservation& in, uint8_t open, uint64_t now) c
                ? -1
                : 0;
 }
+PushObservation::SearchRegion PushTask::searchTargetRegion(const PushObservation& in) const {
+    using Region = PushObservation::SearchRegion;
+    if (phase_ == TaskPhase::Search && in.search_region_sample_us &&
+        in.search_region_sample_us <= in.now_us &&
+        in.now_us - in.search_region_sample_us <= t_.frame_timeout_us)
+        return in.search_target_region;
+    // Older observation producers/replays carry measured membership only.
+    if (in.target_in_zone) return Region::Inside;
+    return in.target_region_valid ? Region::Outside : Region::Unknown;
+}
+
 bool PushTask::candidate(const PushObservation& in, uint64_t now) const {
     const bool visual_search_state =
         state_ == PushState::SCAN || state_ == PushState::LOST_SEARCH ||
@@ -491,7 +546,7 @@ bool PushTask::candidate(const PushObservation& in, uint64_t now) const {
     if (visual_search_state && in.target_box.width > 0 && in.target_box.height > 0) {
         const auto it = rejected_.find(in.target_id);
         return in.target_valid && in.target_id >= 0 && !in.target_is_search_cue &&
-               !in.target_in_zone && targetSelectable(in.label, first_) &&
+               (!in.target_in_zone || in.pixel_selection_managed) && targetSelectable(in.label, first_) &&
                (it == rejected_.end() || now >= it->second);
     }
     const bool far_pixel_handoff =
@@ -501,13 +556,14 @@ bool PushTask::candidate(const PushObservation& in, uint64_t now) const {
     if (t_.pixel_grasp_enabled && (in.pixel_grasp_view || far_pixel_handoff)) {
         const auto it = rejected_.find(in.target_id);
         return in.target_valid && in.target_id >= 0 && !in.target_is_search_cue &&
-               !in.target_in_zone && targetSelectable(in.label, first_) && in.camera_pitch_stable &&
+               searchTargetRegion(in) != PushObservation::SearchRegion::Inside &&
+               targetSelectable(in.label, first_) && in.camera_pitch_stable &&
                (in.pixel_grasp_target_valid || far_pixel_handoff) &&
                std::isfinite(in.pixel_grasp_steering) &&
                (it == rejected_.end() || now >= it->second);
     }
     if (in.target_is_search_cue || !in.target_valid || in.target_id < 0 || !in.geometry_valid ||
-        !in.target_region_valid || in.target_in_zone)
+        searchTargetRegion(in) != PushObservation::SearchRegion::Outside)
         return false;
     if (!targetSelectable(in.label, first_))
         return false;
@@ -551,8 +607,8 @@ bool PushTask::tracking(const PushObservation& in) const {
         return candidate(in, in.now_us) && in.target_id == trip_context_.target_id_ &&
                in.label == trip_context_.label_;
     return in.target_valid && in.target_id == trip_context_.target_id_ &&
-           in.label == trip_context_.label_ && in.geometry_valid && in.target_region_valid &&
-           !in.target_in_zone && std::isfinite(in.distance_m) && in.distance_m >= 0 &&
+           in.label == trip_context_.label_ && in.geometry_valid &&
+           searchTargetRegion(in) == PushObservation::SearchRegion::Outside && std::isfinite(in.distance_m) && in.distance_m >= 0 &&
            std::isfinite(in.heading_error) && std::abs(in.heading_error) <= 1.2f;
 }
 bool PushTask::zoneOk(const PushObservation& in) const {
@@ -754,7 +810,7 @@ void PushTask::trackCargo(const PushObservation& in, uint64_t now) {
     cv::Point2f cb, cr;
     bool cfix = false;
     int ci = -1;
-    if (!cargoZone(in, now, cb, cr, cfix, &ci) || in.cargo_ts_us == transport_phase_.cargo_last_ts_)
+    if (!cargoZone(in, now, cb, cr, cfix, &ci) || in.cargo_ts_us <= transport_phase_.cargo_last_ts_)
         return;
     transport_phase_.cargo_last_ts_ = in.cargo_ts_us;
     transport_phase_.cargo_seen_us_ = now;
@@ -1002,6 +1058,12 @@ bool PushTask::initializeSinglePhase(TaskTick& tick) {
         if (checkTrip(cargo, first_) != RuleVerdict::OK)
             return false;
         trip_context_.trip_ = trip_context_.pending_ = cargo;
+        trip_context_.transported_objects.clear();
+        trip_context_.transported_view_pitch = in.camera_pitch_cdeg;
+        for (const auto& object : in.capture_image_objects)
+            if (object.complete && in.captureInventoryOverlaps(object.box, object.label) &&
+                cargo.count(targetKind(object.label)) > 0)
+                trip_context_.transported_objects.push_back(object);
         trip_context_.label_ = cargo.injured    ? "injured_person"
                                : cargo.ordinary ? "ordinary_supply"
                                                 : "core_supply";
@@ -1015,7 +1077,9 @@ bool PushTask::initializeSinglePhase(TaskTick& tick) {
 }
 
 PushOutput PushTask::update(const PushObservation& in) {
-    if (search_entry_.target_id >= 0 && (!in.run || !in.safety_ok || in.reset ||
+    // MatchControl withdraws both permits at a phase checkpoint. Preserve the
+    // accepted entry order during inspection, but still invalidate bad images.
+    if (search_entry_.target_id >= 0 && (((!in.run || !in.safety_ok) && !phase_waiting_) || in.reset ||
         !in.camera_pitch_stable || !in.pixel_grasp_near_view || !tracking(in) ||
         (in.pixel_grasp_sample_us && in.pixel_grasp_sample_us > in.now_us) ||
         !in.pixel_grasp_sample_us || in.now_us - in.pixel_grasp_sample_us > t_.frame_timeout_us)) {
@@ -1042,15 +1106,19 @@ PushOutput PushTask::update(const PushObservation& in) {
         (!in.run || !in.safety_ok || !in.camera_pitch_stable ||
          (last_us_ && (now <= last_us_ || now - last_us_ > t_.frame_timeout_us)))) {
         startup_alignment_since_us_ = now;
+        if (!in.run || !in.safety_ok)
+            startup_pile_alignment_ = {};
         startup_pitch_turn_.heading_valid = false;
         startup_pitch_turn_.stopped_us = 0;
         auto& turn = startup_pitch_turn_;
-        if (turn.leg == StartupPitchTurn::Leg::Reverse) {
-            turn.reverse_completed_m -= turn.reverse_imu.distance();
-            turn.leg = StartupPitchTurn::Leg::ReverseCalibrate;
+        using Leg = StartupPitchTurn::Leg;
+        if (turn.leg == Leg::Forward || turn.leg == Leg::Reverse) {
+            const bool forward = turn.leg == Leg::Forward;
+            turn.translation_completed_m += (forward ? 1.f : -1.f) * turn.translation_imu.distance();
+            turn.leg = forward ? Leg::ForwardCalibrate : Leg::ReverseCalibrate;
         }
-        if (turn.leg == StartupPitchTurn::Leg::ReverseCalibrate)
-            turn.reverse_imu.reset();
+        if (turn.leg == Leg::ForwardCalibrate || turn.leg == Leg::ReverseCalibrate)
+            turn.translation_imu.reset();
     }
     const bool rush_episode = t_.pixel_grasp_enabled && !recovering_ &&
         state_ == PushState::RUSH && !search_entry_.handoff;
@@ -1100,8 +1168,34 @@ PushOutput PushTask::update(const PushObservation& in) {
     if (!in.run || !in.safety_ok || in.reset || !in.camera_pitch_stable ||
         (last_us_ && (now <= last_us_ || now - last_us_ > t_.frame_timeout_us))) {
         carry_alignment_ = {};
+        if (state_ == PushState::CARRY || state_ == PushState::RAISE_RELEASE)
+            transport_phase_.jaw_retreat_ = {};
         transport_phase_.jaw_sequence_.stopped_us = 0;
-
+        if (state_ == PushState::CARRY && (!in.run || !in.safety_ok || in.reset ||
+            (last_us_ && (now <= last_us_ || now - last_us_ > t_.frame_timeout_us)))) {
+            auto& review = transport_phase_.jaw_sequence_.prepush;
+            using Stage = TransportPhaseData::JawSequence::PrePushReview::Stage;
+            if (review.stage != Stage::Idle && review.stage != Stage::Review) {
+                if (!review.paused_us) review.paused_us = now;
+                review.frames = 0;review.stopped_us = review.sample_us = review.missing_us = 0;
+                if (review.stage == Stage::Back || review.stage == Stage::BackStop) {
+                    review.completed_m -= review.imu.distance();
+                    review.imu.reset();
+                    review.stage = Stage::BackReady;
+                } else if (review.stage == Stage::BackReady)
+                    review.imu.reset();
+            }
+        }
+        if (state_ == PushState::BACK_OUT && t_.pixel_grasp_enabled && carryLogic() &&
+            (!in.run || !in.safety_ok || in.reset ||
+             (last_us_ && (now <= last_us_ || now - last_us_ > t_.frame_timeout_us)))) {
+            auto& retreat = transport_phase_.jaw_retreat_;
+            // Retain measured reverse travel across pause; re-zero before resuming.
+            retreat.completed_m -= retreat.imu.distance();
+            retreat.imu.reset();
+            retreat.stage = TransportPhaseData::JawRetreat::Stage::Calibrating;
+            retreat.stopped_us = retreat.stage_started_us = 0;
+        }
     }
 
     // Recovery confirmations belong to one uninterrupted far-view approach.
@@ -1114,6 +1208,7 @@ PushOutput PushTask::update(const PushObservation& in) {
         search_phase_.far_target_recovery_ = {};
 
     const auto result = [&] {
+        recoverCaptureObservation(tick);
         if (!phase_waiting_)
             syncFrameOverlay(now);
         motion.gripper_offset =
@@ -1137,6 +1232,11 @@ PushOutput PushTask::update(const PushObservation& in) {
             pitch_wait_us_ = now;
         }
         motion.camera_pitch_cdeg = pitch_cmd_;
+        // Scale the final command once, after turn floors and speed limits.
+        if (phase_ == TaskPhase::Search) {
+            motion.vx_mps *= kSearchSpeedScale;
+            motion.wz_rps *= kSearchSpeedScale;
+        }
         last_vx_ = motion.vx_mps;
         last_wz_ = motion.wz_rps;
         PushOutput out;
@@ -1177,7 +1277,11 @@ PushOutput PushTask::update(const PushObservation& in) {
                                   (carrying && transport_phase_.placing_));
         out.navigation_approach = carrying && !transport_phase_.placing_;
         out.jaw_release_retreat = run_status_ == RunStatus::Running && !recovering_ &&
-                                 phase_ == TaskPhase::Transport && state_ == PushState::BACK_OUT &&
+                                 phase_ == TaskPhase::Transport &&
+                                 (state_ == PushState::BACK_OUT ||
+                                  (state_ == PushState::CARRY &&
+                                   transport_phase_.jaw_sequence_.prepush.stage ==
+                                    TransportPhaseData::JawSequence::PrePushReview::Stage::Back)) &&
                                  t_.pixel_grasp_enabled && carryLogic() &&
                                  motion.vx_mps < 0 && motion.wz_rps == 0;
         out.navigation_requested = out.navigation_release || out.navigation_approach;
@@ -1257,6 +1361,23 @@ PushOutput PushTask::update(const PushObservation& in) {
             out.split_align_target_x = split.pixel_target_x;
             out.split_align_error_px = split.pixel_target_x - out.split_align_center_x;
             out.split_align_stage = split.align_stage;
+            out.split_upper_corner = split.upper_corner;
+            out.split_target_center_y = split.target_center_y;
+            out.split_midpoint_y = split.midpoint_y;
+            out.split_turn_braking = split.corner_turn_braking;
+            using SplitStage = SearchPhaseData::FirstTripSplit::RecoveryStage;
+            const bool turning = split.recovery_stage == SplitStage::InjuredTurn ||
+                split.recovery_stage == SplitStage::CornerTurnRight ||
+                split.recovery_stage == SplitStage::CornerTurnBack;
+            if (turning) {
+                out.split_turn_goal = split.recovery_stage == SplitStage::InjuredTurn
+                    ? split.injured_turn_goal : split.corner_heading -
+                        (split.recovery_stage == SplitStage::CornerTurnRight ? 1.570796327f : .174532925f);
+                out.split_turn_error = in.heading_valid ? wrapAngle(out.split_turn_goal - in.heading_rad) : 0;
+                out.split_turn_rate = split.turn_rate;
+                out.split_turn_stopped_us = split.corner_stopped_us && now >= split.corner_stopped_us
+                    ? now - split.corner_stopped_us : 0;
+            }
             out.split_retreat_reference_id = split.retreat_reference_id;
             out.split_retreat_reference_y = split.retreat_reference_y;
             using Margin = SearchPhaseData::FirstTripSplit::MarginStage;
@@ -1269,6 +1390,14 @@ PushOutput PushTask::update(const PushObservation& in) {
             out.split_imu_ready = split.corner_imu.ready();
             out.split_imu_distance_m = split.corner_imu.distance();
             out.split_imu_velocity_mps = split.corner_imu.velocity();
+            if (split.upper_corner &&
+                (split.recovery_stage == SearchPhaseData::FirstTripSplit::RecoveryStage::CornerPush ||
+                 split.recovery_stage == SearchPhaseData::FirstTripSplit::RecoveryStage::CornerReturn ||
+                 split.recovery_stage == SearchPhaseData::FirstTripSplit::RecoveryStage::CornerTurnBack)) {
+                out.split_command_forward_m = std::max(0.f,
+                    split.corner_command_peak_m - split.corner_command_origin_m);
+                out.split_command_reverse_m = std::max(0.f, split.corner_command_peak_m - odo_);
+            }
         }
         if (single_phase_initializing_ && run_status_ == RunStatus::Running) {
             out.capture_observation_requested = single_phase_ == "transport";
@@ -1313,6 +1442,11 @@ PushOutput PushTask::update(const PushObservation& in) {
                 (capture_phase_.action == CaptureAction::Advance ||
                  capture_phase_.action == CaptureAction::LowerFrame)))));
         out.motion = motion;
+        using SplitStage = SearchPhaseData::FirstTripSplit::RecoveryStage;
+        out.split_return_search = run_status_ == RunStatus::Running &&
+            t_.split_capture_preempt && split.pending &&
+            (split.recovery_stage == SplitStage::CornerReturn ||
+             split.recovery_stage == SplitStage::CornerTurnBack);
         out.split_target_reselecting =
             run_status_ == RunStatus::Running &&
             (search_phase_.first_trip_split_.pending || capture_load_.active ||
@@ -1327,6 +1461,11 @@ PushOutput PushTask::update(const PushObservation& in) {
         out.target_is_search_cue = search_phase_.cue_mode_;
         out.search_cue_id = search_phase_.search_cue_id_;
         out.capture_target_id = trip_context_.capture_target_id_;
+        if (phase_ == TaskPhase::Transport && state_ == PushState::CARRY) {
+            out.transported_inventory = trip_context_.trip_;
+            out.transported_objects = trip_context_.transported_objects;
+            out.transported_view_pitch = trip_context_.transported_view_pitch;
+        }
         out.cue_contact_allowed = false; // searching never grants contact permission
         out.clearing_attempts = search_phase_.clear_attempts_;
         out.startup_commanded_us = startup_commanded_us_;
@@ -1357,69 +1496,24 @@ PushOutput PushTask::update(const PushObservation& in) {
         return out;
     };
     if (in.reset) {
-        capture_scene_ = {};
-        capture_load_ = {};
-        failure_source_.clear();
-        original_reason_.clear();
-        exit_reason_.clear();
-        final_validation_ = "not_executed";
-        single_phase_initializing_ = single_phase_done_ = false;
-        phase_waiting_ = false;
-        phase_outcome_ = PhaseOutcome::Running;
-        phase_wait_started_us_ = 0;
-        phase_ = TaskPhase::Startup;
-        run_status_ = RunStatus::Waiting;
-        recovering_ = false;
-        attempt_started_ = 0;
-        bounded_approach_ = bounded_retreat_ = 0;
-        clearTrip();
-        search_phase_.first_trip_split_ = {};
-        rejected_.clear();
-        rejected_bearings_.clear();
-        search_phase_.disperse_cool_until_us_ = 0;
-        search_phase_.scatter_cool_until_us_ = 0;
-        sweep_ledger_.reset();
-            zone_mem_ = zone_enemy_ = run_yaw0_set_ = false;
-        transport_phase_.carry_search_.reset();
-        search_phase_.scatter_count_ = 0;
-        search_phase_.scatter_approach_n_ = 0;
-        search_phase_.scatter_far_ = false;
-        search_phase_.burst_drive_used_ = search_phase_.burst_fast_ =
-            search_phase_.burst_swing_armed_ = search_phase_.burst_swing_ = false;
-        search_phase_.scan_turn_acc_ = 0;
-        search_phase_.scan_mid_limit_ = 0;
-        search_phase_.post_disperse_mid_ = false;
-        search_phase_.disperse_small_ = false;
-        search_phase_.mid_clear_n_ = 0;
-        search_phase_.precheck_seen_ = 0;
-        search_phase_.precheck_rejects_ = 0;
-        total_ = 0;
-        first_ = t_.assume_injured_trip || capture_after_first_;
-        fault_ = false;
-        search_phase_.clear_attempts_ = 0;
-        search_phase_.near_failures_ = 0;
-        search_phase_.lost_round_ = 0;
-        startup_action_ = StartupAction::Advance;
-        startup_pitch_turn_ = {};
-        startup_pitch_ = kCameraPitchInvalid;
-        startup_target_missing_since_us_ = 0;
-        startup_target_decelerating_ = false;
-        startup_alignment_since_us_ = startup_rejected_until_us_ = 0;
-        startup_alignment_target_id_ = startup_rejected_id_ = -1;
-        startup_commanded_us_ = 0;
-        startup_yaw0_set_ = false;
-        odo_ = ratio_est_ = 0;
-        vref_used_ = false;
-        zone_.reset();
-        ratio_snap_ = imu_seen_ = false;
-        vref_fix_us_ = vref_seen_us_ = 0;
-        frame_raised_ = 0;
-        gripper_us_ = now;
-        stopped_from_ = PushState::WAIT_START;
-        sweep_open_ = sweep_open_done_ = sweep_open_disabled_ = sweep_close_wait_ = false;
-        sweep_open_us_ = sweep_close_us_ = 0;
+        // Reconstruct round state, retaining configuration and monotonic actuator
+        // transactions. UART action IDs belong to the persistent controller.
+        const auto transaction = frame_transaction_, wire_transaction = wire_txn_;
+        const int wire_last = wire_last_;
+        const auto tuning = t_;
+        const auto single_phase = single_phase_;
+        const bool capture_after_first = capture_after_first_, stepping = phase_stepping_;
+        *this = PushTask(tuning);
+        frame_transaction_ = transaction;
+        wire_txn_ = wire_transaction;
+        wire_last_ = wire_last;
+        transport_phase_.cargo_last_ts_ = now;
+        transport_phase_.delivery_verification_.resetForNewRun(now);
+        setSinglePhase(single_phase, capture_after_first);
+        setPhaseStepping(stepping);
+        motion = {};
+        gripper_us_ = pitch_wait_us_ = now;
         pitch_cmd_ = t_.far_pitch_cdeg;
-        pitch_wait_us_ = now;
         enter(PushState::WAIT_START, now, "reset");
         last_us_ = now;
         return result();
@@ -1605,6 +1699,8 @@ PushOutput PushTask::update(const PushObservation& in) {
                 split.paused_us = now;
                 split.margin_tick_us = split.margin_scene_us = 0;
                 split.margin_sent_reverse = false;
+                for (auto& reference : split.retreat_objects)
+                    reference.motion_sample_us = 0;
                 split.margin_stage = SearchPhaseData::FirstTripSplit::MarginStage::Idle;
                 using Stage = SearchPhaseData::FirstTripSplit::RecoveryStage;
                 if (split.recovery_stage != Stage::InjuredTurn &&
@@ -1614,6 +1710,9 @@ PushOutput PushTask::update(const PushObservation& in) {
                     split.recovery_stage != Stage::CornerTurnBack)
                     split.recovery_stage = Stage::Retreat;
                 split.recovery_turn_us = split.recovery_view_us = 0;
+                split.corner_turn_sample_us = split.corner_stopped_us = 0;
+                split.corner_turn_braking = true;
+                split.observation_wait_us = split.observation_stopped_us = 0;
                 split.sample_us = 0;
                 split.confirmations = 0;
                 if (split.active) {
@@ -1661,15 +1760,44 @@ PushOutput PushTask::update(const PushObservation& in) {
         stopped_from_ = PushState::WAIT_START;
         return result();
     }
+    // Search follows the wanted cargo confirmed in the current view. IDs remain
+    // short-lived steering references, not a contract with the previous view.
+    if (t_.pixel_grasp_enabled && phase_ == TaskPhase::Search && !recovering_ &&
+        search_phase_.action != SearchAction::Prepare &&
+        search_phase_.action != SearchAction::TurnAway &&
+        search_phase_.action != SearchAction::Recover && !search_entry_.handoff &&
+        !search_phase_.first_trip_split_.active && !search_phase_.first_trip_split_.pending &&
+        !search_phase_.first_trip_split_.target_reselecting &&
+        in.pixel_selection_managed && in.pixel_locked && candidate(in, now) &&
+        in.pixel_grasp_sample_us && in.pixel_grasp_sample_us <= now &&
+        now - in.pixel_grasp_sample_us <= t_.frame_timeout_us &&
+        (trip_context_.target_id_ >= 0 || search_phase_.view_handoff_.started_us) &&
+        (in.target_id != trip_context_.target_id_ || in.label != trip_context_.label_)) {
+        trip_context_.target_id_ = trip_context_.capture_target_id_ = in.target_id;
+        trip_context_.label_ = in.label;
+        trip_context_.pending_ = trip_context_.seen_ = {};
+        search_entry_ = {};
+        pixel_alignment_ = {};
+        search_phase_.far_target_recovery_ = {};
+        capture_scene_ = {};
+        actionProgress().confirmations = 0;
+        tick.immediate_motion_stop = true;
+        reason_ = "search_view_target_selected";
+        return result(); // Recheck alignment and inventory before any movement.
+    }
+    // Keep a committed view change, but let the normal stopped near-view path
+    // acknowledge a confirmed new cargo ID before checking its alignment.
+    const bool handoff_reselected = in.pixel_grasp_near_view &&
+        in.pixel_reselected_from >= 0 && in.pixel_reselected_from == trip_context_.target_id_;
+    if (search_phase_.view_handoff_.started_us && !handoff_reselected && updateSearchViewHandoff(tick))
+        return result();
     if (capture_load_.active && !search_phase_.first_trip_split_.pending &&
         search_phase_.first_trip_split_.target_reselecting) {
         tick.immediate_motion_stop = true;
         auto& split = search_phase_.first_trip_split_;
         reason_ = "capture_score_target_confirm_wait";
-        if (now - capture_load_.started_us > t_.pile_budget_us) {
-            failStop(tick, "capture_score_review_timeout");
-            return result();
-        }
+        if (now - capture_load_.started_us > t_.pile_budget_us)
+            return result(); // bounded observation recovery also owns this expired wait
         const auto target = std::find_if(in.capture_image_objects.begin(),
             in.capture_image_objects.end(), [&](const auto& object) {
                 return object.id == split.target_candidate_id && object.complete &&
@@ -1710,7 +1838,7 @@ PushOutput PushTask::update(const PushObservation& in) {
             (state_ == PushState::APPROACH || state_ == PushState::RUSH) &&
             (phase_ == TaskPhase::Search ||
              (phase_ == TaskPhase::Capture && capture_phase_.action == CaptureAction::Advance)) &&
-            in.camera_pitch_stable && in.pixel_grasp_near_view && in.gripper_done &&
+            in.camera_pitch_stable && in.pixel_grasp_view && in.gripper_done &&
             in.gripper_feedback_open == 1 && captureReviewStopped(in) && in.capture_scene_valid &&
             in.capture_scene_us && in.capture_scene_us <= now &&
             now - in.capture_scene_us <= t_.frame_timeout_us && candidate(in, now) &&
@@ -1805,6 +1933,8 @@ PushOutput PushTask::update(const PushObservation& in) {
             selection.frames = 0;
             if (search_phase_.first_trip_split_.pending) {
                 search_phase_.first_trip_split_.recovery_turn_us = 0;
+                search_phase_.first_trip_split_.corner_turn_sample_us = 0;
+                search_phase_.first_trip_split_.corner_stopped_us = 0;
                 capture_scene_.reobserve_stopped_us = capture_scene_.reobserve_sample_us = 0;
                 capture_scene_.reobserve_frames = 0;
             }
@@ -1869,6 +1999,17 @@ PushOutput PushTask::update(const PushObservation& in) {
             trip_context_.label_.clear();
             pixel_alignment_ = {};
             actionProgress().confirmations = 0;
+            if (phase_ == TaskPhase::Search && search_phase_.action == SearchAction::Approach &&
+                search_phase_.first_trip_split_.search_started_us &&
+                search_phase_.approach_pitch_ != t_.track_pitch_cdeg) {
+                // A lock lost after the UI140 handoff must return to UI120 discovery.
+                // Keep the split's original search deadline and confirm a fresh stopped
+                // view before the selector can acquire another target.
+                search_phase_.approach_pitch_ = t_.track_pitch_cdeg;
+                search_entry_ = {};
+                search_phase_.pixel_reselection_ = {};
+                search_phase_.pixel_reselection_.observing = true;
+            }
             if (phase_ == TaskPhase::Capture || search_phase_.action == SearchAction::Prepare)
                 enter(PushState::CAPTURE_FAIL, now, "pixel_target_released");
             reason_ = "pixel_target_released";

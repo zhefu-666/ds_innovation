@@ -6,6 +6,7 @@
 namespace rescue {
 enum class MatchState {
     WAITING,
+    RESTARTING,
     RUNNING,
     PAUSED,
     FAULT,
@@ -28,7 +29,9 @@ struct MatchConfig {
 struct MatchStatus {
     MatchState state = MatchState::WAITING;
     uint64_t started_us = 0, elapsed_us = 0, remaining_us = 0;
+    uint64_t run_id = 0;
     bool permit = false;
+    bool ready = false; // live preflight; waiting does not start the match clock
     bool phase_waiting = false;
     std::string reason = "waiting_start";
 };
@@ -43,17 +46,25 @@ class MatchControl {
     void measuredPosition(
         uint64_t sample_us, double x, double y, const std::string& reference, double uncertainty_m);
     bool command(MatchCommand command, uint64_t now);
+    // Only a fresh press after preparation can start once; never resumes a pause.
+    bool startFromButton(uint64_t received_us, uint64_t now);
+    // Full-match A7 starts a new round after the runtime has stopped and prepared.
+    bool restartFromButton(uint64_t received_us, uint64_t now, bool current_preflight_ready);
+    bool completeButtonRestart(uint64_t now);
+    void failButtonRestart(uint64_t now, const std::string& reason);
     MatchStatus status(uint64_t now);
     bool pauseForPhase(const std::string& next_phase, uint64_t now);
     static const char* name(MatchState state);
 
   private:
+    bool commandLocked(MatchCommand command, uint64_t now);
     void tick(uint64_t now);
     bool ready(uint64_t now) const;
     MatchConfig config_;
     std::mutex mutex_;
     MatchStatus status_;
     uint64_t health_us_ = 0, last_tick_us_ = 0, progress_us_ = 0, pose_us_ = 0;
+    uint64_t ready_since_us_ = 0, restart_requested_us_ = 0, last_restart_button_us_ = 0;
     bool health_ok_ = false, pose_valid_ = false;
     double anchor_x_ = 0, anchor_y_ = 0, anchor_uncertainty_ = 0;
     std::string health_reason_ = "preflight_pending", reference_;

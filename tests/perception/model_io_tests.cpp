@@ -93,7 +93,7 @@ void detectorTests() {
     assert(makePushObservation(out, 1050000, true, .25f, 3).target_id == 3);
     assert(!makePushObservation(out, 1050000, true, .25f, 99).target_valid);
     assert(makePushObservation(out, 1050000, true, .25f, -1, {1}).target_id == 3);
-    { // An on-end injured block is never a target, even when it is the larger or locked one.
+    { // A tall injured box remains eligible: this field has only lying injured blocks.
         SegDetection up, lie;
         up.track_id = 8;
         lie.track_id = 9;
@@ -106,9 +106,8 @@ void detectorTests() {
             lie.ground_contact_valid = true;
         up.body_xy_m = {0, .3f};
         lie.body_xy_m = {.1f, .5f};
-        up.injured_upright_rejected = true;
-        assert(makePushObservation({up, lie}, 1050000, true, .25f, -1).target_id == 9);
-        assert(!makePushObservation({up, lie}, 1050000, true, .25f, 8).target_valid);
+        assert(makePushObservation({up, lie}, 1050000, true, .25f, -1).target_id == 8);
+        assert(makePushObservation({up, lie}, 1050000, true, .25f, 8).target_valid);
     }
     assert(!makePushObservation(out, 1050000, false, .25f, -1, {1}).target_valid);
     // The danger object is never a push target, even after the first ordinary delivery.
@@ -121,7 +120,9 @@ void detectorTests() {
         mix[0].track_id = 1;
         mix[1].label = "injured_person";
         mix[1].track_id = 4;
-        assert(makePushObservation(mix, 1050000, true, .25f).target_id == 1);
+        // First delivery is complete: an isolated injured target scores 15,
+        // rather than retaining the old ordinary-before-injured fallback.
+        assert(makePushObservation(mix, 1050000, true, .25f).target_id == 4);
         assert(makePushObservation(
                    mix, 1050000, true, .25f, -1, {}, false, false, false, "injured_person")
                    .target_id == 4);
@@ -153,7 +154,7 @@ void detectorTests() {
         picked = makePushObservation(objects, 1050000, false, .25f, -1, {}, false, false, true);
         assert(picked.target_id == 1 && !picked.target_is_search_cue);
         picked = makePushObservation(objects, 1050000, true, .25f, -1, {}, false, false, true);
-        assert(picked.target_id == 3); // black wins despite farther distance
+        assert(picked.target_id == 1); // Both nominate the same 15-point local supply pair.
         objects[2].ground_contact_valid = false;
         assert(makePushObservation(objects, 1050000, true, .25f, -1, {}, false, false, true)
                    .target_id == 1);
@@ -446,6 +447,10 @@ void imageSubzoneViewTests() {
     };
     step();
     assert(in.supply_view.valid && in.injured_view.valid);
+    assert(std::abs(in.supply_view.left_margin_fraction-340.f/1280)<1e-6f);
+    assert(std::abs(in.supply_view.right_margin_fraction-639.f/1280)<1e-6f);
+    assert(std::abs(in.injured_view.left_margin_fraction-640.f/1280)<1e-6f);
+    assert(std::abs(in.injured_view.right_margin_fraction-339.f/1280)<1e-6f);
     assert(!in.supply_view.inside && !in.injured_view.inside);
     assert(in.supply_view.error_fraction<0 && in.injured_view.error_fraction>0);
     for(auto& h:halves)for(auto& p:h.keypoints)p.x+=150;
@@ -456,6 +461,7 @@ void imageSubzoneViewTests() {
     for(auto& h:halves)for(auto& p:h.keypoints)p.x-=300;
     step();assert(in.injured_view.inside && std::abs(in.injured_view.error_fraction)<1e-5f);
     step(false);assert(!in.injured_view.valid);
+    assert(in.injured_view.left_margin_fraction<0 && in.injured_view.right_margin_fraction<0);
     step(true,false);assert(!in.injured_view.valid);
     // Edge slope comes from the raw connected corners, independent of any pose.
     for(float slope : {-.12f,0.f,.12f}) {
@@ -466,6 +472,12 @@ void imageSubzoneViewTests() {
         assert(std::abs(in.injured_view.edge_slope-slope)<1e-5f);
     }
     auto good=halves[1];
+    // Subpixel corners in the last pixel are valid and have zero margin,
+    // rather than the negative sentinel for missing image evidence.
+    halves[1].keypoints={cv::Point2f{950,200},cv::Point2f{950,500},
+                         cv::Point2f{1279.5f,200},cv::Point2f{1279.5f,500}};
+    step();assert(in.injured_view.valid && in.injured_view.right_margin_fraction==0);
+    halves[1]=good;
     std::swap(halves[1].keypoints[0],halves[1].keypoints[2]);
     step();assert(!in.injured_view.valid);
     halves[1]=good;

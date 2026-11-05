@@ -4,7 +4,8 @@
 #include "rescue/geometry/zone_geometry.hpp"
 #include "rescue/perception/zone_keypoints.hpp"
 namespace rescue {
-// Search mode considers all known classes; cargo mode enforces first-green and black priority.
+// Search cues consider all known classes. Cargo selection enforces the first
+// ordinary delivery, then ranks feasible local loads through chooseTrip.
 // Detection-only evidence. Metric geometry, route/sensor safety and delivery
 // fields deliberately remain invalid until their independent adapters exist.
 PushObservation makePushObservation(const std::vector<SegDetection>& detections,
@@ -24,10 +25,42 @@ PushObservation makePushObservation(const std::vector<SegDetection>& detections,
 // A unique same-class overlapping re-ID within the visual hold window retains the physical target.
 // Rejected IDs still contribute to scene counts but cannot be selected.
 // Supplies image-only steering and the same lower-quarter view handoff used by search.
+// pile_approach uses the union centre of visible cargo at UI120. An optional,
+// caller-owned guide retains steering members for 150 ms and filters centre X
+// over three fresh images. Coherent member motion is retained; membership-only
+// centre changes are limited to 10 px per fresh image. Scene/safety evidence
+// and target_box remain current.
+// Ordinary selection and other views retain box targeting.
+class StartupPileGuide {
+  public:
+    cv::Point2f update(const std::vector<const SegDetection*>& cargo, cv::Size size,
+                       int16_t pitch, uint64_t now_us);
+    void reset() { *this = {}; }
+
+  private:
+    struct Member {
+        int id;
+        std::string label;
+        cv::Rect box;
+        uint64_t sample_us;
+        unsigned sequence;
+        int hits;
+        bool confirmed;
+    };
+    std::vector<Member> members_;
+    std::vector<float> centers_;
+    cv::Size size_;
+    int16_t pitch_ = kCameraPitchInvalid;
+    uint64_t sample_us_ = 0;
+    unsigned sequence_ = 0;
+    cv::Point2f center_;
+    float tracked_center_x_ = 0;
+};
 void applyStartupSight(PushObservation&, const std::vector<SegDetection>&, cv::Size,
                        uint64_t now_us, float min_confidence, int preferred_id,
                        bool ordinary_only = false, int rejected_id = -1,
-                       const StartupSightReference& reference = {});
+                       const StartupSightReference& reference = {}, bool pile_approach = false,
+                       StartupPileGuide* pile_guide = nullptr);
 // Raw ordinary detection for local split retreat. Prefer the original target, otherwise the
 // ordinary nearest the image centre after the view handoff/re-ID. No ground projection needed.
 void applySplitRetreatBox(PushObservation&,
@@ -44,6 +77,12 @@ std::vector<int> targetsNearOwnZone(const std::vector<SegDetection>& detections,
                                     cv::Size image_size,
                                     uint64_t now_us,
                                     float min_confidence);
+// Evaluate only a confirmed search lock, using the current image. No visible own zone
+// means outside for search; this does not change measured geometry or delivery evidence.
+void applySearchTargetRegion(PushObservation&, const std::vector<SegDetection>&,
+                              const std::string& team, cv::Size image_size,
+                              bool stable, uint64_t capture_us, uint64_t now_us,
+                              float min_confidence, bool own_pose_visible = false);
 // Full rectangle containment of ordinary cargo in an own-team zone, from one fresh image.
 // Independent of ground projection and target selection.
 void applyDeliveryBoxEvidence(PushObservation&, const std::vector<SegDetection>&,

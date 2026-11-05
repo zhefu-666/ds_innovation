@@ -70,6 +70,7 @@ void printUsage(const char* program) {
         << "  --pose-model-red P  Red-team pose model override; same thresholds and output schema\n"
         << "  --pose-conf X       Safe-zone half score threshold, default 0.25\n"
         << "  --pose-kpt-conf X   Safe-zone keypoint visibility threshold, default 0.5\n"
+        << "  --pose-preview M   off|raw|smoothed|overlay (default off); control always raw\n"
         << "  --detect-core N     RKNN core mask for detector (0 auto, 1 core0, 2 core1, 3 core0+1, 4 core2)\n"
         << "  --pose-core N       RKNN core mask for pose (0 auto, 1 core0, 2 core1, 3 core0+1, 4 core2)\n"
         << "  --async-capture     Capture continuously on a latest-frame worker\n"
@@ -91,7 +92,7 @@ void printUsage(const char* program) {
         << "  --no-show           Do not open display window\n"
         << "  --imu               Receive HiPNUC HI91 in preview (body axes; stale/over-tilt "
            "vetoes safety, no motion output)\n"
-        << "  --imu-port PATH     IMU serial port, default /dev/ttyUSB0\n"
+        << "  --imu-port PATH     IMU serial port, default /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0\n"
         << "  --imu-baud N        IMU baudrate, default 115200\n"
         << "  --imu-timeout-ms N  IMU freshness limit, default 200 (1..10000)\n"
         << "  --telemetry         Publish observations to the local Foxglove bridge\n"
@@ -105,6 +106,7 @@ void printUsage(const char* program) {
            "port\n"
         << "  --auto-run          Request START once after live preflight; never auto-resume "
            "faults\n"
+        << "  --start-on-a7       Prepare and wait for a fresh A7 button or match_ctl.py start\n"
         << "  --phase NAME        Run only startup|search|capture|transport, then exit\n"
         << "  --capture-after-first  With --phase capture: start with first ordinary delivery "
            "history set; capture checks remain enabled\n"
@@ -251,6 +253,8 @@ Config parseArgs(int argc, char** argv) {
             config.pose_confidence = std::stof(needValue(arg));
         } else if (arg == "--pose-kpt-conf") {
             config.pose_keypoint_confidence = std::stof(needValue(arg));
+        } else if (arg == "--pose-preview") {
+            config.pose_smoothing_preview = needValue(arg);
         } else if (arg == "--detect-core") {
             config.detect_core_mask = std::stoi(needValue(arg));
         } else if (arg == "--pose-core") {
@@ -395,6 +399,8 @@ Config parseArgs(int argc, char** argv) {
             config.step_phases = true;
         } else if (arg == "--auto-run") {
             config.auto_run = true;
+        } else if (arg == "--start-on-a7") {
+            config.start_on_a7 = true;
         } else if (arg == "--require-masks") {
             config.require_instance_masks = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -405,6 +411,8 @@ Config parseArgs(int argc, char** argv) {
         }
     }
 
+    if (config.start_on_a7 && (!config.hardware || config.auto_run))
+        throw std::runtime_error("--start-on-a7 requires --hardware and cannot combine with --auto-run");
     if (config.capture_after_first && config.single_phase != "capture")
         throw std::runtime_error("--capture-after-first requires --phase capture");
     if (!config.single_phase.empty() &&
@@ -473,6 +481,9 @@ Config parseArgs(int argc, char** argv) {
     };
     if (!validThreshold(config.pose_confidence) || !validThreshold(config.pose_keypoint_confidence))
         throw std::runtime_error("Pose thresholds must be in [0,1]");
+    if (config.pose_smoothing_preview != "off" && config.pose_smoothing_preview != "raw" &&
+        config.pose_smoothing_preview != "smoothed" && config.pose_smoothing_preview != "overlay")
+        throw std::runtime_error("--pose-preview must be off, raw, smoothed or overlay");
     auto validCore = [](int m) {
         return m == -1 || m == 0 || m == 1 || m == 2 || m == 3 || m == 4;
     };

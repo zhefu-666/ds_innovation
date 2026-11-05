@@ -32,13 +32,16 @@ ObservationBuilder::ObservationBuilder(const ResolvedRuntimeConfig& config,
                   config.view_image_polygon) {
     const auto& tuning = config.task;
     pixel_selector_.setRelock(tuning.relock_window_us, tuning.relock_gate_frac);
-    RowParams rp;
-    rp.min_n = tuning.row_min_n;
-    rp.resid_m = tuning.row_resid_m;
-    rp.max_tilt_rad = tuning.row_max_tilt_rad;
-    rp.half_along_m = tuning.row_half_along_m;
-    rp.half_across_m = tuning.row_half_across_m;
-    pixel_selector_.setRow(tuning.row_select, rp);
+}
+
+void ObservationBuilder::resetForNewRun() {
+    capture_ = CaptureMonitor(config_.capture);
+    pixel_selector_.reset();
+    startup_pile_guide_.reset();
+    multi_view_.reset();
+    imu_translation_sequence_ = progress_ref_us_ = observation_round_ = 0;
+    progress_total_ = -1;
+    observing_ = false;
 }
 
 ObservationResult ObservationBuilder::build(const cv::Mat& frame,
@@ -189,7 +192,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     // The explicit rejection releases an existing pixel lock without dropout grace.
     // Keep all detections for corridor/hold evidence, and do not veto carried cargo
     // while Transport approaches its required destination.
-    if (previous.phase != TaskPhase::Transport) {
+    if (previous.phase != TaskPhase::Transport && previous.phase != TaskPhase::Search) {
         const auto near_zone = targetsNearOwnZone(
             detections, config.team, frame.size(), observed_at, config.confidence);
         rejected_ids.insert(rejected_ids.end(), near_zone.begin(), near_zone.end());
@@ -241,9 +244,15 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         pixel_selector.reset();
     pixel_selector.syncSplitSelection(previous.split_target_reselecting,
                                       previous.split_target_candidate_id);
-    if (!previous.split_target_reselecting)
+    if (previous.split_return_search)
+        pixel_selector.syncTaskState(PushState::SCATTER, -1, {});
+    else if (!previous.split_target_reselecting)
         pixel_selector.syncTaskState(
-            previous.state, selecting_task ? previous.target_id : -1, task.targetLabel());
+            previous.state, selecting_task ? previous.target_id : -1, task.targetLabel(),
+            previous.phase == TaskPhase::Search && !previous.recovering &&
+                previous.search_action != SearchStatusAction::Prepare &&
+                previous.search_action != SearchStatusAction::TurnAway &&
+                previous.search_action != SearchStatusAction::Recover);
     // Zone detections are navigation landmarks; they never enter cargo selection,
     // crowding, row grouping or gripper inventory as solid objects.
     std::vector<SegDetection> cargo_detections;
@@ -323,8 +332,7 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
               << selection.candidates << "]"
               << " selection_paused=" << previous.pixel_selection_paused
               << " split_reselect=" << previous.split_target_reselecting
-              << " split_candidate=" << previous.split_target_candidate_id
-              << (selection.row.empty() ? std::string() : " ROW[" + selection.row + "]") << "\n";
+              << " split_candidate=" << previous.split_target_candidate_id << "\n";
     input.pixel_ratio_raw = selection.raw;
     input.pixel_ratio_smoothed = selection.smoothed;
     input.pixel_mode = selection.mode;
@@ -407,14 +415,6 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             input.zone_sight_image_size = frame.size();
         }
     }
-    for (const auto& d : cargo_detections)
-        if (d.label == "injured_person" && d.track_id != selection.id &&
-            (d.injured_upright_rejected || !d.ground_contact_valid) && d.ground_position_valid &&
-            d.confidence >= obstacleConfidence(d) && std::isfinite(d.body_xy_m.x) &&
-            std::isfinite(d.body_xy_m.y))
-            input.upright_body.push_back(d.body_xy_m);
-    if (!input.upright_body.empty())
-        input.upright_ts_us = observed_at;
     for (const auto& d : cargo_detections)
         if (d.track_id != selection.id && d.ground_position_valid &&
             d.confidence >= obstacleConfidence(d) && std::isfinite(d.body_xy_m.x) &&
@@ -511,6 +511,11 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
             input.gripper_feedback_open = gripper_ack.target;
         }
     }
+    if (previous.phase != TaskPhase::Startup || !task.startupPileApproach() ||
+        previous.run_status != RunStatus::Running || !frame_sensors.pitch_stable ||
+        std::abs(int(input.camera_pitch_cdeg) - int(config_.task.track_pitch_cdeg)) >
+            config_.task.pitch_tolerance_cdeg)
+        startup_pile_guide_.reset();
     const bool startup_ordinary_view = task.startupOrdinaryOnly() ||
         (input.camera_pitch_cdeg != kCameraPitchInvalid &&
          std::abs(int(input.camera_pitch_cdeg) - int(config_.task.near_pitch_cdeg)) <=
@@ -518,17 +523,50 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     if (previous.phase == TaskPhase::Startup)
         applyStartupSight(input, cargo_detections, frame.size(), observed_at,
                           config.confidence, task.startupSightTargetId(), startup_ordinary_view,
-                          task.startupSightRejectedId(observed_at), task.startupSightReference());
+                          task.startupSightRejectedId(observed_at), task.startupSightReference(),
+                          task.startupPileApproach());
     // runtime refreshes previous.motion from MotionLink::stats() immediately before
     // build(): this is the command actually sent after ramping, not a requested stop.
     input.sent_velocity_valid = context.motion_link_enabled;
     input.sent_vx_mps = previous.motion.vx_mps;
     input.sent_wz_rps = previous.motion.wz_rps;
     // Holding-region and rush-corridor inventory; uncertainty leaves them incomplete.
+    // At the transport inspection view, associate the retained load spatially;
+    // the independent search selector must not nominate a new load while carrying.
+    const bool carrying = previous.phase == TaskPhase::Transport && previous.state == PushState::CARRY;
+    input.transport_checks_enabled = carrying && config.controlled_empty_field &&
+                                     config_.task.pixel_grasp_enabled;
+    if (carrying && input.camera_pitch_stable &&
+        input.camera_pitch_cdeg == previous.transported_view_pitch) {
+        input.target_valid = false;
+        input.target_id = -1;
+        for (const auto& reference : previous.transported_objects) {
+            const SegDetection* match = nullptr;
+            int matches = 0;
+            for (const auto& object : cargo_detections) {
+                if (object.label != reference.label || object.box.empty() ||
+                    object.confidence < obstacleConfidence(object))
+                    continue;
+                const auto overlap = object.box & reference.box;
+                const float total = float(object.box.area() + reference.box.area() - overlap.area());
+                if (total > 0 && overlap.area() / total >= .45f) {
+                    match = &object;
+                    ++matches;
+                }
+            }
+            if (matches == 1) {
+                input.target_valid = true;
+                input.target_id = match->track_id;
+                input.target_box = match->box;
+                input.label = match->label;
+                break;
+            }
+        }
+    }
     capture.update(input,
                    cargo_detections,
                    observed_at,
-                   previous.phase == TaskPhase::Capture ? task.targetLabel() : std::string());
+                   previous.phase == TaskPhase::Capture || carrying ? task.targetLabel() : std::string());
     if (input.capture_scene_valid)
         input.capture_scene_us = timestamp;
     if (input.split_layout_valid)
@@ -626,6 +664,12 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
                                 config.controlled_ignore_clearance,
                                 !imuReadinessRequired(previous.phase, config.single_phase));
     }
+    if (previous.phase == TaskPhase::Search) {
+        const bool own_pose_visible = vision_result.pose_ran && !zone_points.empty() &&
+            zone_color.verified && !zone_color.assumed && zone_color.color == config.team;
+        applySearchTargetRegion(input, detections, config.team, frame.size(), stable_view,
+                                timestamp, observed_at, config.confidence, own_pose_visible);
+    }
     // Raw boxes do not establish metric distance or route safety. Delivery has its
     // own explicit same-image containment evidence above.
     // Keep unconnected evidence invalid; never synthesize successful observations.
@@ -660,7 +704,8 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
         (!input.pixel_grasp_near_view || input.label != "ordinary_supply"))
         applyStartupSight(input, cargo_detections, frame.size(), observed_at,
                           config.confidence, task.startupSightTargetId(), startup_ordinary_view,
-                          task.startupSightRejectedId(observed_at), task.startupSightReference());
+                          task.startupSightRejectedId(observed_at), task.startupSightReference(),
+                          task.startupPileApproach(), &startup_pile_guide_);
     return {std::move(input),
             std::move(detections),
             std::move(zone_points),

@@ -1,0 +1,89 @@
+{
+  "model_file": "A_INT8_confidence_fixed_EXPERIMENTAL.rknn",
+  "model_sha256": "0e95f08d1b62a2fa5b03a0f410ebe3b966d243cd9c7337db66ce3a2c8b017a21",
+  "platform": "rk3588",
+  "input": {
+    "shape": [
+      1,
+      640,
+      640,
+      3
+    ],
+    "layout": "NHWC",
+    "dtype": "uint8",
+    "color": "RGB",
+    "letterbox_fill": 114,
+    "normalization": "RKNN internal mean0/std255; no external division"
+  },
+  "output_names": [
+    "boxes",
+    "scores",
+    "xy_experts",
+    "old_visibility"
+  ],
+  "output_shapes": [
+    [
+      1,
+      4,
+      8400
+    ],
+    [
+      1,
+      2,
+      8400
+    ],
+    [
+      1,
+      16,
+      8400
+    ],
+    [
+      1,
+      4,
+      8400
+    ]
+  ],
+  "classes": {
+    "0": [
+      "LA",
+      "LB",
+      "LC",
+      "LD"
+    ],
+    "1": [
+      "RC",
+      "RD",
+      "RE",
+      "RF"
+    ]
+  },
+  "thresholds": {
+    "detection_strict_greater_than": 0.5,
+    "visibility_greater_equal": 0.5,
+    "nms_iou": 0.45
+  },
+  "router": {
+    "far_max": 0.04392929565847024,
+    "near_min": 0.14768375983277818,
+    "basis": "training142 only, no heldout/protected tuning",
+    "fallback": "missing class or multiple same-class post-NMS -> original",
+    "blend": "linear in global max detected box image area fraction"
+  },
+  "filter": {
+    "coordinate_space": "640 square letterbox pixels",
+    "min_cutoff_hz": 1.2,
+    "max_cutoff_hz": 8.0,
+    "beta_hz_per_pixel_per_second": 0.016,
+    "derivative_cutoff_hz": 1.0,
+    "max_gap_seconds": 0.2,
+    "class_box_reset_iou": 0.2,
+    "visibility": 0.5,
+    "detection": 0.5
+  },
+  "board_verified": false,
+  "export_identity_pass": false,
+  "production_decoder_compatible": false,
+  "allow_control_output": false,
+  "auto_switch_production": false,
+  "reference_evidence": "fixed cached INT8 SDK graph; not exported-file NPU reload"
+}

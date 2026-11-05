@@ -165,8 +165,9 @@ int main() {
     tick({unknown}, false);
     assert(!in.path_safe && !in.turn_safe && !in.arc_safe);
     in.pixel_grasp_view = false;
-    // dangerous_object never restricts motion (only carrying it is forbidden): in the body, ahead,
-    // or unlocated.
+    // Contact is still allowed outside carrying; loaded transport has its own veto.
+    previous.phase = TaskPhase::Search;
+    // In separation/capture, dangerous objects may be in the body, ahead or unlocated.
     d.label = "dangerous_object";
     d.body_xy_m = {0, .3};
     tick({d});

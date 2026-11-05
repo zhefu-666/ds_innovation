@@ -56,6 +56,11 @@ class DeliveryVerificationStage {
     void resetInventoryEvidence();
     void clearVisualCounts();
     void clearTrip();
+    // A new round clears evidence, while pre-reset observations stay consumed.
+    void resetForNewRun(uint64_t after_us) {
+        *this = {};
+        cargo_ts_us_ = after_us;
+    }
     bool farView() const {
         return far_view_;
     }

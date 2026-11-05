@@ -1,7 +1,7 @@
 #pragma once
 #include "rescue/perception/perception_adapter.hpp"
 #include "rescue/task/transport_rules.hpp"
-#include "rescue/perception/row_selector.hpp"
+#include "rescue/perception/trip_selection.hpp"
 #include "rescue/perception/capture_monitor.hpp"
 #include <sstream>
 #include <map>
@@ -17,10 +17,6 @@ struct PixelSelection {
     int reselected_from = -1; // A different object; never a same-object tracker rebind.
     std::string candidates;
     std::string event = "none";
-    bool row_split = false; // row mode: the locked ordinary block has an injured/dangerous/core
-                            // piece in its frame footprint (to be separated, not skipped)
-    std::string
-        row; // row-mode note: seq / count / chosen index / reason; empty when row mode is off
 };
 // Masks must already be mapped to the original image. Never resize an unknown mask.
 class PixelSelector {
@@ -41,11 +37,11 @@ class PixelSelector {
     int split_candidate_ = -1;
     Inventory keep_inventory_;
     PushState observation_state_ = PushState::WAIT_START;
-    uint64_t missing_since_us_ = 0, world_us_ = 0;
+    uint64_t missing_since_us_ = 0;
     std::string locked_label_;
     cv::Rect locked_box_;
-    bool view_changed_ = false, world_valid_ = false;
-    float world_bearing_ = 0, world_range_ = 0;
+    bool view_changed_ = false;
+    bool searching_ = false;
     std::set<int> neighbours_;
     bool have_center_ = false;
     cv::Point2f last_center_, challenger_center_;
@@ -117,22 +113,14 @@ class PixelSelector {
                (pair ? 1 : 0);
     }
     int relax_ = 0;
-    bool row_on_ = false;
-    RowParams row_;
 
   public:
     // Apply only to target selection. All detections still reach inventory/safety checks.
     void setCaptureLoad(const Inventory& inventory) { keep_inventory_ = inventory; }
-    // Row mode: with a left-right row of >= row.min_n blocks in view the lock goes to the middle
-    // block whose frame footprint is clean, not the largest box.
-    void setRow(bool on, const RowParams& p = {}) {
-        row_on_ = on;
-        row_ = p;
-    }
     void setRelax(int level) {
         relax_ = std::clamp(level, 0, 2);
     }
-    // Maximum age of cross-view world evidence, and same-view image gate for a new tracker ID.
+    // Pending confirmation window and same-view image gate for a new tracker ID.
     // Missing targets are released after kLockGraceUs; this window never extends that grace.
     void setRelock(uint64_t window_us, double gate_frac) {
         relock_window_us_ = window_us;
@@ -142,8 +130,12 @@ class PixelSelector {
         reset(); // A sweep ends the selection episode, including its target identity.
     }
     void syncTaskTarget(int id, const std::string& label) {
-        if (id == task_id_)
+        if (id == task_id_) {
+            // The task can accept a fresh view choice that reuses the tracker ID.
+            if (id == locked_ && !view_changed_)
+                reselected_from_ = -1;
             return;
+        }
         if (id < 0 || id != locked_) {
             reset();
             locked_ = id;
@@ -155,12 +147,17 @@ class PixelSelector {
     }
     // End the old selection episode once on entry, then accumulate fresh observations.
     // A task without a cargo lock must not erase the independent visual confirmation.
-    void syncTaskState(PushState state, int id, const std::string& label) {
+    void syncTaskState(PushState state, int id, const std::string& label, bool searching = false) {
+        if (searching != searching_)
+            reset();
+        searching_ = searching;
         const bool scattering = state == PushState::SCATTER || state == PushState::PILE;
         if (scattering && state != observation_state_)
             reset();
         observation_state_ = state;
-        syncTaskTarget(scattering ? -1 : id, scattering ? std::string() : label);
+        // Search IDs describe this view only; the task must not revive an old lock.
+        syncTaskTarget(scattering || searching ? -1 : id,
+                       scattering || searching ? std::string() : label);
     }
     // The split task explicitly ends the old episode and nominates a fresh UI140 block.
     // Repeated requests for the same candidate must preserve three-frame confirmation.
@@ -192,10 +189,10 @@ class PixelSelector {
         reselected_from_ = -1;
         split_selection_ = false;
         split_candidate_ = -1;
-        missing_since_us_ = world_us_ = 0;
+        missing_since_us_ = 0;
         locked_label_.clear();
         locked_box_ = {};
-        view_changed_ = world_valid_ = false;
+        view_changed_ = false;
         neighbours_.clear();
         have_center_ = false;
     }
@@ -208,10 +205,15 @@ class PixelSelector {
                           float confidence,
                           const std::vector<int>& rejected = {},
                           const std::string& prefer_label = "",
-                          float heading = std::numeric_limits<float>::quiet_NaN(),
+                          float /* heading */ = std::numeric_limits<float>::quiet_NaN(),
                           float ui140_core_confidence = 1.f,
                           const CaptureConfig* near_config = nullptr,
                           bool allow_near_reselect = false) {
+        // Reconfirm wanted cargo independently after every search view change.
+        // Capture keeps its existing task-owned identity and association rules.
+        if (searching_ && (!stable || pitch == kCameraPitchInvalid ||
+                          (pitch_ != kCameraPitchInvalid && (pitch != pitch_ || size != size_))))
+            reset();
         PixelSelection out;
         out.held_id = locked_;
         out.reselected_from = reselected_from_;
@@ -276,10 +278,6 @@ class PixelSelector {
                 (d.label != locked_label_ || !targetSelectable(d.label, first) ||
                  (keep_inventory_.total() && !keep_inventory_.count(targetKind(d.label)))))
                 vetoed.insert(d.track_id);
-            if (d.injured_upright_rejected) {
-                vetoed.insert(d.track_id);
-                continue;
-            } // an on-end injured block never competes for the lock
             if (d.track_id < 0 || !targetSelectable(d.label, first) ||
                 (keep_inventory_.total() && !keep_inventory_.count(targetKind(d.label))) ||
                 !std::isfinite(d.confidence) || d.confidence < (d.label == "core_supply" ? std::min(confidence, ui140_core_confidence) : confidence) || !d.timestamp_us ||
@@ -419,7 +417,7 @@ class PixelSelector {
             challenger_us_ = 0;
             count_ = 0;
         }
-        if (locked_ >= 0 && vetoed.count(locked_)) {
+        if (locked_ >= 0 && !view_changed_ && vetoed.count(locked_)) {
             release("target_rejected");
             return out;
         }
@@ -428,17 +426,6 @@ class PixelSelector {
                 it = history_.erase(it);
             else
                 ++it;
-        const auto metricMatch = [&](const SegDetection& d) {
-            if (!world_valid_ || !std::isfinite(heading) || !geo_ok.count(d.track_id) ||
-                now < world_us_ || now - world_us_ > relock_window_us_)
-                return false;
-            const float bearing = heading + std::atan2(-d.body_xy_m.x, d.body_xy_m.y);
-            const float delta =
-                std::atan2(std::sin(bearing - world_bearing_), std::cos(bearing - world_bearing_));
-            const float gate = std::clamp(.05f / std::max(world_range_, .15f), .04f, .15f);
-            return std::abs(delta) <= gate &&
-                   std::abs(cv::norm(d.body_xy_m) - world_range_) <= .15f;
-        };
         bool lock_absent = locked_ >= 0 && !values.count(locked_);
         if (locked_ >= 0 && view_changed_)
             lock_absent = true; // Even the same tracker ID must be re-observed in a new view.
@@ -452,19 +439,34 @@ class PixelSelector {
                 return out;
             }
             int matches = 0;
-            for (const auto& d : ds) {
-                if (!values.count(d.track_id) || d.label != locked_label_ ||
-                    (d.track_id != locked_ && neighbours_.count(d.track_id)))
-                    continue;
-                const double scale =
-                    locked_box_.area() > 0 ? double(d.box.area()) / locked_box_.area() : 0;
-                const bool image_match =
-                    !view_changed_ && have_center_ &&
-                    cv::norm(centers[d.track_id] - last_center_) <= grace_gate_frac_ * size.width &&
-                    scale >= .25 && scale <= 4.;
-                if (view_changed_ ? metricMatch(d) : image_match) {
-                    rebound = d.track_id;
-                    ++matches;
+            if (view_changed_) {
+                // A new view starts a new cargo choice, not a physical-identity match.
+                // At a stopped open frame, choose wanted cargo inside the measured
+                // image region. Neither old ID/class nor ground coordinates constrain it.
+                if (allow_near_reselect) {
+                    for (const auto& d : ds) {
+                        if (!values.count(d.track_id) || !captureBoxComplete(d.box, size) ||
+                            (near_view && priority[d.track_id] != 0))
+                            continue;
+                        if (rebound < 0 || values[d.track_id].first > values[rebound].first)
+                            rebound = d.track_id;
+                    }
+                }
+                matches = rebound >= 0 ? 1 : 0;
+            } else {
+                for (const auto& d : ds) {
+                    if (!values.count(d.track_id) || d.label != locked_label_ ||
+                        (d.track_id != locked_ && neighbours_.count(d.track_id)))
+                        continue;
+                    const double scale =
+                        locked_box_.area() > 0 ? double(d.box.area()) / locked_box_.area() : 0;
+                    const bool image_match = have_center_ &&
+                        cv::norm(centers[d.track_id] - last_center_) <= grace_gate_frac_ * size.width &&
+                        scale >= .25 && scale <= 4.;
+                    if (image_match) {
+                        rebound = d.track_id;
+                        ++matches;
+                    }
                 }
             }
             // During RUSH, a unique, strongly overlapping same-view detection is
@@ -487,6 +489,15 @@ class PixelSelector {
         } else if (locked_ >= 0) {
             missing_since_us_ = 0;
         }
+        std::vector<SegDetection> trip_candidates;
+        for (const auto& object : ds)
+            if (values.count(object.track_id))
+                trip_candidates.push_back(object);
+        std::map<int, std::pair<int,int>> trip_ranks;
+        for (const auto& object : trip_candidates)
+            trip_ranks[object.track_id] = candidateTripRank(
+                object, trip_candidates, first, confidence, now, ui140_core_confidence);
+        const auto tripRank = [&](int id) { return trip_ranks.at(id); };
         int best = -1;
         for (const auto& [id, v] : values) {
             auto it = history_.find(id);
@@ -494,7 +505,8 @@ class PixelSelector {
                 history_[id] = {v.first, v.second};
             else
                 it->second.value = .5 * v.first + .5 * it->second.value;
-            if (best < 0 || history_[id].value > history_[best].value)
+            if (best < 0 || tripRank(id) > tripRank(best) ||
+                (tripRank(id) == tripRank(best) && history_[id].value > history_[best].value))
                 best = id;
         }
         if (best < 0) {
@@ -536,22 +548,11 @@ class PixelSelector {
                 count_ = near_count_ = 0;
             }
         }
-        int row_pick = -1;
-        std::vector<int> row_split_ids;
-        if (row_on_ && !near_view) {
-            const auto rp = RowSelector::pick(ds, now, first, confidence, locked_, row_, ui140_core_confidence);
-            out.row = "seq=" + rp.seq + " n=" + std::to_string(rp.n) +
-                      " idx=" + std::to_string(rp.index) + " id=" + std::to_string(rp.id) + " " +
-                      rp.reason;
-            if (rp.id >= 0 && values.count(rp.id))
-                row_pick = rp.id;
-            row_split_ids = rp.split_ids;
-        }
-        if (row_pick < 0 && locked_ < 0 && values.size() > 1) {
+        if (locked_ < 0 && values.size() > 1) {
             const double floor = .3 * history_[best].value;
             int pick = best, pen = crowd(ds, best, confidence, now, relax_);
             for (const auto& [id, v] : values) {
-                if (history_[id].value < floor)
+                if (tripRank(id) != tripRank(best) || history_[id].value < floor)
                     continue;
                 const int p = crowd(ds, id, confidence, now, relax_);
                 if (p < pen || (p == pen && history_[id].value > history_[pick].value)) {
@@ -560,6 +561,7 @@ class PixelSelector {
                 }
             }
             if (challenger_ >= 0 && challenger_ != pick && values.count(challenger_) &&
+                tripRank(challenger_) == tripRank(best) &&
                 history_[challenger_].value >= floor &&
                 (crowd(ds, challenger_, confidence, now, relax_) <= pen ||
                  crowd(ds, challenger_, confidence, now, relax_) < 10))
@@ -569,15 +571,15 @@ class PixelSelector {
         // Before a lock exists, keep the pending target by image position. Detection IDs can
         // alternate between two frames even when the same physical block stays in place; choosing
         // purely by area would then reset confirmation forever. A different block must move outside
-        // this short gate before it can replace the pending target. Row selection remains stronger.
-        if (row_pick < 0 && locked_ < 0 && challenger_ >= 0 && challenger_us_ &&
+        // this short gate before it can replace the pending target.
+        if (locked_ < 0 && challenger_ >= 0 && challenger_us_ &&
             now >= challenger_us_ &&
             (relock_window_us_ == 0 || now - challenger_us_ <= relock_window_us_)) {
             int nearest_id = -1;
             double nearest = 1e18;
             for (const auto& [id, v] : values) {
                 const auto c = centers.find(id);
-                if (c == centers.end())
+                if (c == centers.end() || tripRank(id) != tripRank(best))
                     continue;
                 const double dd = cv::norm(c->second - challenger_center_);
                 if (dd <= kPendingCenterGateFrac * size.width && dd < nearest) {
@@ -600,8 +602,6 @@ class PixelSelector {
         }
         if (locked_ >= 0)
             best = lock_absent ? rebound : locked_;
-        else if (row_pick >= 0)
-            best = row_pick;
         // Ranking only acquires a target. A visible lock is not an area contest.
         const bool challenge = locked_ < 0 || lock_absent;
         if (challenge) {
@@ -618,10 +618,14 @@ class PixelSelector {
                 challenger_center_ = centers[best];
             challenger_us_ = now;
             if (++count_ >= 3 || continuous_rebind) {
-                out.rebound_from = locked_;
-                out.event = locked_ < 0     ? "target_acquired"
-                            : view_changed_ ? "view_reacquired"
-                                            : "same_object_rebound";
+                if (view_changed_) {
+                    reselected_from_ = locked_;
+                    out.reselected_from = locked_;
+                    out.event = "view_target_reselected";
+                } else {
+                    out.rebound_from = locked_;
+                    out.event = locked_ < 0 ? "target_acquired" : "same_object_rebound";
+                }
                 locked_ = best;
                 locked_label_ = values[best].second;
                 count_ = 0;
@@ -634,7 +638,7 @@ class PixelSelector {
             challenger_ = -1;
         }
         const bool held = locked_ >= 0 && values.count(locked_) && !view_changed_ &&
-                          (!lock_absent || out.rebound_from >= 0);
+                          (!lock_absent || out.rebound_from >= 0 || out.reselected_from >= 0);
         out.locked = held;
         out.held_id = locked_;
         if (held && task_id_ >= 0 && task_id_ != locked_ && reselected_from_ < 0)
@@ -644,8 +648,6 @@ class PixelSelector {
                         : out.rebound_from >= 0 ? "await_task_rebind"
                                                 : "target_held";
         out.id = held ? locked_ : -1;
-        out.row_split = held && std::find(row_split_ids.begin(), row_split_ids.end(), locked_) !=
-                                    row_split_ids.end();
         out.reason = held ? "pixel_ratio_locked"
                           : (locked_ >= 0 ? "lock_grace_waiting" : "confirming_three_frames");
         const int shown = held ? locked_ : best;
@@ -662,12 +664,7 @@ class PixelSelector {
                     continue;
                 }
                 locked_box_ = d.box;
-                if (geo_ok.count(locked_) && std::isfinite(heading)) {
-                    world_bearing_ = heading + std::atan2(-d.body_xy_m.x, d.body_xy_m.y);
-                    world_range_ = cv::norm(d.body_xy_m);
-                    world_us_ = now;
-                    world_valid_ = true;
-                }
+
             }
         }
         return out;

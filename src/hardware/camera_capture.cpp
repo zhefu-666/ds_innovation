@@ -113,14 +113,32 @@ bool CameraCapture::latest(CameraFrame& out) const {
 bool CameraCapture::waitNext(uint64_t after, CameraFrame& out, int timeout_ms) {
     AuditScope audit("capture.wait_copy");
     const uint64_t requested = nowUs();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!ready_.wait_for(lock,
-                         std::chrono::milliseconds(timeout_ms),
-                         [&] {
-                             return latest_.frame_number > after || !running_.load();
-                         }) ||
-        !running_.load() || latest_.frame_number <= after)
-        return false;
+    for (;;) {
+        if (std::chrono::steady_clock::now() >= deadline ||
+            !ready_.wait_until(lock,
+                               deadline,
+                               [&] {
+                                   return latest_.frame_number > after || !running_.load();
+                               }) ||
+            !running_.load())
+            return false;
+        const uint64_t now = nowUs();
+        if (latest_.timestamp_us <= now &&
+            now - latest_.timestamp_us <= uint64_t(timeout_ms) * 1000)
+            break;
+        // A consumer stall can outlive the one frame prepared ahead of demand.
+        // Skip that frame and refresh from the newest compressed image, keeping
+        // the original deadline so a stalled producer still times out.
+        after = latest_.frame_number;
+        if (raw_mjpeg_) {
+            std::lock_guard<std::mutex> scheduler(compressed_mutex_);
+            decode_target_ = std::chrono::steady_clock::now();
+            decode_requested_ = true;
+            compressed_ready_.notify_one();
+        }
+    }
     out = latest_;
     out.image = latest_.image.clone();
     if (raw_mjpeg_ && out.frame_number > delivered_frame_) {
@@ -233,10 +251,14 @@ void CameraCapture::decodeLoop() {
                 });
                 if (!running_.load())
                     break;
-                const auto target = std::max(next_decode, decode_target_);
-                compressed_ready_.wait_until(lock, target, [&] {
-                    return !running_.load();
-                });
+                // A stale-frame refresh may move the scheduled decode earlier.
+                // Recompute after notification instead of waiting for the old target.
+                while (running_.load()) {
+                    const auto target = std::max(next_decode, decode_target_);
+                    if (std::chrono::steady_clock::now() >= target)
+                        break;
+                    compressed_ready_.wait_until(lock, target);
+                }
                 if (!running_.load())
                     break;
                 compressed_ready_.wait(lock, [&] {

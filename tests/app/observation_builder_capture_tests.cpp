@@ -60,7 +60,145 @@ void independentHalfEntranceIgnoresDividerDisagreement() {
     std::cout<<"PASS raw selected-half entrance ignores mismatched or absent other-half divider\n";
 }
 
+void startupPileGuideSurvivesCaptureMonitor() {
+    rescue::ResolvedRuntimeConfig cfg;
+    cfg.request.frame_width = 1280;
+    cfg.request.frame_height = 720;
+    cfg.request.confidence = .5f;
+    cfg.capture.pixel_grasp_enabled = cfg.task.pixel_grasp_enabled = true;
+    cfg.task.startup_advance_us = 1;
+    cfg.task.start_zone = 3;
+    cfg.task.pixel_align_brake_motion_px = 30;
+    cfg.task.far_pitch_cdeg = -3000;
+    cfg.task.track_pitch_cdeg = 0;
+    cfg.task.near_pitch_cdeg = 2000;
+    PushTask task(cfg.task);
+    task.setSinglePhase("startup");
+    task.startup_action_ = PushTask::StartupAction::Approach;
+    PushOutput previous;
+    previous.phase = TaskPhase::Startup;
+    previous.state = PushState::START_ADVANCE;
+    previous.run_status = RunStatus::Running;
+    CameraCalibration camera;
+    ZoneGeometry zone;
+    ZoneColorClassifier colors;
+    ControlledField field(zone, .1f);
+    SensorFusion fusion;
+    MotionWatch watch;
+    UARTController feedback;
+    feedback.running_.store(true); // in-memory causal feedback; no port or thread is opened
+    uint64_t last_feedback_us = 0;
+    rescue::app::ObservationBuilder builder(cfg, nullptr, camera, false, zone, colors, field, fusion);
+    cv::Mat frame(720,1280,CV_8UC3,cv::Scalar(0));
+    rescue::PerceptionResult vision;
+    int dropouts = 0;
+    for (int sequence = 1; sequence <= 18; ++sequence) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(27));
+        const uint64_t stamp = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        ActuatorFeedback sample;
+        sample.valid = true;
+        sample.camera_pitch_cdeg = cfg.task.track_pitch_cdeg;
+        if (!last_feedback_us) last_feedback_us = stamp - 240000;
+        for (uint64_t t = last_feedback_us + 40000; t < stamp; t += 40000) {
+            sample.timestamp_us = t;
+            feedback.publishActuatorFeedback(sample);
+        }
+        sample.timestamp_us = stamp;
+        feedback.publishActuatorFeedback(sample);
+        last_feedback_us = stamp;
+        SegDetection left;
+        left.track_id = 44;
+        left.label = "injured_person";
+        left.box = {sequence > 3 ? 407 : 427,72,152,192};
+        left.confidence = .95f;
+        left.timestamp_us = stamp;
+        auto right = left;
+        right.track_id = 46;
+        right.box = {649,87,152,192};
+        const bool dropout = sequence > 3 && sequence % 3 == 0;
+        std::vector<SegDetection> scene{left,right};
+        if (dropout) scene.erase(scene.begin());
+        auto input = builder.build(frame, vision, scene, sequence, stamp,
+                                   {task,previous,&feedback,nullptr,watch,false}).input;
+        assert(input.pixel_grasp_view && input.target_id == kStartupPileTargetId);
+        if (dropout) {
+            assert(input.startup_visible_count == 1 && input.target_box == right.box);
+            assert(input.pixel_grasp_error_px <= 40 && input.pixel_grasp_error_px >= -40);
+            if (++dropouts == 4) {
+                std::cout << "PASS real ObservationBuilder retains UI120 steering after CaptureMonitor\n";
+                return;
+            }
+        }
+    }
+    assert(false && "ObservationBuilder did not preserve filtered UI120 steering");
+}
+
+void searchRegionUsesCurrentLockedImage() {
+    using Region = PushObservation::SearchRegion;
+    PushObservation in;
+    in.target_valid = in.pixel_locked = true;
+    in.target_id = 172; in.label = "injured_person";
+    in.now_us = 1050000;
+    SegDetection target;
+    target.track_id = 172; target.label = in.label; target.confidence = .91f;
+    target.timestamp_us = 1000000; target.box = {717,512,86,127};
+    SegDetection zone;
+    zone.track_id = 200; zone.label = "blue_safe_zone"; zone.confidence = .9f;
+    zone.timestamp_us = 1000000; zone.box = {680,480,200,200};
+    const auto apply = [&](std::vector<SegDetection> ds, bool stable=true,
+                           uint64_t frame_us=1000000, bool pose=false) {
+        applySearchTargetRegion(in, ds, "blue", {1280,720}, stable, frame_us,
+                                in.now_us, .25f, pose);
+    };
+    apply({target});
+    assert(in.search_target_region == Region::Outside);
+    assert(in.search_region_reason == "zone_not_visible_assumed_outside");
+    assert(!in.target_region_valid && !in.geometry_valid && !in.delivery_observed);
+    apply({target,zone});
+    assert(in.search_target_region == Region::Inside && in.search_region_reason == "zone_box_inside");
+    zone.box = {100,100,200,200};
+    apply({target,zone});
+    assert(in.search_target_region == Region::Outside && in.search_region_reason == "zone_box_outside");
+    zone.box = {750,500,200,200};
+    apply({target,zone});
+    assert(in.search_target_region == Region::Unknown && in.search_region_sample_us == 1000000);
+    assert(in.search_region_reason == "zone_visible_region_unknown");
+    apply({target},true,1000000,true); // own pose landmarks count as visible, even without a box.
+    assert(in.search_target_region == Region::Unknown);
+    in.target_region_valid = true; in.target_in_zone = true;
+    apply({target,zone});
+    assert(in.search_target_region == Region::Inside && in.search_region_reason == "zone_geometry_inside");
+    apply({target}); // an old zone pose cannot override the current no-zone observation.
+    assert(in.search_target_region == Region::Outside);
+    zone.timestamp_us = 500000;
+    apply({target,zone});
+    assert(in.search_target_region == Region::Outside);
+    apply({target},false);
+    assert(!in.search_region_sample_us && in.search_target_region == Region::Unknown);
+    apply({target},true,500000);
+    assert(!in.search_region_sample_us);
+    in.pixel_locked = false;
+    apply({target});
+    assert(!in.search_region_sample_us); // classify only after a confirmed lock.
+    in.pixel_locked = true;
+    target.label = in.label = "core_supply";
+    target.confidence = .2f; // accepted by a class-specific core threshold in the selector.
+    apply({target});
+    assert(in.search_target_region == Region::Outside && in.search_region_sample_us);
+    target.timestamp_us = 900000; // a different image cannot classify this lock.
+    apply({target});
+    assert(!in.search_region_sample_us);
+    std::cout << "PASS locked same-image search region: absent/outside/inside/ambiguous/stale\n";
+}
+
 int main(int argc, char** argv) {
+    searchRegionUsesCurrentLockedImage();
+    if (argc == 2 && std::string(argv[1]) == "--search-region-only") return 0;
+    if (argc == 2 && std::string(argv[1]) == "--startup-pile-only") {
+        startupPileGuideSurvivesCaptureMonitor(); return 0;
+    }
+    startupPileGuideSurvivesCaptureMonitor();
     independentHalfEntranceIgnoresDividerDisagreement();
     if(argc==2 && std::string(argv[1])=="--independent-half") return 0;
     const bool near_test = argc == 2 && std::string(argv[1]) == "--near-selection-only";
@@ -153,9 +291,47 @@ int main(int argc, char** argv) {
             for (auto& d : detections)
                 d.timestamp_us = stamp;
         }
-        return active_builder->build(frame, vision, detections, ++sequence, stamp,
-                             {task, previous, &feedback, nullptr, watch, link}).input;
+        const auto built=active_builder->build(frame, vision, detections, ++sequence, stamp,
+                             {task, previous, &feedback, nullptr, watch, link});
+        if (vision.preview_enabled && vision.pose_ran) {
+            const auto expected=rescue::zoneHalvesToKeypoints(
+                vision.halves,cfg.request.pose_keypoint_confidence,frame.size());
+            assert(built.zone_points.size()==expected.size());
+            for (size_t k=0;k<expected.size();++k) {
+                assert(built.zone_points[k].id==expected[k].id);
+                assert(built.zone_points[k].pixel==expected[k].pixel);
+                assert(built.zone_points[k].confidence==expected[k].confidence);
+            }
+        }
+        return built.input;
     };
+    if (argc == 2 && std::string(argv[1]) == "--search-region-builder-only") {
+        previous.phase = TaskPhase::Search;
+        previous.state = PushState::SCAN;
+        previous.first_ordinary_delivered = true;
+        previous.target_id = -1;
+        task.phase_ = TaskPhase::Search;
+        task.first_ = true;
+        camera_pitch = -3000;
+        PushObservation search;
+        for (int i=0;i<8;++i) search = step(1040);
+        assert(search.camera_pitch_stable && search.pixel_locked && search.target_id == 1);
+        assert(search.search_target_region == PushObservation::SearchRegion::Outside);
+        assert(search.search_region_reason == "zone_not_visible_assumed_outside");
+        assert(!search.target_region_valid && !search.geometry_valid);
+        previous.target_id = 1;
+        previous.state = PushState::APPROACH;
+        // A zone box is checked after the lock instead of vetoing it in the selector.
+        for (int i=0;i<5;++i) search = step(1040,true,{},true,{450,200,350,350});
+        assert(search.pixel_locked && search.target_id == 1);
+        assert(search.search_target_region == PushObservation::SearchRegion::Inside);
+        assert(search.search_region_reason == "zone_box_inside");
+        previous.phase = TaskPhase::Transport;
+        search = step(1040);
+        assert(!search.search_region_sample_us);
+        std::cout << "PASS real builder lock -> no-zone outside -> visible inside; transport independent\n";
+        return 0;
+    }
     if(argc==2 && std::string(argv[1])=="--zone-sight-only") {
         cfg.request.team="blue";
         previous.phase=TaskPhase::Transport;
@@ -446,25 +622,26 @@ int main(int argc, char** argv) {
         assert(previous.motion.gripper_offset == 20);
         return previous.motion;
     };
+    // Navigation no longer switches to UI140 or rejects known outside cargo.
     for(int i=0;i<20;++i) {
         transportStep({540,440,200,200});
         assert(task.desiredPitch()==-3000);
+        assert(previous.reason.find("review")==std::string::npos);
     }
-    // A box supplies direction, not a measured recovery turn. Exercise the
-    // calibration hold explicitly without inventing IMU translation evidence.
-    task.transport_phase_.jaw_sequence_.recovery = TransportPhaseData::JawSequence::Recovery::Calibrate;
-    for (int i=0;i<15;++i) {
-        auto motion=transportStep({2,20,1277,681});
-        // No raw IMU translation samples exist in this builder fixture:
-        // recovery calibration cannot authorize travel.
-        assert(motion.vx_mps==0 && motion.wz_rps==0);
-        assert(previous.state==PushState::CARRY && previous.reason=="carry_pose_recovery_calibrate");
-        assert(task.transport_phase_.jaw_sequence_.stage == TransportPhaseData::JawSequence::Stage::Approach);
-    }
-    task.transport_phase_.jaw_sequence_.recovery = TransportPhaseData::JawSequence::Recovery::Idle;
+    assert(input.transport_checks_enabled);
     task.transport_phase_.jaw_sequence_.stage = TransportPhaseData::JawSequence::Stage::ColourAdvance;
-    task.transport_phase_.jaw_sequence_.heading = 0;
-    task.transport_phase_.approach_pitch_ = 0;
+    transportStep({540,440,200,200});
+    assert(task.desiredPitch()==kTransportReviewPitchCdeg && previous.motion.vx_mps==0);
+    for (int i=0;i<8;++i) {
+        camera_pitch=kTransportReviewPitchCdeg;
+        input=step(1040,true,{},true);
+    }
+    assert(input.camera_pitch_stable && !input.pixel_grasp_view && !input.pixel_grasp_near_view);
+    assert(input.capture_scene_valid && input.transport_review_clear);
+    assert(!input.layout_count_region_px.empty() && input.capture_class_regions_px.empty());
+    assert(!input.capture_path_valid && !input.hold_observable);
+    assert(!input.transport_floor.valid);
+    // Floor evidence is still independently observable at UI120.
     frame.setTo(cv::Scalar(160,100,60));
     bool colour_seen=false;
     for (int i=0;i<12;++i) {
@@ -473,7 +650,7 @@ int main(int argc, char** argv) {
         if (input.camera_pitch_stable) {
             assert(input.transport_floor.valid && input.transport_floor.region_valid && input.transport_floor.inside);
             assert(input.transport_floor.sample_us < input.now_us);
-            assert(input.path_safe && input.turn_safe && input.arc_safe);
+            assert(!input.transport_external_blocked);
             colour_seen=true;
         }
     }
@@ -495,6 +672,10 @@ int main(int argc, char** argv) {
                      cv::Point2f{x+300,200},cv::Point2f{x+300,500}};
         h.box={x,200,300,300};
     }
+    vision.preview_enabled=true;
+    vision.display.halves=vision.halves;
+    for (auto& h:vision.display.halves)
+        for (auto& p:h.keypoints) p.x+=500;
     input=step(1040,true,{},true);
     assert(input.supply_view.valid && input.supply_view.inside);
     assert(std::abs(input.supply_view.error_fraction)<1e-5f);
@@ -505,7 +686,7 @@ int main(int argc, char** argv) {
     std::cout<<"PASS real builder selected-half centreline without calibration"<<std::endl;
     std::cout << "PASS real builder metric-free recovery calibration and UI120 full-image own-colour evidence" << std::endl;
     // UI120 ordinary search must ignore a lower non-ordinary box, while the
-    // earlier closed guide approach still selects the lowest box of any class.
+    // earlier closed guide approach aims at the whole pile's image centre.
     previous.phase = task.phase_ = TaskPhase::Startup;
     previous.state = PushState::START_ADVANCE;
     previous.target_id = -1;
@@ -521,10 +702,15 @@ int main(int argc, char** argv) {
             input = step(1040, true, {900, 400, 100, 100});
         assert(input.camera_pitch_stable && !input.pixel_grasp_near_view);
         assert(input.target_valid && input.target_center_px_valid);
-        assert(input.label == (action == PushTask::StartupAction::Approach
-                                   ? "dangerous_object" : "ordinary_supply"));
+        if (action == PushTask::StartupAction::Approach) {
+            assert(input.label == "startup_pile" && input.target_id == kStartupPileTargetId);
+            assert(input.target_box == cv::Rect(500,235,500,265));
+            assert(input.target_center_px.x == 750.f && input.pixel_grasp_error_px == -110.f);
+        } else {
+            assert(input.label == "ordinary_supply" && input.target_id == 1);
+        }
     }
-    std::cout << "PASS real builder UI120 ordinary search and open approach filter candidates\n";
+    std::cout << "PASS real builder UI120 closed approach uses pile centre; ordinary search/open approach keep cargo targets\n";
     std::cout << "PASS real ObservationBuilder shares upper-edge review and actual sent feedback\n";
     std::cout << "PASS real ObservationBuilder passes actual sent feedback before capture clearance review\n";
 }

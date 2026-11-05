@@ -73,6 +73,10 @@ enum class PushState {
 // defaults to "no evidence"; the task never treats a missing input as success.
 // Retain a visual lock across brief detector/tracker gaps; missing images never permit motion.
 constexpr uint64_t kStartupTargetLossHoldUs = 1500000;
+// Image-only guide for the whole Startup pile, never a tracker/capture object.
+constexpr int kStartupPileTargetId = 0x7fffffff;
+// Stationary inspection before the final transport push uses UI130.
+constexpr int16_t kTransportReviewPitchCdeg = cameraPitchFromWire(130);
 struct StartupSightReference {
     int id = -1;
     std::string label;
@@ -96,7 +100,11 @@ struct PushObservation {
     // Fresh, unfiltered cargo categories in this image: ordinary/core/injured/dangerous bits.
     unsigned startup_visible_classes = 0;
     unsigned startup_visible_count = 0;
+    // Two different cargo boxes overlap the lower-quarter left/right thirds.
+    bool startup_lower_corners_occupied = false;
     uint64_t startup_scene_us = 0;
+    // Fresh eligible ordinary other than the retained/rejected ID, in this settled view.
+    uint64_t startup_alternative_ordinary_us = 0;
     int startup_rebound_from = -1;
     bool target_valid = false, geometry_valid = false;
     bool multi_view_finished = false;
@@ -124,6 +132,11 @@ struct PushObservation {
     // Positive evidence that the candidate already lies in our zone (never pull it out).
     bool target_region_valid = false; // unknown is not evidence of being outside
     bool target_in_zone = false;
+    // Search-only decision for the current locked target. Never establishes zone pose/delivery.
+    enum class SearchRegion { Unknown, Outside, Inside };
+    SearchRegion search_target_region = SearchRegion::Unknown;
+    uint64_t search_region_sample_us = 0;
+    std::string search_region_reason;
     // Fresh same-image ordinary boxes fully contained in an own-team safe-zone box.
     // Image evidence only; does not establish ground geometry or motion permission.
     bool delivery_observed = false;
@@ -134,6 +147,10 @@ struct PushObservation {
     bool clear_push_safe =
         false; // fresh geometry, known zone boundary and closed-front contact corridor
     bool path_safe = false, retreat_safe = false;
+    // Transport inspection is separate from operator-attested open-floor permission.
+    bool transport_checks_enabled = false, transport_review_clear = false;
+    bool transport_external_blocked = false;
+    std::string transport_clearance_reason;
     bool clearance_checks_disabled = false; // permissions overridden, not observed safe space
     bool directional_clearance_valid = false, turn_safe = false, arc_safe = false,
          jaw_open_safe = false;
@@ -190,6 +207,9 @@ struct PushObservation {
         bool entrance_valid = false;
         cv::Point2f entrance_origin_body_m;
         float entrance_yaw_rad = 0;
+        // Horizontal distance of the outermost observed corner to each image edge.
+        // Negative means unavailable; these image margins never authorize ranging.
+        float left_margin_fraction = -1, right_margin_fraction = -1;
     };
     SubzoneView supply_view, injured_view;
     uint64_t subzone_view_us = 0;
@@ -208,10 +228,6 @@ struct PushObservation {
         bool clipped = false, front_valid = false;
     };
     std::vector<CargoImg> cargo_img;
-    // On-end injured blocks (never transport targets), body-frame ground points of the current
-    // frame.
-    std::vector<cv::Point2f> upright_body;
-    uint64_t upright_ts_us = 0;
     // Class-specific centre range at the calibrated near image view.
     // Explicit image control; never makes geometry_valid or a metric distance valid.
     bool pixel_grasp_view = false, pixel_grasp_near_view = false;
@@ -220,6 +236,7 @@ struct PushObservation {
     float pixel_grasp_steering = 0;     // normalized horizontal pixel error; positive left
     float pixel_grasp_error_px = 0;     // original-image error, positive left
     uint64_t pixel_grasp_sample_us = 0; // selected fresh detection, never loop time
+    int pixel_grasp_image_height_px = 0; // original image, for search view handoff policy
     // Fresh box centre is also available in FAR solely for the stationary view handoff.
     bool target_center_px_valid = false, pixel_view_handoff_ready = false;
     cv::Point2f target_center_px;
@@ -323,6 +340,8 @@ struct PushObservation {
                captureInventoryOverlaps(box, label);
     }
     std::vector<CaptureImageObject> capture_image_objects;
+    // Forbidden destination categories in the fresh forward near-view strip.
+    std::vector<CaptureImageObject> transport_front_objects;
     int split_vertical_pairs = 0, split_ordinary_count = 0, split_ordinary_visible_count = 0;
     uint64_t split_layout_us = 0;
     cv::Rect split_ordinary_box;
@@ -376,7 +395,10 @@ struct PushOutput {
     bool pushboard_floor_active = false;
     bool navigation_release = false;
     bool navigation_approach = false;
-    // Active bounded 0.15 m jaw-release retreat; no ground mapping is required.
+    Inventory transported_inventory;
+    std::vector<PushObservation::CaptureImageObject> transported_objects;
+    int16_t transported_view_pitch = kCameraPitchInvalid;
+    // Active bounded jaw-release retreat (delivery 0.15 m, rejected load 0.10 m).
     bool jaw_release_retreat = false;
     bool navigation_reset = true;
     // Explicit task stop: send zero velocity without the normal deceleration ramp.
@@ -398,6 +420,7 @@ struct PushOutput {
     cv::Rect2f entry_region_px;
     bool entry_position_ok = false, entry_confirmed = false;
     // Explicit first-trip split selection; candidate -1 keeps the selector idle.
+    bool split_return_search = false; // fresh visual selection during return/turn-back only
     bool split_target_reselecting = false;
     int split_target_candidate_id = -1;
     // Non-zero only while a scored mixed load is being recovered.
@@ -407,6 +430,10 @@ struct PushOutput {
     int split_align_target_id = -1, split_align_observed_id = -1;
     float split_align_center_x = 0, split_align_target_x = 0, split_align_error_px = 0;
     std::string split_align_stage = "idle";
+    bool split_upper_corner = false, split_turn_braking = false;
+    float split_target_center_y = 0, split_midpoint_y = 0;
+    float split_turn_goal = 0, split_turn_error = 0, split_turn_rate = 0;
+    uint64_t split_turn_stopped_us = 0;
     int split_retreat_reference_id = -1;
     float split_retreat_reference_y = 0;
     std::string split_margin_stage = "idle";
@@ -414,6 +441,7 @@ struct PushOutput {
     bool split_margin_complete = false;
     bool split_imu_ready = false;
     float split_imu_distance_m = 0, split_imu_velocity_mps = 0;
+    float split_command_forward_m = 0, split_command_reverse_m = 0;
     // Compatibility diagnostic action, not the business-phase dispatcher.
     PushState state = PushState::WAIT_START;
     MotionCommand motion; // includes gripper_offset and camera_pitch_cdeg
@@ -452,7 +480,7 @@ struct TaskTuning {
     float pixel_align_gain_rps_per_px = .004f, pixel_align_max_wz = .20f;
     float pixel_align_tolerance_px = 12.f, pixel_align_restart_px = 24.f;
     // UI120 approach uses coarse hysteresis; UI140 retains the fine limits above.
-    float pixel_align_approach_tolerance_px = 30.f, pixel_align_approach_restart_px = 40.f;
+    float pixel_align_approach_tolerance_px = 30.f, pixel_align_approach_restart_px = 60.f;
     uint64_t pixel_align_brake_us = 150000;
     float pixel_align_brake_motion_px = 4.f;
     float pixel_align_stopped_wz = .02f, pixel_align_stopped_vx = .01f;
@@ -629,10 +657,6 @@ struct TaskTuning {
           disperse_turn_view_half_rad = .60f;
     int disperse_turn_clear_max = 1, disperse_turn_clear_frames = 2;
     uint64_t disperse_turn_look_us = 1200000;
-    bool row_select = false;
-    int row_min_n = 3;
-    float row_resid_m = .03f, row_max_tilt_rad = .6f, row_half_along_m = .09f,
-          row_half_across_m = .06f; // PixelSelector row mode: middle block of a left-right row
     float disperse_turn_push_m = 0.f;
     uint64_t disperse_turn_push_budget_us = 3000000; // after the single turn: drive straight on
                                                      // this far (0 = off) before the sweep ends
@@ -655,6 +679,9 @@ struct TaskTuning {
     int pile_max_runs = 0; // 0 means unlimited split attempts.
     uint64_t pile_budget_us = 40000000, pile_cool_us = 15000000;
     // Optional ordinary split margin is disabled; visual clearance goes straight to the turn.
+    // Local split return/turn-back yield to fresh cargo; capture keeps its normal review.
+    bool split_capture_preempt = true;
+    float split_speed_increment_mps = .20f, split_wz_increment_rps = .20f;
     float split_margin_speed_mps = .01f;
     uint64_t split_margin_budget_us = 0;
     float pile_turn_wz = 2.0f, pile_align_tol_rad = .22f;
@@ -841,6 +868,9 @@ struct TaskTuning {
     // Enter covers gate_clearance + deposit_y + tolerance (~0.48 m) at enter_speed; retreat ~0.3 m
     // back.
     uint64_t enter_budget_us = 15000000, retreat_budget_us = 10000000, delivery_budget_us = 2500000;
+    uint64_t jaw_retreat_calibration_budget_us = 2000000, jaw_retreat_stop_budget_us = 1000000;
+    uint64_t jaw_retreat_calibration_window_us = 500000;
+    float jaw_retreat_max_gyro_rps = .15f, jaw_retreat_max_accel_std_mps2 = .30f;
     uint64_t turn_budget_us = 15000000, blacklist_us = 20000000;
     // Camera presets, 0.01 deg positive down; ground mapping still requires pitch-specific
     // validation.
@@ -866,6 +896,8 @@ struct TripContext {
     int target_id_ = -1;
     std::string label_;
     Inventory trip_;
+    std::vector<PushObservation::CaptureImageObject> transported_objects;
+    int16_t transported_view_pitch = kCameraPitchInvalid;
     Inventory pending_;
     Inventory seen_;
     RuleVerdict verdict_ = RuleVerdict::OK;
@@ -912,8 +944,13 @@ struct SearchPhaseData {
             bool cleared = false;
             uint64_t missing_sample_us = 0;
             int missing_frames = 0;
+            uint64_t motion_sample_us = 0;
+            float motion_y = 0, brake_y = 0;
         };
         std::vector<RetreatObject> retreat_objects;
+        bool retreat_braking = false;
+        // A reverse segment only slows down; noisy image rates cannot restart full speed.
+        float retreat_speed_mps = .05f;
         int retreat_reference_id = -1;
         float retreat_reference_y = 0;
         enum class MarginStage { Idle, Advancing, Brake, Complete };
@@ -923,10 +960,18 @@ struct SearchPhaseData {
         bool upper_corner = false;
         bool keep_injured = false;
         float injured_turn_goal = 0;
-        float corner_heading = 0, corner_distance = .2f;
+        float target_center_y = 0, midpoint_y = 0, turn_rate = 0;
+        uint64_t observation_wait_us = 0, observation_stopped_us = 0;
+        float corner_heading = 0, corner_distance = .036f;
         ImuTranslation corner_imu;
+        // Sent-command integrals drive the push and balanced return, not measured travel.
+        float corner_command_origin_m = 0, corner_command_peak_m = 0;
         bool corner_braking = false;
         uint64_t corner_stopped_us = 0;
+        // Heading samples measure turn rate; braking stays latched until the body settles.
+        uint64_t corner_turn_sample_us = 0;
+        float corner_turn_heading = 0, corner_turn_stop_heading = 0;
+        bool corner_turn_braking = false;
         bool vertical_swing = false, swing_heading_seen = false;
         int swing_direction = 1, swing_clear_frames = 0;
         float swing_origin = 0;
@@ -957,6 +1002,16 @@ struct SearchPhaseData {
     bool approach_last_world_valid_ = false;
     bool approach_rebind_ = false;
     uint64_t pixel_approach_started_us_ = 0; // one budget across view changes and re-ID
+    uint64_t far_region_wait_started_us_ = 0; // visible lock waiting for zone membership
+    // Search UI120 -> UI140 is a committed stop, independent of the old target's visibility.
+    struct ViewHandoff {
+        bool near = false;
+        uint64_t started_us = 0, sample_us = 0, stable_us = 0;
+        int frames = 0;
+        float retry_height = 0; // normalized UI120 centre plus existing image-motion tolerance
+    } view_handoff_;
+    // Keep the failed-view progress requirement across UI120 recovery and tracker re-IDs.
+    float pixel_handoff_retry_height_ = 0;
     struct PixelReselection {
         bool observing = false, missing = false;
         int target_id = -1, gaps = 0, frames = 0;
@@ -1052,21 +1107,31 @@ struct TransportPhaseData {
     int16_t approach_pitch_ = kCameraPitchInvalid;
     struct JawSequence {
         // Preserve diagnostic numbers for the remaining stages.
-        enum class Stage { Approach = 0, EntryStop = 2, Align, AlignStop, ColourAdvance = 6, ColourStop, ColourOverrun };
+        enum class Stage { Approach = 0, EntryStop = 2, Align, AlignStop, ColourAdvance = 6, ColourStop, ColourOverrun, BackoffReview = 9, BackoffAlign, BackoffReady, Backoff, BackoffBrake };
         Stage stage = Stage::Approach;
         enum class Recovery { Idle, Turn, Calibrate, Advance, Brake, Return, Search };
         Recovery recovery = Recovery::Idle;
         float recovery_heading = 0, recovery_original_heading = 0;
         ImuTranslation recovery_imu;
 
-        bool active = false, return_started = false;
+        struct PrePushReview {
+            enum class Stage { Idle, Review, BackReady, Back, BackStop, Turn };
+            Stage stage = Stage::Idle;
+            bool checked = false;
+            uint64_t started_us = 0, sample_us = 0, stopped_us = 0, missing_us = 0, paused_us = 0;
+            int frames = 0;
+            float heading = 0, completed_m = 0;
+            float turn_sign = -1; // Locked from the pre-push image; positive is left.
+            ImuTranslation imu;
+        } prepush;
+        bool active = false;
         uint64_t colour_overrun_us = 0;
         float colour_overrun_wz = 0;
         uint64_t stopped_us = 0, visual_last_us = 0, diagnostic_us = 0;
         uint64_t own_zone_seen_us = 0, own_zone_sample_us = 0, enemy_zone_sample_us = 0;
         int own_zone_frames = 0, enemy_zone_frames = 0;
         uint64_t selected_half_seen_us = 0, entry_missing_us = 0;
-        // Bridge up to four missing images with the same selected-entrance trajectory.
+        // Bridge up to 500 ms of missing entrance evidence on the accepted trajectory.
         AnchoredZone approach_route;
         uint64_t route_us = 0, route_fix_us = 0, half_frame_us = 0;
         int half_missing_frames = 0;
@@ -1083,12 +1148,18 @@ struct TransportPhaseData {
         uint64_t range_sample_us = 0;
         int range_jumps = 0, range_frames = 0;
         bool range_valid = false, range_wait = false, reposition = false;
+        // Once parked near the entrance, alignment/search may only rotate.
+        bool stationary_entry = false;
+        // Keep a deliverable image posture through bounded frame jitter.
+        bool entry_posture_held = false;
+        float entry_posture_error = 0, entry_posture_edge = 0;
         PushObservation::SubzoneView range_view{};
         std::array<float,3> range_gaps{}, range_offsets{};
         float route_heading = 0;
+        float backoff_heading = 0, backoff_target_gap = 0;
         uint64_t image_turn_sample_us = 0;
         int visual_frames = 0;
-        float heading = 0, return_last_heading = 0, return_turn = 0;
+        float heading = 0;
         // Entrance normal in the IMU reference frame; no translation is extrapolated.
         bool normal_valid = false, normal_rejected = false, image_normal_valid = false;
         float image_turn_heading = 0; // bounded IMU endpoint, extended only by fresh images
@@ -1102,6 +1173,14 @@ struct TransportPhaseData {
         uint64_t normal_sample_us = 0, normal_seen_us = 0;
         std::string normal_geometry_id;
     } jaw_sequence_;
+    struct JawRetreat {
+        enum class Stage { Calibrating, Reversing, Stopping };
+        Stage stage = Stage::Calibrating;
+        ImuTranslation imu;
+        float heading = 0, completed_m = 0;
+        uint64_t stopped_us = 0, stage_started_us = 0;
+        int calibration_status = -1;
+    } jaw_retreat_;
     enum class DepositStage { Stopping, Advancing, Braking };
     DepositStage deposit_stage_ = DepositStage::Stopping;
     ImuTranslation deposit_imu_;
@@ -1151,6 +1230,7 @@ class PushTask {
     }
     int startupSightTargetId() const;
     bool startupOrdinaryOnly() const;
+    bool startupPileApproach() const;
     const StartupSightReference& startupSightReference() const { return startup_sight_; }
     int startupSightRejectedId(uint64_t now) const {
         return phase_ == TaskPhase::Startup && now < startup_rejected_until_us_
@@ -1222,6 +1302,8 @@ class PushTask {
         int confirmations = 0;
     } capture_load_;
     void reobserveCaptureLoad(uint64_t now);
+    void resumePixelSplitSearch(TaskTick& tick, const char* why, bool restart_review = false);
+    void recoverCaptureObservation(TaskTick& tick);
     void beginPixelSplitReview(TaskTick& tick);
     bool reviewCaptureLoad(TaskTick& tick);
     bool captureLoadAllows(const std::string& label) const;
@@ -1259,22 +1341,43 @@ class PushTask {
         SelectOrdinary, OpenApproach
     };
     struct StartupPitchTurn {
-        enum class Leg { FirstTurn, ReverseCalibrate, Reverse, ReverseStop, SecondTurn };
+        enum class Leg {
+            InitialStop, ForwardCalibrate, Forward, ForwardStop,
+            FirstTurn, ReverseCalibrate, Reverse, ReverseStop, SecondTurn
+        };
         Leg leg = Leg::FirstTurn;
-        ImuTranslation reverse_imu;
-        float reverse_heading = 0, reverse_completed_m = 0;
+        ImuTranslation translation_imu;
+        float translation_heading = 0, translation_completed_m = 0;
         float last_heading = 0, angle = 0;
         bool heading_valid = false;
         uint64_t stopped_us = 0;
     } startup_pitch_turn_;
     StartupAction startup_action_ = StartupAction::Advance;
+    // Only the opening startup grab defers ordinary quantity to held-content verification.
+    bool startup_first_capture_ = false;
     int16_t startup_pitch_ = kCameraPitchInvalid;
     StartupSightReference startup_sight_;
+    struct StartupHandoff {
+        bool pending = false, stopping = false;
+        StartupSightReference reference;
+        uint64_t started_us = 0, sample_us = 0, stable_since_us = 0;
+        int candidate_id = -1, frames = 0;
+    } startup_handoff_;
+    struct StartupPileAlignment {
+        uint64_t started_us = 0, progress_us = 0, sample_us = 0;
+        uint64_t forward_us = 0, reobserve_until_us = 0;
+        float best_error_px = -1;
+        std::array<float, 3> errors{};
+        unsigned samples = 0;
+        bool reviewed = false;
+    } startup_pile_alignment_;
     uint64_t startup_target_missing_since_us_ = 0;
     bool startup_target_decelerating_ = false;
     uint64_t startup_alignment_since_us_ = 0, startup_rejected_until_us_ = 0;
     int startup_alignment_target_id_ = -1, startup_rejected_id_ = -1;
     float startup_alignment_best_error_px_ = -1;
+    std::array<float, 3> startup_alignment_errors_{};
+    unsigned startup_alignment_error_count_ = 0;
     ActionProgress startup_progress_;
     ActionProgress& actionProgress() {
         switch (phase_) {
@@ -1306,6 +1409,7 @@ class PushTask {
     void failStop(TaskTick& tick, const char* why);
     void scanAfterClear(TaskTick& tick, const char* why);
     bool reselectPixelApproach(TaskTick& tick);
+    bool updateSearchViewHandoff(TaskTick& tick);
     cv::Point2f targetBody(TaskTick& tick);
     void drive(TaskTick& tick, float vx, float wz, bool pixel_align = false);
     bool pixelLateralAccepted(const PushObservation& in) const;
@@ -1324,6 +1428,8 @@ class PushTask {
         int target_id = -1, first_id = -1; // -1 no entry, -2 order ambiguous
         std::string label, stage = "idle";
         bool confirmed = false, handoff = false;
+        bool review_before_entry =
+            false; // A newly selected UI140 target needs stopped inventory review.
         uint64_t sample_us = 0, accepted_us = 0;
     } search_entry_;
     struct PixelAlignment {
@@ -1338,17 +1444,19 @@ class PushTask {
         std::string label;
         int16_t pitch = kCameraPitchInvalid;
         uint64_t last_sample_us = 0, stable_since_us = 0, stopped_since_us = 0;
-        uint64_t correction_since_us = 0;
+        uint64_t correction_since_us = 0, advance_outside_since_us = 0;
         float last_error_px = 0, last_center_y_px = 0;
         float tolerance_px = 0, acceptance_px = 0;
         std::string brake_reason = "none";
         bool resume_pending = false;
-        int resume_frames = 0;
+        int resume_frames = 0, advance_outside_frames = 0;
         float brake_min_px = 0, brake_max_px = 0;
         float brake_min_y_px = 0, brake_max_y_px = 0;
         bool within_tolerance = false, holding_position = false;
     } pixel_alignment_, carry_alignment_;
+    bool prepareJawRetreat(TaskTick& tick);
     void updatePixelCarry(TaskTick& tick);
+    bool updatePrePushReview(TaskTick& tick);
     void scanSpin(TaskTick& tick);
     CarrySearchContext carrySearchContext(TaskTick& tick);
     bool unstick(TaskTick& tick);
@@ -1485,6 +1593,7 @@ class PushTask {
     int frameWait(const PushObservation& in,
                   uint8_t open,
                   uint64_t now) const; // 1 done, 0 pending, -1 timeout
+    PushObservation::SearchRegion searchTargetRegion(const PushObservation& in) const;
     bool candidate(const PushObservation& in, uint64_t now) const;
     bool weakCandidate(const PushObservation& in) const;
     float approachHeadingShift(

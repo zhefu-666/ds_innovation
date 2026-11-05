@@ -1,5 +1,6 @@
 #include "../../support/push_task_sim.hpp"
 #include "../../../src/task/task_tick.hpp"
+#include "rescue/hardware/motion_link.hpp"
 namespace {
 TaskTuning tuning() {
     TaskTuning t; t.pixel_grasp_enabled=true; t.startup_advance_us=0;
@@ -144,8 +145,95 @@ void searchAndCaptureUseTheSameSeparation() {
     }
 }
 
+// Task -> UART ramp replay of normal handoff/entry braking, starting from the
+// 0.07 m/s approach command seen in the 2026-11-05 20:08 field log.
+void normalAlignmentStopsRamp() {
+    for (int view = 0; view < 4; ++view) {
+        Rig r;
+        const auto t = tuning();
+        r.in.search_target_region = PushObservation::SearchRegion::Outside;
+        if (view < 2) {
+            r.in.camera_pitch_cdeg = view == 0 ? t.far_pitch_cdeg : t.track_pitch_cdeg;
+            r.task.search_phase_.approach_pitch_ = r.in.camera_pitch_cdeg;
+            r.in.pixel_grasp_view = view != 0;
+            r.in.pixel_grasp_near_view = false;
+            r.in.pixel_view_handoff_ready = true;
+            r.in.geometry_valid = true;
+            r.in.distance_m = .4f;
+        } else if (view == 3) {
+            r.task.enter(PushState::RUSH, r.in.now_us, "capture_brake_fixture");
+            r.in.pixel_grasp_ready = true;
+        }
+        MotionLinkConfig config;
+        MotionVelocityRamp ramp(config);
+        MotionCommand sent;
+        sent.vx_mps = .07f;
+        sent.wz_rps = -.138f;
+        ramp.accept(sent, r.in.now_us);
+        bool decelerated = false, settled = false;
+        for (int i = 0; i < 40; ++i) {
+            r.in.sent_vx_mps = sent.vx_mps;
+            r.in.sent_wz_rps = sent.wz_rps;
+            r.step();
+            assert(stopped(r.out.motion));
+            if (std::abs(sent.vx_mps) > t.pixel_align_stopped_vx ||
+                std::abs(sent.wz_rps) > t.pixel_align_stopped_wz) {
+                assert(!r.out.immediate_motion_stop);
+                assert(r.out.motion.camera_pitch_cdeg == r.in.camera_pitch_cdeg);
+                assert(r.out.state != PushState::LOWER_FRAME && !r.out.entry_confirmed);
+            }
+            const auto next = ramp.next(r.out.motion, r.in.now_us, r.out.immediate_motion_stop);
+            assert(std::abs(next.vx_mps - sent.vx_mps) <= config.linear_decel_mps2 * .04f + 1e-6f);
+            assert(std::abs(next.wz_rps - sent.wz_rps) <= config.angular_decel_rps2 * .04f + 1e-6f);
+            decelerated |= next.vx_mps > 0 && next.vx_mps < sent.vx_mps;
+            ramp.accept(next, r.in.now_us);
+            sent = next;
+            if (r.out.motion.camera_pitch_cdeg != r.in.camera_pitch_cdeg ||
+                r.out.entry_confirmed || r.out.state == PushState::LOWER_FRAME) {
+                assert(stopped(sent));
+                settled = true;
+                break;
+            }
+        }
+        assert(decelerated && settled);
+    }
+    std::cout << "PASS normal FAR/UI120/UI140/capture stops ramp before handoff/enclosure\n";
 }
-int main() {
+
+void alignmentSafetyStopsStayImmediate() {
+    for (int missing = 0; missing < 8; ++missing) {
+        Rig r;
+        r.task.search_phase_.pixel_approach_started_us_ = r.in.now_us;
+        r.in.sent_vx_mps = .07f;
+        r.in.sent_wz_rps = -.138f;
+        r.in.directional_clearance_valid = r.in.turn_safe = r.in.arc_safe = true;
+        if (missing == 0) r.in.path_safe = false;
+        if (missing == 1) r.in.opponent_zone_clear = false;
+        if (missing == 2) r.in.turn_safe = false;
+        if (missing == 3) r.in.arc_safe = false;
+        if (missing == 4) r.in.target_valid = false;
+        if (missing == 5) r.in.safety_ok = false;
+        if (missing == 6) r.in.pixel_grasp_sample_us = r.in.now_us - tuning().frame_timeout_us;
+        if (missing == 7) r.in.camera_pitch_stable = false;
+        r.step(missing != 6);
+        const bool hard_stop = !r.in.run || !r.in.safety_ok || !r.in.opponent_zone_clear ||
+                              residualMotionBlocked(r.in, r.out, .07f, -.138f);
+        assert(stopped(r.out.motion) && (r.out.immediate_motion_stop || hard_stop));
+        MotionVelocityRamp ramp(MotionLinkConfig{});
+        MotionCommand sent; sent.vx_mps = .07f; sent.wz_rps = -.138f;
+        ramp.accept(sent, r.in.now_us - 40000);
+        assert(stopped(ramp.next(r.out.motion, r.in.now_us,
+                                 r.out.immediate_motion_stop || hard_stop)));
+    }
+    std::cout << "PASS clearance/target/pitch/safety/stale-image stops remain immediate\n";
+}
+
+}
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--smooth-stops") {
+        normalAlignmentStopsRamp(); alignmentSafetyStopsStayImmediate(); return 0;
+    }
+    normalAlignmentStopsRamp(); alignmentSafetyStopsStayImmediate();
     anywhereInsideStopsAndHandsOff(); entryOrder(); freshnessAndReset();
     removedActionsCannotExecute(); searchAndCaptureUseTheSameSeparation();
     std::cout<<"PASS UI140 first entry, full class range, order, freshness, split and handoff\n";

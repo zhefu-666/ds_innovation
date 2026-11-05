@@ -73,8 +73,8 @@ void jawCarryRetreatsFifteenCentimetres() {
         }
         f.context.travel_m = 0;
         expect(f.update(f.tuning.retreat_budget_us + 1), ReleaseRetreatOutcome::Fault,
-               "retreat_blocked");
-        expect(f.update(18000000), ReleaseRetreatOutcome::Fault, "retreat_blocked");
+               "jaw_retreat_motion_timeout");
+        expect(f.update(18000000), ReleaseRetreatOutcome::Fault, "jaw_retreat_motion_timeout");
     }
 }
 

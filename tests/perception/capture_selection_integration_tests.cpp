@@ -74,6 +74,7 @@ void startupSightEvidence() {
     ordinary.ground_position_valid = danger.ground_position_valid = false;
     applyStartupSight(in, {ordinary, ordinary}, {1280, 720}, now, .5f, -1);
     assert(in.startup_visible_classes == 1);
+    assert(in.startup_visible_count == 1);
     applyStartupSight(in, {ordinary, danger}, {1280, 720}, now, .5f, -1);
     assert(in.startup_visible_classes == 9 && in.startup_scene_us == now);
     assert(in.startup_visible_count == 2);
@@ -131,6 +132,143 @@ void startupSightEvidence() {
     applyStartupSight(in, {ordinary, danger}, {1280, 720}, now, .5f, -1);
     assert(!in.startup_visible_classes && !in.target_valid);
 }
+// Exercise the real detector adapter and UI90 startup state machine together.
+void startupTwoObjectsReachTask() {
+    for (int scenario = 0; scenario < 14; ++scenario) {
+        TaskTuning t;
+        t.startup_advance_us = 1;
+        t.start_zone = 3;
+        t.pixel_grasp_enabled = true;
+        t.far_pitch_cdeg = -3000;
+        PushTask task(t);
+        task.setSinglePhase("startup");
+        PushObservation in;
+        in.now_us = 1000000;
+        in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+        in.camera_pitch_stable = in.gripper_done = in.sent_velocity_valid = true;
+        in.gripper_feedback_open = 0;
+        in.camera_pitch_cdeg = t.far_pitch_cdeg;
+        bool approached = false, scanned = false;
+        for (int frame = 0; frame < 12; ++frame) {
+            in.now_us += 50000;
+            const char* labels[] = {"ordinary_supply", "core_supply", "injured_person", "dangerous_object"};
+            auto first = object(11, {580, 300, 80, 80}, labels[scenario % 4]);
+            auto second = object(12, {800, 200, 80, 80}, first.label);
+            first.timestamp_us = second.timestamp_us = in.now_us;
+            std::vector<SegDetection> detections{first, second};
+            if (scenario == 4) detections[1].label = "core_supply"; // mixed pair
+            if (scenario == 5) detections.push_back(object(13, {300, 200, 80, 80}));
+            if (scenario == 5) detections.back().timestamp_us = in.now_us;
+            if (scenario == 6) detections.resize(1);
+            if (scenario == 7) detections[1] = first; // one detection repeated
+            if (scenario == 8) detections[1].timestamp_us = in.now_us - 200001;
+            if (scenario == 9) detections[1].timestamp_us = in.now_us + 1;
+            if (scenario == 10) detections[1].confidence = .49f;
+            if (scenario == 11) detections[1].label = "blue_safe_zone";
+            if (scenario == 12) detections.clear();
+            if (scenario == 13) in.camera_pitch_stable = false;
+            applyStartupSight(in, detections, {1280, 720}, in.now_us, .5f,
+                              task.startupSightTargetId());
+            const auto out = task.update(in);
+            scanned |= out.reason == "startup_find_two_objects";
+            if (out.reason == "startup_approach_far") {
+                approached = true;
+                assert(out.motion.vx_mps > 0 && out.motion.camera_pitch_cdeg == t.far_pitch_cdeg);
+                break;
+            }
+            in.sent_vx_mps = out.motion.vx_mps;
+            in.sent_wz_rps = out.motion.wz_rps;
+        }
+        std::cout << "UI90 object-count scenario=" << scenario << " approached=" << approached << std::endl;
+        assert(approached == (scenario <= 5));
+        if (scenario >= 6 && scenario != 13) assert(scanned);
+    }
+    std::cout << "PASS UI90 two-or-more physical objects, including same-class pairs, start approach\n";
+}
+
+void startupLowerCornerEvidence() {
+    constexpr uint64_t now = 1000000;
+    PushObservation in;
+    in.camera_pitch_stable = true;
+    auto left = object(1, {20, 480, 100, 100});
+    auto right = object(2, {1160, 480, 100, 100}, "core_supply");
+    left.timestamp_us = right.timestamp_us = now;
+    const auto observe = [&](std::vector<SegDetection> detections) {
+        // Corner evidence must remain available even if the locked guide is missing.
+        applyStartupSight(in, detections, {1280, 720}, now, .5f, 77);
+        return in.startup_lower_corners_occupied;
+    };
+    assert(observe({left, right}) && !in.target_valid);
+    assert(!observe({left}) && !observe({right}));
+    auto high = right;
+    high.box.y = 100;
+    assert(!observe({left, high})); // left/right alone is insufficient
+    auto middle = right;
+    middle.box = {590, 550, 100, 100};
+    assert(!observe({left, middle}));
+    auto wide = left;
+    wide.box = {0, 550, 1280, 100};
+    assert(!observe({wide}) && !observe({wide, wide}));
+    for (int bad = 0; bad < 4; ++bad) {
+        auto invalid = right;
+        if (bad == 0) invalid.timestamp_us = now - 200001;
+        if (bad == 1) invalid.timestamp_us = now + 1;
+        if (bad == 2) invalid.confidence = .49f;
+        if (bad == 3) invalid.label = "blue_safe_zone";
+        assert(!observe({left, invalid}));
+    }
+    // Scale the regions with the actual frame dimensions, not fixed pixels.
+    left.box = {10, 240, 50, 50};
+    right.box = {580, 240, 50, 50};
+    applyStartupSight(in, {left, right}, {640, 360}, now, .5f, -1);
+    assert(in.startup_lower_corners_occupied);
+    left.box = {20, 480, 100, 100};
+    right.box = {1160, 480, 100, 100};
+    in.camera_pitch_stable = false;
+    assert(!observe({left, right}));
+    std::cout << "PASS Startup lower corners use distinct fresh cargo boxes, independent of target lock\n";
+}
+
+void startupLowerCornersReachTask() {
+    TaskTuning t;
+    t.startup_advance_us = 1;
+    t.start_zone = 3;
+    t.pixel_grasp_enabled = true;
+    t.far_pitch_cdeg = -3000;
+    t.track_pitch_cdeg = 0;
+    PushTask task(t);
+    task.setSinglePhase("startup");
+    PushObservation in;
+    in.now_us = 1000000;
+    in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+    in.camera_pitch_stable = in.gripper_done = in.heading_valid = in.sent_velocity_valid = true;
+    in.gripper_feedback_open = 0;
+    in.camera_pitch_cdeg = t.far_pitch_cdeg;
+    for (int frame = 0; frame < 120; ++frame) {
+        in.now_us += 50000;
+        const bool track = in.camera_pitch_cdeg == t.track_pitch_cdeg;
+        in.pixel_grasp_view = track;
+        auto left = object(11, {20, track ? 480 : 550, 100, 100});
+        auto right = object(12, {1160, track ? 480 : 550, 100, 100}, "core_supply");
+        left.timestamp_us = right.timestamp_us = in.now_us;
+        applyStartupSight(in, {left, right}, {1280, 720}, in.now_us, .5f,
+                          task.startupSightTargetId(), task.startupOrdinaryOnly(), -1,
+                          task.startupSightReference(), task.startupPileApproach());
+        const auto out = task.update(in);
+        if (out.reason == "startup_pitch_turn_ready") {
+            assert(track && in.startup_lower_corners_occupied);
+            assert(in.target_center_px.y == 530 && !in.pixel_view_handoff_ready);
+            assert(out.immediate_motion_stop && out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
+            std::cout << "PASS UI90 -> UI120 -> corner maneuver through real perception and task\n";
+            return;
+        }
+        in.camera_pitch_cdeg = out.motion.camera_pitch_cdeg;
+        in.sent_vx_mps = out.motion.vx_mps;
+        in.sent_wz_rps = out.motion.wz_rps;
+    }
+    assert(false && "UI120 corner evidence did not reach the maneuver");
+}
+
 void splitRetreatBoxEvidence() {
     constexpr uint64_t now = 1000000;
     auto original = object(7, {300, 80, 60, 60});
@@ -213,11 +351,10 @@ void nearOwnZoneExclusion() {
             assert(targetsNearOwnZone({cargo, zone}, "unknown", {1000, 1000}, now, .25f).empty());
         }
     }
-    // A late zone veto immediately releases a lock, including relaxed and row modes.
+    // A late zone veto immediately releases a lock, including relaxed selection.
     for (const std::string label : {"ordinary_supply", "core_supply", "injured_person"}) {
         PixelSelector selector;
         selector.setRelax(2);
-        selector.setRow(true);
         auto near = object(21, {140, 250, 30, 30}, label);
         auto far = object(22, {800, 250, 10, 10});
         auto zone = object(-1, {200, 200, 300, 300}, "blue_safe_zone");
@@ -270,7 +407,6 @@ void persistentTargetTests() {
         auto out = step();
         assert(out.locked && out.id == 1);
         sel.syncTaskTarget(1, "ordinary_supply");
-        sel.setRow(true);
         for (int i = 0; i < 200; ++i) {
             for (int j = 0; j < n; ++j)
                 ds[j].box.width = ds[j].box.height = j == 0 ? 35 : (i / 5 % n == j ? 110 : 60);
@@ -346,7 +482,7 @@ void persistentTargetTests() {
             now += 50000;
             for (auto& d : ds)
                 d.timestamp_us = now;
-            return sel.update(ds, {1000, 800}, pitch, stable, now, false, .25f, {}, "", yaw);
+            return sel.update(ds, {1000, 800}, pitch, stable, now, false, .25f, {}, "", yaw, 1.f, nullptr, true);
         };
         step({a, b}, 500, true, 0);
         step({a, b}, 500, true, 0);
@@ -356,12 +492,14 @@ void persistentTargetTests() {
             assert(!step({}, 2000, false, 0).locked);
         a.track_id = 9;
         a.box = {500, 100, 70, 70};
-        const float angle = std::atan2(.2f, .8f) - .1f, range = std::hypot(.2f, .8f);
-        a.body_xy_m = {-range * std::sin(angle), range * std::cos(angle)};
+        // The new view chooses current cargo even without any ground evidence.
+        a.ground_position_valid = a.ground_contact_valid = false;
+        b.ground_position_valid = b.ground_contact_valid = false;
         step({a, b}, 2000, true, .1f);
         step({a, b}, 2000, true, .1f);
         const auto out = step({a, b}, 2000, true, .1f);
-        assert(out.id == 9 && out.rebound_from == 1 && out.event == "view_reacquired");
+        assert(out.id == 9 && out.reselected_from == 1 && out.rebound_from == -1 &&
+               out.event == "view_target_reselected");
     }
     {
         PixelSelector sel;
@@ -464,9 +602,355 @@ void rushContinuousIdentity() {
         }
     }
 }
-int main() {
+
+// Real adapter -> task loop: two visible boxes alternate their centre-Y order.
+// Both remain stationary within the braking tolerance; rank jitter must not
+// restart the UI90 handoff's stopped-image confirmation.
+void startupHandoffKeepsVisibleGuide() {
+    TaskTuning t;
+    t.startup_advance_us = 1;
+    t.start_zone = 3;
+    t.pixel_grasp_enabled = true;
+    t.far_pitch_cdeg = -3000;
+    t.track_pitch_cdeg = 0;
+    PushTask task(t);
+    task.setSinglePhase("startup");
+    PushObservation in;
+    in.now_us = 1000000;
+    in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+    in.camera_pitch_stable = in.gripper_done = in.heading_valid = in.sent_velocity_valid = true;
+    in.gripper_feedback_open = 0;
+    in.camera_pitch_cdeg = t.far_pitch_cdeg;
+    int handoff_frames = 0;
+    for (int frame = 0; frame < 60; ++frame) {
+        in.now_us += 50000;
+        auto guide = object(48, {714, 507 + frame % 2 * 2, 112, 147}, "core_supply");
+        auto neighbour = object(46, {548, 519 - frame % 2 * 2, 112, 127}, "dangerous_object");
+        guide.timestamp_us = neighbour.timestamp_us = in.now_us;
+        applyStartupSight(in, {guide, neighbour}, {1280,720}, in.now_us, .5f,
+                          task.startupSightTargetId(), false, -1, task.startupSightReference());
+        const auto out = task.update(in);
+        if (out.reason == "pixel_align_brake" || out.reason == "pixel_align_settle")
+            ++handoff_frames;
+        if (out.reason == "startup_switch_to_120") {
+            assert(handoff_frames > 0 && handoff_frames <= 20);
+            assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
+            std::cout << "PASS Startup rank jitter retains guide and completes handoff within 1 second\n";
+            return;
+        }
+        in.sent_vx_mps = out.motion.vx_mps;
+        in.sent_wz_rps = out.motion.wz_rps;
+    }
+    assert(false && "visible guide rank jitter stalled UI90 handoff");
+}
+
+
+void startupLoggedVerticalRebind() {
+    // 17:34: tracked injured_person #63 jumps vertically and becomes #75;
+    // the neighbouring dangerous object must not influence identity association.
+    constexpr uint64_t now = 1000000;
+    PushObservation in;
+    in.camera_pitch_stable = in.pixel_grasp_view = true;
+    in.camera_pitch_cdeg = 0;
+    StartupSightReference ref{63, "injured_person", {538,238,152,273}, 0, now-30000};
+    auto same = object(75, {538,97,172,253}, "injured_person");
+    auto neighbour = object(74, {110,188,263,252}, "dangerous_object");
+    same.timestamp_us = neighbour.timestamp_us = now;
+    applyStartupSight(in, {same,neighbour}, {1280,720}, now, .5f, 63, false, -1, ref);
+    assert(in.target_valid && in.target_id == 75 && in.startup_rebound_from == 63);
+    auto ambiguous = same;
+    ambiguous.track_id = 76;
+    applyStartupSight(in, {same,ambiguous}, {1280,720}, now, .5f, 63, false, -1, ref);
+    assert(!in.target_valid);
+    auto lateral = same;
+    lateral.box.x += 140;
+    applyStartupSight(in, {lateral}, {1280,720}, now, .5f, 63, false, -1, ref);
+    assert(!in.target_valid);
+    std::cout << "PASS Logged vertical re-ID resumes immediately; ambiguous/lateral matches rejected\n";
+}
+
+
+// The 18:12 UI120 frame: the rightmost lower box must not define the heading.
+void startupPileCenterRegression() {
+    PushObservation in;
+    in.camera_pitch_stable = in.pixel_grasp_view = true;
+    in.camera_pitch_cdeg = 0;
+    constexpr uint64_t now = 1000000;
+    std::vector<SegDetection> pile{
+        object(63, {694,152,182,203}, "dangerous_object"),
+        object(62, {568,137,172,192}, "injured_person"),
+        object(61, {885,188,162,212}, "injured_person"),
+        object(65, {920,72,112,122}, "injured_person")};
+    for (auto& d : pile) d.timestamp_us = now;
+    applyStartupSight(in, pile, {1280,720}, now, .5f, 61, false, -1, {}, true);
+    std::cout << "UI120 aim_x=" << in.target_center_px.x
+              << " pile_bounds_center_x=807.5" << std::endl;
+    assert(in.target_valid && std::abs(in.target_center_px.x - 807.5f) < .01f);
+    assert(std::abs(in.pixel_grasp_error_px + 167.5f) < .01f);
+    assert(in.target_id == kStartupPileTargetId && in.label == "startup_pile");
+    const StartupSightReference ref{in.target_id, in.label, in.target_box, 0, now};
+    // Re-ID and detection order do not turn a pile guide back into a single box.
+    for (auto& d : pile) d.track_id += 100;
+    std::reverse(pile.begin(), pile.end());
+    applyStartupSight(in, pile, {1280,720}, now, .5f, ref.id, false, -1, ref, true);
+    assert(in.target_id == ref.id && in.target_center_px.x == 807.5f);
+    // Even loss of the former individual guide leaves the remaining pile usable.
+    pile.erase(std::remove_if(pile.begin(), pile.end(),
+                             [](const auto& d) { return d.track_id == 161; }), pile.end());
+    applyStartupSight(in, pile, {1280,720}, now, .5f, ref.id, false, -1, ref, true);
+    assert(in.target_valid && in.target_id == ref.id && in.target_center_px.x == 800.f);
+    auto invalid = object(999, {0,0,1280,720});
+    invalid.timestamp_us = now - 200001;
+    pile.push_back(invalid);
+    invalid.timestamp_us = now;
+    invalid.label = "blue_safe_zone";
+    pile.push_back(invalid);
+    applyStartupSight(in, pile, {1280,720}, now, .5f, ref.id, false, -1, ref, true);
+    assert(in.target_center_px.x == 800.f);
+    applyStartupSight(in, {}, {1280,720}, now, .5f, ref.id, false, -1, ref, true);
+    assert(!in.target_valid && !in.target_center_px_valid && !in.pixel_grasp_sample_us);
+    // Only the closed UI120 pile approach changes; far/near/ordinary keep real IDs.
+    auto ordinary = object(3, {1000,500,100,100});
+    ordinary.timestamp_us = now;
+    pile.push_back(ordinary);
+    in.pixel_grasp_view = false;
+    applyStartupSight(in, pile, {1280,720}, now, .5f, -1, false, -1, {}, true);
+    assert(in.target_id == ordinary.track_id && in.target_center_px.x == 1050.f);
+    in.pixel_grasp_view = in.pixel_grasp_near_view = true;
+    applyStartupSight(in, pile, {1280,720}, now, .5f, -1, false, -1, {}, true);
+    assert(in.target_id == ordinary.track_id);
+    in.pixel_grasp_near_view = false;
+    applyStartupSight(in, pile, {1280,720}, now, .5f, -1, true, -1, {}, true);
+    assert(in.target_id == ordinary.track_id && in.label == "ordinary_supply");
+    std::cout << "PASS UI120 pile centre survives re-ID/loss; other views retain real targets\n";
+}
+
+void startupPileHeadingReachesTask() {
+    TaskTuning t;
+    t.startup_advance_us = 1;
+    t.start_zone = 3;
+    t.pixel_grasp_enabled = true;
+    t.far_pitch_cdeg = -3000;
+    t.track_pitch_cdeg = 0;
+    PushTask task(t);
+    task.setSinglePhase("startup");
+    PushObservation in;
+    in.now_us = 1000000;
+    in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+    in.camera_pitch_stable = in.gripper_done = in.sent_velocity_valid = true;
+    in.camera_pitch_cdeg = t.far_pitch_cdeg;
+    in.gripper_feedback_open = 0;
+    for (int frame = 0; frame < 120; ++frame) {
+        in.now_us += 50000;
+        const bool track = in.camera_pitch_cdeg == t.track_pitch_cdeg;
+        in.pixel_grasp_view = track;
+        auto left = object(track ? 100 + frame : 100, track ? cv::Rect(280,100,100,100)
+                                              : cv::Rect(580,550,100,100));
+        auto right = object(track ? 300 + frame : 300, track ? cv::Rect(900,300,100,100)
+                                               : cv::Rect(800,530,100,100), "injured_person");
+        left.timestamp_us = right.timestamp_us = in.now_us;
+        applyStartupSight(in, {left,right}, {1280,720}, in.now_us, .5f,
+                          task.startupSightTargetId(), task.startupOrdinaryOnly(), -1,
+                          task.startupSightReference(), task.startupPileApproach());
+        if (track && task.startupPileApproach()) {
+            assert(in.target_id == kStartupPileTargetId);
+            assert(in.target_center_px.x == 640.f && in.pixel_grasp_error_px == 0);
+        }
+        const auto out = task.update(in);
+        if (out.reason == "startup_approach_120") {
+            assert(track && out.motion.vx_mps > 0 &&
+                   std::abs(out.motion.wz_rps + .05f) < 1e-6f);
+            std::cout << "PASS UI90 -> UI120 task advances with zone-3 right bias despite per-frame re-ID\n";
+            return;
+        }
+        in.camera_pitch_cdeg = out.motion.camera_pitch_cdeg;
+        in.sent_vx_mps = out.motion.vx_mps;
+        in.sent_wz_rps = out.motion.wz_rps;
+    }
+    assert(false && "pile heading did not reach UI120 advance");
+}
+
+// Logged 18:23 dropout: the left member disappears while the right box stays still.
+// The raw union error flips from +36 to -85; an already aligned pile must keep advancing.
+void startupPileDropoutDoesNotRestartAlignment() {
+    TaskTuning tuning;
+    tuning.startup_advance_us = 1;
+    tuning.start_zone = 3;
+    tuning.pixel_grasp_enabled = true;
+    tuning.pixel_align_brake_motion_px = 30;
+    tuning.far_pitch_cdeg = -3000;
+    tuning.track_pitch_cdeg = 0;
+    tuning.near_pitch_cdeg = 2000;
+    PushTask task(tuning);
+    task.setSinglePhase("startup");
+    StartupPileGuide guide;
+    PushObservation in;
+    in.now_us = 1000000;
+    in.run = in.safety_ok = in.path_safe = in.retreat_safe = in.opponent_zone_clear = true;
+    in.camera_pitch_stable = in.gripper_done = in.sent_velocity_valid = true;
+    in.camera_pitch_cdeg = tuning.far_pitch_cdeg;
+    in.gripper_feedback_open = 0;
+    bool advanced = false;
+    int dropout_advances = 0;
+    for (int frame = 0; frame < 160; ++frame) {
+        in.now_us += 27000;
+        const bool track = in.camera_pitch_cdeg == tuning.track_pitch_cdeg;
+        in.pixel_grasp_view = track;
+        auto left = object(44, track ? cv::Rect(427,72,152,192) : cv::Rect(580,550,100,100),
+                           "injured_person");
+        auto right = object(46, track ? cv::Rect(649,87,152,192) : cv::Rect(800,530,100,100),
+                            "injured_person");
+        left.timestamp_us = right.timestamp_us = in.now_us;
+        // Begin inside the acceptance band, then replay the logged +36/-85
+        // union jump. A member dropout must not reverse the accepted heading.
+        if (track && advanced) left.box.x = 407;
+        std::vector<SegDetection> scene{left, right};
+        const bool dropout = track && advanced && frame % 3 == 0;
+        if (dropout) scene.erase(scene.begin());
+        applyStartupSight(in, scene, {1280,720}, in.now_us, .5f,
+                          task.startupSightTargetId(), task.startupOrdinaryOnly(), -1,
+                          task.startupSightReference(), task.startupPileApproach(), &guide);
+        const auto out = task.update(in);
+        if (track && out.reason == "startup_approach_120") advanced = true;
+        if (dropout) {
+            assert(out.reason == "startup_approach_120" && out.motion.vx_mps > 0);
+            if (++dropout_advances == 12) {
+                // Coherent real displacement must still stop forward motion after
+                // the three-image median catches up (at most two new images).
+                left.box.x += 200;
+                right.box.x += 200;
+                PushOutput displaced;
+                for (int i = 0; i < 2; ++i) {
+                    in.now_us += 27000;
+                    left.timestamp_us = right.timestamp_us = in.now_us;
+                    applyStartupSight(in, {left,right}, {1280,720}, in.now_us, .5f,
+                                      task.startupSightTargetId(), false, -1,
+                                      task.startupSightReference(), true, &guide);
+                    displaced = task.update(in);
+                    in.sent_vx_mps = displaced.motion.vx_mps;
+                    in.sent_wz_rps = displaced.motion.wz_rps;
+                }
+                assert(displaced.reason == "pixel_align_brake" &&
+                       displaced.motion.vx_mps == 0 && displaced.immediate_motion_stop);
+                std::cout << "PASS UI120 dropouts keep advancing; real displacement still brakes\n";
+                return;
+            }
+        }
+        in.camera_pitch_cdeg = out.motion.camera_pitch_cdeg;
+        in.sent_vx_mps = out.motion.vx_mps;
+        in.sent_wz_rps = out.motion.wz_rps;
+    }
+    assert(false && "UI120 dropout regression never reached continuous advance");
+}
+
+void startupPileGuideUsesOnlyFreshSteeringHistory() {
+    StartupPileGuide guide;
+    PushObservation in;
+    in.camera_pitch_stable = in.pixel_grasp_view = true;
+    in.camera_pitch_cdeg = 0;
+    uint64_t now = 1000000;
+    auto left = object(44, {407,72,152,192}, "injured_person");
+    auto right = object(46, {649,87,152,192}, "injured_person");
+    const auto step = [&](std::vector<SegDetection> scene, bool advance = true) {
+        if (advance) now += 27000;
+        for (auto& d : scene) d.timestamp_us = now;
+        applyStartupSight(in, scene, {1280,720}, now, .5f, -1, false, -1, {}, true, &guide);
+    };
+    step({left,right});
+    assert(in.target_center_px.x == 604.f);
+    step({right});
+    assert(in.target_center_px.x == 604.f && in.startup_visible_count == 1);
+    assert(in.target_box == right.box); // raw box/counts must not contain retained cargo
+    // A tracker re-ID must update the same member without an admission delay.
+    left.track_id = 144;
+    step({left,right});
+    assert(in.target_center_px.x == 604.f);
+    // A one-frame box resize is rejected by the centre median.
+    auto resized = left;
+    resized.box.x -= 180;
+    step({resized,right});
+    assert(in.target_center_px.x == 604.f);
+    step({left,right});
+    assert(in.target_center_px.x == 604.f);
+    // Three distinct images admit a new extremity; repeated images count once.
+    auto added = object(90, {100,100,100,100});
+    step({left,right,added});
+    step({left,right,added}, false);
+    step({left,right,added}, false);
+    assert(in.target_center_px.x == 604.f);
+    step({left,right,added});
+    assert(in.target_center_px.x == 604.f);
+    step({left,right,added});
+    step({left,right,added});
+    assert(in.target_center_px.x >= 574.f && in.target_center_px.x < 604.f);
+    // Admission changes the cohort gradually, while raw scene evidence was
+    // already available from its very first fresh image.
+    for (int i = 0; i < 20; ++i) step({left,right,added});
+    assert(in.target_center_px.x == 450.5f);
+    // Sustained disappearance expires, rather than preserving the old heading.
+    for (int i = 0; i < 8; ++i) step({right});
+    assert(in.target_center_px.x == 725.f);
+    // New lower-corner evidence is immediate even during member admission.
+    left.box = {0,550,120,150};
+    added.box = {1100,550,120,150};
+    step({left,added});
+    assert(in.startup_lower_corners_occupied && in.startup_visible_count == 2);
+    step({right});
+    assert(!in.startup_lower_corners_occupied && in.startup_visible_count == 1);
+    step({});
+    assert(!in.target_valid && !in.pixel_grasp_sample_us);
+    step({right});
+    assert(in.target_center_px.x == 725.f);
+    // A view change discards history even when UI120 is revisited immediately.
+    step({left,right});
+    in.pixel_grasp_near_view = true;
+    in.camera_pitch_cdeg = 2000;
+    step({right});
+    assert(in.target_id == right.track_id);
+    in.pixel_grasp_near_view = false;
+    in.camera_pitch_cdeg = 0;
+    step({right});
+    assert(in.target_center_px.x == 725.f);
+    // Repeated images cannot refresh a missing member's lifetime.
+    guide.reset();
+    step({left,right});
+    step({right});
+    right.timestamp_us = now;
+    now += 160000;
+    applyStartupSight(in, {right}, {1280,720}, now, .5f, -1, false, -1, {}, true, &guide);
+    assert(in.target_center_px.x == 725.f);
+    std::cout << "PASS UI120 steering expiry/admission/re-ID; scene evidence stays current\n";
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--startup-pile-dropout") {
+        startupPileDropoutDoesNotRestartAlignment();
+        startupPileGuideUsesOnlyFreshSteeringHistory(); return 0;
+    }
+    startupPileDropoutDoesNotRestartAlignment();
+    startupPileGuideUsesOnlyFreshSteeringHistory();
+    if (argc == 2 && std::string(argv[1]) == "--startup-pile") {
+        startupPileCenterRegression(); startupPileHeadingReachesTask(); return 0;
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "--startup-object-count") {
+        startupTwoObjectsReachTask(); return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--startup-rebind") {
+        startupLoggedVerticalRebind(); return 0;
+    }
+    startupPileCenterRegression();
+    startupPileHeadingReachesTask();
+    startupLoggedVerticalRebind();
+    if (argc == 2 && std::string(argv[1]) == "--startup-stability") {
+        startupHandoffKeepsVisibleGuide(); return 0;
+    }
+    startupHandoffKeepsVisibleGuide();
     rushContinuousIdentity();
     startupSightEvidence();
+    startupTwoObjectsReachTask();
+    startupLowerCornerEvidence();
+    startupLowerCornersReachTask();
     startupTrackerRebind();
     splitRetreatBoxEvidence();
     scatterSelectionLifecycle();
@@ -550,7 +1034,9 @@ int main() {
                 auto clean = object(32, {10, 80, 40, 40});
                 clean.body_xy_m = {.40f, .50f};
                 a.timestamp_us = in_front.timestamp_us = clean.timestamp_us = t;
-                p = lane.update({a, in_front, clean}, {200, 200}, 500, true, t, true, .25);
+                // Before first delivery the injured block is an obstacle;
+                // after first delivery its 15-point load now correctly wins.
+                p = lane.update({a, in_front, clean}, {200, 200}, 500, true, t, false, .25);
             }
             return p.id;
         };
@@ -581,57 +1067,17 @@ int main() {
         }
         assert(p.locked && p.id == 5);
     }
-    { // Two injured blocks in view: the larger one is on end and rejected, so the lock goes to the
-      // lying one.
-        PixelSelector two;
-        auto up = object(8, {10, 10, 50, 50}, "injured_person"),
-             lie = object(9, {70, 10, 20, 10}, "injured_person");
-        up.injured_upright_rejected = true;
+    { // A tall injured box can acquire and retain a lock, regardless of aspect ratio.
+        PixelSelector selector;
+        auto tall = object(8, {10, 10, 40, 58}, "injured_person"),
+             wide = object(9, {70, 10, 20, 10}, "injured_person");
         PixelSelection p;
-        for (int i = 0; i < 3; ++i) {
-            up.timestamp_us = lie.timestamp_us = 700000 + i * 10000;
-            p = two.update({up, lie},
-                           {100, 100},
-                           500,
-                           true,
-                           700000 + i * 10000,
-                           true,
-                           .25,
-                           {},
-                           "injured_person");
+        for (int i = 0; i < 8; ++i) {
+            tall.timestamp_us = wide.timestamp_us = 700000 + i * 10000;
+            p = selector.update({tall, wide}, {100, 100}, 500, true,
+                                tall.timestamp_us, true, .25f, {}, "injured_person");
+            if (i >= 2) assert(p.locked && p.id == 8);
         }
-        assert(p.locked && p.id == 9);
-        // Verdict arrives late: a lock on the (still undecided) on-end block is released and moves
-        // to the lying one.
-        PixelSelector late;
-        up.injured_upright_rejected = false;
-        for (int i = 0; i < 3; ++i) {
-            up.timestamp_us = lie.timestamp_us = 800000 + i * 10000;
-            p = late.update({up, lie},
-                            {100, 100},
-                            500,
-                            true,
-                            800000 + i * 10000,
-                            true,
-                            .25,
-                            {},
-                            "injured_person");
-        }
-        assert(p.locked && p.id == 8);
-        up.injured_upright_rejected = true;
-        for (int i = 3; i < 7; ++i) { // release tick, then three fresh confirmations
-            up.timestamp_us = lie.timestamp_us = 800000 + i * 10000;
-            p = late.update({up, lie},
-                            {100, 100},
-                            500,
-                            true,
-                            800000 + i * 10000,
-                            true,
-                            .25,
-                            {},
-                            "injured_person");
-        }
-        assert(p.locked && p.id == 9);
     }
     { // A larger box without ground contact (image-edge clip) never takes the lock from a
       // measurable one.
@@ -914,95 +1360,6 @@ int main() {
             body.update(t, t, 9, true, true, body.desiredPitch(), true, {g});
         }
         assert(body.result().verdict != CaptureVerdict::Enclosed);
-    }
-    { // Row mode: pick the middle clean block of a left-right row by ground points.
-        const auto at = [](int id, float x, float y, const char* label) {
-            auto d = object(id, {10 + id * 8, 10, 6, 6}, label);
-            d.body_xy_m = {x, y};
-            return d;
-        };
-        std::vector<SegDetection> row = {at(1, -.4f, .5f, "ordinary_supply"),
-                                         at(2, -.2f, .5f, "dangerous_object"),
-                                         at(3, 0.f, .5f, "ordinary_supply"),
-                                         at(4, .2f, .5f, "core_supply"),
-                                         at(5, .4f, .5f, "ordinary_supply")};
-        auto p = RowSelector::pick(row, 100000, false, .25f);
-        assert(p.id == 3 && p.index == 2 && p.seq == "GBGKG");
-        auto q = RowSelector::pick(row, 100000, false, .25f, 5);
-        assert(q.id == 5 && q.reason == "row_keep_lock");
-        // Fatal neighbours: blocks touching a dangerous piece are not skipped; they stay candidates
-        // and are listed in split_ids for PILE.
-        std::vector<SegDetection> bad = {at(1, -.06f, .5f, "ordinary_supply"),
-                                         at(2, 0.f, .5f, "dangerous_object"),
-                                         at(3, .06f, .5f, "ordinary_supply"),
-                                         at(4, .5f, .5f, "ordinary_supply")};
-        auto b = RowSelector::pick(bad, 100000, false, .25f);
-        assert(b.id == 3);
-        assert(std::count(b.split_ids.begin(), b.split_ids.end(), 1) == 1 &&
-               std::count(b.split_ids.begin(), b.split_ids.end(), 3) == 1 &&
-               std::count(b.split_ids.begin(), b.split_ids.end(), 4) == 0);
-        assert(RowSelector::pick(bad, 100000, false, .25f, 1).id ==
-               1); // the lock stays on a flagged block
-        {          // PixelSelector reports row_split for the locked flagged block only.
-            PixelSelector sel;
-            sel.setRow(true);
-            PixelSelection r;
-            for (int i = 0; i < 4; ++i) {
-                auto rw = bad;
-                for (auto& d : rw) {
-                    d.timestamp_us = 100000 + i * 10000;
-                    d.box = cv::Rect(10 + d.track_id * 16, 10, 6, 6);
-                }
-                r = sel.update(rw, {200, 100}, 500, true, 100000 + i * 10000, false, .25);
-            }
-            assert(r.locked && r.id == 3 && r.row_split);
-        }
-        // A radial line is not a lateral row.
-        std::vector<SegDetection> radial = {at(1, 0.f, .3f, "ordinary_supply"),
-                                            at(2, 0.f, .5f, "ordinary_supply"),
-                                            at(3, 0.f, .7f, "ordinary_supply")};
-        assert(RowSelector::pick(radial, 100000, false, .25f).reason == "no_row");
-        // An off-line outlier is ignored.
-        auto out = row;
-        out.push_back(at(9, .1f, .9f, "ordinary_supply"));
-        assert(RowSelector::pick(out, 100000, false, .25f).id == 3);
-        // All one colour: evenly spaced -> the middle one; a solid run (neighbours inside the
-        // footprint) -> an end block, never the middle.
-        std::vector<SegDetection> green;
-        for (int i = 0; i < 5; ++i)
-            green.push_back(at(i + 1, -.4f + .2f * i, .5f, "ordinary_supply"));
-        assert(RowSelector::pick(green, 100000, false, .25f).id == 3);
-        std::vector<SegDetection> solid;
-        for (int i = 0; i < 5; ++i)
-            solid.push_back(at(i + 1, -.12f + .06f * i, .5f, "ordinary_supply"));
-        auto sp = RowSelector::pick(solid, 100000, false, .25f);
-        assert((sp.id == 1 || sp.id == 5) && sp.reason == "row_middle");
-        // Even when every block is over-crowded, the least crowded end is still chosen instead of
-        // dropping the row logic.
-        std::vector<SegDetection> packed;
-        for (int i = 0; i < 6; ++i)
-            packed.push_back(at(i + 1, -.1f + .04f * i, .5f, "ordinary_supply"));
-        auto pp = RowSelector::pick(packed, 100000, false, .25f);
-        assert((pp.id == 1 || pp.id == 6) && pp.reason == "row_least_crowded");
-        assert(RowSelector::pick(packed, 100000, false, .25f, pp.id).id == pp.id);
-        // PixelSelector: the end block has the biggest box, row mode still locks the middle.
-        for (bool on : {false, true}) {
-            PixelSelector sel;
-            sel.setRow(on);
-            PixelSelection r;
-            for (int i = 0; i < 4; ++i) {
-                auto rw = row;
-                for (auto& d : rw) {
-                    d.timestamp_us = 100000 + i * 10000;
-                    d.box = cv::Rect(10 + d.track_id * 16,
-                                     10,
-                                     d.track_id == 1 ? 14 : 6,
-                                     d.track_id == 1 ? 14 : 6);
-                }
-                r = sel.update(rw, {200, 100}, 500, true, 100000 + i * 10000, false, .25);
-            }
-            assert(r.locked && r.id == (on ? 3 : 1));
-        }
     }
     std::cout << "mechanical integration checks passed\n";
 }

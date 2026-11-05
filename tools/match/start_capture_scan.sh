@@ -16,7 +16,7 @@ binary=build-release/rescue_upper_host
 common=(--config config/project.json --no-match-time-limit --controlled-empty-field --search-cues --team blue --no-show
   --allow-mechanical-pitch-model --pitch-presets 500,4000,4000
   --model models/detect_v5_int8.rknn
-  --pose-model models/zone_pose_int8.rknn --startup-advance-ms 0
+  --pose-model models/a_rawxy_20261105/A_rawxy_INT8_EXPERIMENTAL.rknn --startup-advance-ms 0
   --startup-speed 1 --scan-wz 1 --turn-wz 1)
 common+=("${extra[@]}")
 if (( ${#extra[@]} )); then echo "CONTACT TEST: forward/reverse/turn/jaw collision checks DISABLED; health checks and STOP retained."; fi
@@ -24,7 +24,7 @@ if [[ "$mode" == --check ]]; then exec "$binary" --check-config "${common[@]}"; 
 # All static checks run before anything opens a device or moves the pitch servo.
 "$binary" --check-config "${common[@]}"
 if [[ ! -c /dev/ttyACM0 ]]; then
-  echo 'MCU serial device /dev/ttyACM0 is missing. Check MCU power/USB enumeration; /dev/ttyUSB0 is the IMU.' >&2
+  echo 'MCU serial device /dev/ttyACM0 is missing. Check MCU power/USB enumeration; /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0 is the IMU.' >&2
   exit 1
 fi
 mkdir -p telemetry_logs
@@ -37,7 +37,7 @@ python3 tools/match/check_socket.py
 
 source tools/match/telemetry_bridge.sh
 if [[ "$mode" == --preview ]]; then
-  stdbuf -oL -eL "$binary" --dry-run --imu --imu-port /dev/ttyUSB0 --pitch-feedback --telemetry "${common[@]}"
+  stdbuf -oL -eL "$binary" --dry-run --imu --imu-port /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0 --pitch-feedback --telemetry "${common[@]}"
   exit $?
 fi
 cat <<'TXT'
@@ -52,7 +52,7 @@ mode; IMU/serial/frame health, phase budgets and host STOP remain. Total match t
 TXT
 python3 tools/camera_pitch/pitch_ctl.py prepare45 --timeout 5
 if [[ "$mode" == --auto-run ]]; then
-  stdbuf -oL -eL "$binary" --hardware --imu --imu-port /dev/ttyUSB0 --telemetry --auto-run "${common[@]}"
+  stdbuf -oL -eL "$binary" --hardware --imu --imu-port /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0 --telemetry --auto-run "${common[@]}"
   exit $?
 fi
-stdbuf -oL -eL "$binary" --hardware --imu --imu-port /dev/ttyUSB0 --telemetry "${common[@]}"
+stdbuf -oL -eL "$binary" --hardware --imu --imu-port /dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0 --telemetry "${common[@]}"

@@ -11,13 +11,8 @@ cv::Point2f centre(const cv::Rect& box) {
     return {box.x + .5f * box.width, box.y + .5f * box.height};
 }
 bool upperCornerTarget(const PushObservation& in) {
-    // Retaining an injured person already inside the calibrated frame uses the
-    // turn-before-retreat sequence, including the front half and retry rounds.
-    if (in.label == "injured_person" && in.target_grasp_range_valid &&
-        in.target_grasp_range_inside)
-        return false;
-    // A complete near-view target may overlap the inventory with its centre above
-    // the calibrated grasp range. Separation must precede approach in that case.
+    // The front half takes priority over grasp-range membership for injured cargo.
+    // Its unwanted neighbours must be cleared before approaching the retained target.
     return in.target_center_px_valid && !in.capture_area_px.empty() &&
            std::isfinite(in.target_center_px.y) && in.target_center_px.y >= 0 &&
            std::isfinite(in.pixel_grasp_error_px) &&
@@ -45,6 +40,94 @@ void PushTask::reobserveCaptureLoad(uint64_t now) {
     capture_load_.reobserve_after_us = now;
     capture_load_.stopped_us = capture_load_.sample_us = 0;
     capture_load_.confirmations = 0;
+}
+
+void PushTask::resumePixelSplitSearch(TaskTick& tick, const char* why, bool restart_review) {
+    auto& split = search_phase_.first_trip_split_;
+    split.pending = split.active = split.reacquire = split.vertical_swing = false;
+    // Preserve capture_retry: single-phase capture must be allowed to search internally.
+    split.capture_retry = true;
+    split.target_reselecting = false;
+    split.target_candidate_id = split.target_id = -1;
+    split.retreat_objects.clear();
+    split.observation_wait_us = split.observation_stopped_us = 0;
+    split.corner_turn_sample_us = split.corner_stopped_us = 0;
+    split.corner_turn_braking = false;
+    split.align_stage = "ui120_approach";
+    trip_context_.target_id_ = trip_context_.capture_target_id_ = -1;
+    trip_context_.label_.clear();
+    trip_context_.pending_ = {};
+    search_entry_ = {};
+    pixel_alignment_ = {};
+    search_phase_.view_handoff_ = {};
+    search_phase_.far_target_recovery_ = {};
+    search_phase_.pixel_approach_started_us_ = 0;
+    search_phase_.pixel_reselection_ = {};
+    search_phase_.pixel_reselection_.observing = true;
+    capture_scene_ = {};
+    if (restart_review) {
+        // Abandon this observation attempt, not the selected cargo class. Old
+        // identities and an expired review deadline cannot poison the new scene.
+        capture_load_.objects.clear();
+        capture_load_.observed = {};
+        capture_load_.confirmations = 0;
+        capture_load_.started_us = capture_load_.stopped_us = tick.now;
+        capture_load_.sample_us = 0;
+    }
+    reobserveCaptureLoad(tick.now);
+    tick.motion.vx_mps = tick.motion.wz_rps = 0;
+    tick.immediate_motion_stop = true;
+    phase_outcome_ = PhaseOutcome::Running;
+    enter(PushState::APPROACH, tick.now, why);
+    search_phase_.approach_pitch_ = t_.track_pitch_cdeg;
+    single_phase_initializing_ = false;
+    search_phase_.pixel_approach_started_us_ = 0; // enter(APPROACH) starts it; discovery must not
+    split.search_started_us = tick.now;
+}
+
+void PushTask::recoverCaptureObservation(TaskTick& tick) {
+    auto& split = search_phase_.first_trip_split_;
+    const bool waiting = reason_.find("first_trip_stop_review_") == 0 ||
+        reason_ == "phase_capture_wait_target_corridor" ||
+        reason_ == "first_trip_split_observation_wait" ||
+        reason_ == "pixel_split_unwanted_observation_wait" ||
+        reason_ == "pixel_split_incomplete_inventory" ||
+        reason_ == "first_trip_split_candidate_wait" ||
+        reason_ == "first_trip_split_target_confirm_wait" ||
+        reason_ == "capture_score_target_confirm_wait" ||
+        reason_ == "capture_score_observation_wait" ||
+        reason_ == "capture_score_incomplete_inventory" ||
+        reason_ == "capture_score_member_missing" ||
+        reason_ == "capture_score_confirm_wait" ||
+        reason_ == "capture_score_new_view_confirm_wait" ||
+        (split.capture_retry && (reason_ == "pixel_reselect_observe" ||
+                                reason_ == "pixel_split_search_observation_wait"));
+    if (!t_.pixel_grasp_enabled || fault_ || !tick.in.run || !tick.in.safety_ok ||
+        phase_waiting_ || frame_raised_ != 1 ||
+        (phase_ != TaskPhase::Search && phase_ != TaskPhase::Capture)) {
+        split.observation_wait_us = split.observation_stopped_us = 0;
+        return;
+    }
+    if (!waiting) {
+        // An observation-driven view change is not new evidence. Carry its
+        // deadline through the existing reobserve turn instead of looping forever.
+        using Stage = SearchPhaseData::FirstTripSplit::RecoveryStage;
+        const bool changing_view = split.pending && split.observation_wait_us &&
+            (split.recovery_stage == Stage::Turn || reason_ == "camera_pitch_wait" ||
+             reason_ == "first_trip_split_turn_stopped");
+        if (!changing_view) split.observation_wait_us = 0;
+        split.observation_stopped_us = 0;
+        return;
+    }
+    if (!split.observation_wait_us) split.observation_wait_us = tick.now;
+    if (!captureReviewStopped(tick.in)) {
+        split.observation_stopped_us = 0;
+        return;
+    }
+    if (!split.observation_stopped_us) split.observation_stopped_us = tick.now;
+    if (tick.now - split.observation_wait_us >= 1500000 &&
+        tick.now - split.observation_stopped_us >= 250000)
+        resumePixelSplitSearch(tick, "pixel_split_observation_research", true);
 }
 
 void PushTask::beginPixelSplitReview(TaskTick& tick) {
@@ -82,7 +165,8 @@ bool PushTask::reviewCaptureLoad(TaskTick& tick) {
     if (!plan.started_us)
         plan.started_us = tick.now;
     if (tick.now - plan.started_us > t_.pile_budget_us) {
-        failStop(tick, "capture_score_review_timeout");
+        // A spent observation window must still reach the stopped search recovery.
+        reason_ = "capture_score_observation_wait";
         return false;
     }
     const auto wait = [&](const char* why) {
@@ -271,7 +355,13 @@ PushTask::CaptureSceneVerdict PushTask::evaluateCaptureScene(const PushObservati
         return incomplete("cross_view_reassociation_required");
     if (scene.sample_us && in.capture_scene_us < scene.sample_us)
         return incomplete("scene_timestamp_reversed");
+    const bool startup_grab = startup_first_capture_ && !first_ &&
+                              trip_context_.label_ == "ordinary_supply";
     const auto region_relevant = [&](const PushObservation::CaptureImageObject& object) {
+        // Other ordinary blocks are judged by actual held contents after this
+        // startup grab. Observation-strip occupancy is not a captured inventory.
+        if (startup_grab && object.label == "ordinary_supply")
+            return object.id == in.target_id;
         return object.id == in.target_id ||
                in.splitInventoryOverlaps(object.box, object.label) ||
                in.capturePathOverlaps(object.box, object.label);
@@ -308,6 +398,9 @@ PushTask::CaptureSceneVerdict PushTask::evaluateCaptureScene(const PushObservati
             const PushObservation::CaptureImageObject* match = nullptr;
             int matches = 0;
             for (const auto& object : current) {
+                if (startup_grab && old.id == scene.target_id &&
+                    object.label == "ordinary_supply" && object.id != in.target_id)
+                    continue;
                 if (object.label != old.label ||
                     ((old.dangerous_side_pending || old.dangerous_side_clear) && object.id != old.id) ||
                     !positionMatch(old.box, object.box))
@@ -342,6 +435,8 @@ PushTask::CaptureSceneVerdict PushTask::evaluateCaptureScene(const PushObservati
     bool path_risk = false;
     bool target_inside = false, split_target_inside = false;
     for (const auto& object : scene.objects) {
+        if (startup_grab && object.label == "ordinary_supply" && object.id != scene.target_id)
+            continue;
         const bool inside = in.splitInventoryOverlaps(object.box, object.label);
         const bool in_path =
             in.capturePathOverlaps(object.box, object.label);
@@ -450,6 +545,12 @@ void PushTask::selectPixelSplitDirection(const PushObservation& in) {
     auto& split = search_phase_.first_trip_split_;
     split.keep_injured = trip_context_.label_ == "injured_person";
     split.upper_corner = upperCornerTarget(in);
+    split.target_center_y = in.target_center_px.y;
+    split.midpoint_y = in.capture_area_px.y + .5f * in.capture_area_px.height;
+    split.corner_turn_sample_us = split.corner_stopped_us = 0;
+    split.corner_turn_braking = false;
+    split.turn_rate = 0;
+    split.observation_wait_us = split.observation_stopped_us = 0;
     if (split.keep_injured && first_) {
         if (!capture_load_.active) {
             Inventory injured;
@@ -464,6 +565,8 @@ void PushTask::selectPixelSplitDirection(const PushObservation& in) {
     split.retreat_objects.clear();
     split.retreat_reference_id = -1;
     split.retreat_reference_y = 0;
+    split.retreat_braking = false;
+    split.retreat_speed_mps = .05f;
     split.margin_stage = SearchPhaseData::FirstTripSplit::MarginStage::Idle;
     split.margin_used_us = split.margin_tick_us = split.margin_scene_us = 0;
     split.margin_sent_reverse = false;
@@ -562,8 +665,7 @@ bool PushTask::reviewFirstTripCapture(TaskTick& tick, const char* stage, bool pr
     if (!scene.started_us)
         scene.started_us = tick.now;
     if (tick.now - scene.started_us > t_.pile_budget_us) {
-        const auto why = "first_trip_review_timeout_" + scene.detail;
-        failStop(tick, why.c_str());
+        reason_ = "first_trip_stop_review_timeout_" + scene.detail;
         return false;
     }
     // Incomplete association resets the inventory confirmation counter. Use a separate

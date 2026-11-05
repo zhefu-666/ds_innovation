@@ -308,7 +308,7 @@ void captureTests() {
         for (float error : {13.f,-18.f,24.f,-24.f,35.f,-40.f}) {
             step(error); assert(out.motion.vx_mps > 0 && out.motion.wz_rps == 0);
         }
-        step(41); assert(stopped(out.motion) && out.reason == "pixel_align_brake");
+        step(task.t_.pixel_align_approach_restart_px + 1); assert(stopped(out.motion) && out.reason == "pixel_align_brake");
         step(0); settle();
         // Initial alignment need not reach +/-12. Once inside +/-30, the entire
         // brake/settle sequence tolerates jitter up to +/-40 without chasing it.
@@ -445,10 +445,11 @@ void captureTests() {
                out.motion.camera_pitch_cdeg == 0 && !in.pixel_view_handoff_ready);
         step(false);
         assert(stopped(out.motion) && out.reason == "pixel_target_wait");
-        d.box.y = 450; // Bottom is already below 540, but centre is only 500.
+        d.box.y = 390; // Centre Y440 stays before the search UI120 handoff Y450.
         for (int i=0;i<20;++i) step();
-        assert(out.motion.vx_mps > 0 && out.motion.camera_pitch_cdeg == 0);
-        d.box.y = 490; // Centre reaches UI120 view handoff Y540.
+        assert(out.motion.vx_mps > 0 && out.motion.vx_mps <= .04f &&
+               out.motion.camera_pitch_cdeg == 0);
+        d.box.y = 400; // Centre reaches the earlier search UI120 handoff Y450.
         d.box.x = 750; // off-centre must not prevent the stationary view switch
         for (int i=0;i<20 && out.reason!="pixel_center_switch_to_140";++i) {
             step();
@@ -474,7 +475,9 @@ void captureTests() {
         d.box.y = 200; // centre Y250 enters first; no need to advance to Y337
         for(int i=0;i<40 && out.state!=PushState::LOWER_FRAME;++i) {
             step();
-            assert(stopped(out.motion) && out.immediate_motion_stop);
+            // Normal entry brakes via the sender ramp before stable-image confirmation.
+            assert(stopped(out.motion));
+            if (out.reason == "first_entry_stop_confirm") assert(!out.immediate_motion_stop);
         }
         assert(out.state == PushState::LOWER_FRAME && task.search_entry_.handoff);
         assert(in.target_grasp_range_lateral_measured && !in.pixel_grasp_ready);
@@ -613,13 +616,13 @@ void captureTests() {
                 aligned = copy.update(sample);
                 assert(aligned.motion.vx_mps == 0);
                 if (aligned.reason == "pixel_center_switch_to_120") {
-                    assert(stopped(aligned.motion) && aligned.immediate_motion_stop);
+                    assert(stopped(aligned.motion));
                     assert(aligned.motion.camera_pitch_cdeg == 0);
                     switched = true;
                     break;
                 }
                 assert(aligned.motion.camera_pitch_cdeg == -3000);
-                assert(stopped(aligned.motion) && aligned.immediate_motion_stop);
+                assert(stopped(aligned.motion));
             }
             assert(switched);
         }
@@ -632,8 +635,7 @@ void captureTests() {
                 box.box={750,500+(i%2)*20,100,100};
                 monitor.update(sample,{box},sample.now_us);
                 const auto waiting=copy.update(sample);
-                assert(stopped(waiting.motion) && waiting.immediate_motion_stop &&
-                       waiting.motion.camera_pitch_cdeg==-3000);
+                assert(stopped(waiting.motion) && waiting.motion.camera_pitch_cdeg==-3000);
             }
         }
         // A centred target cannot change views while a turn is still being sent.

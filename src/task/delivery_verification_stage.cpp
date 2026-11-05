@@ -46,33 +46,12 @@ DeliveryVerificationStage::update(const PushObservation& in,
     const uint64_t now = in.now_us;
     const int expected = context.trip.total();
     const bool carry = t.assume_all_safe || t.field_carry;
-    if (carry && t.pixel_grasp_enabled && expected > 0 && context.trip.ordinary == expected) {
-        // Only post-retreat fresh images count; old geometry/front-edge/assumed evidence
-        // cannot replace the user's full-box containment rule for ordinary deliveries.
-        const bool stopped = in.sent_velocity_valid && std::isfinite(in.sent_vx_mps) &&
-            std::isfinite(in.sent_wz_rps) && std::abs(in.sent_vx_mps) < .001f &&
-            std::abs(in.sent_wz_rps) < .001f;
-        const bool contained = in.delivery_observed && in.delivery_box_count >= expected &&
-            in.delivery_box_sample_us && in.delivery_box_sample_us >= now - context.elapsed_us &&
-            now >= in.delivery_box_sample_us && now - in.delivery_box_sample_us <= 200000 &&
-            in.gripper_done && in.gripper_feedback_open == 1 && stopped;
-        if (!contained) {
-            confirmations_ = 0;
-            stable_since_us_ = 0;
-        } else if (in.delivery_box_sample_us != frame_) {
-            if (!confirmations_)
-                stable_since_us_ = now;
-            ++confirmations_;
-            frame_ = in.delivery_box_sample_us;
-        }
-        const bool verified = contained && confirmations_ >= t.delivery_frames &&
-            now - stable_since_us_ >= 300000;
-        if (!verified && context.elapsed_us <= t.delivery_budget_us)
-            return result;
+    if (carry && t.pixel_grasp_enabled) {
+        // Release and retreat finish the jaw transport. No post-delivery image,
+        // inventory delta, confirmation window or retry is required.
         result.outcome = DeliveryVerificationOutcome::Complete;
-        result.credited = verified ? expected : 0;
-        result.visual = verified;
-        result.reason = verified ? "delivered_box_contained" : "delivery_unverified";
+        result.credited = expected; // Completed transport count, not visual acceptance.
+        result.reason = "transport_actions_complete";
         clearTrip();
         return result;
     }
@@ -115,7 +94,7 @@ DeliveryVerificationStage::update(const PushObservation& in,
     // TEMP_ASSUMPTION: judge released cargo against a zone fix or the uncalibrated image front
     // edge.
     if (carry && !stable) {
-        if (cargo.available && in.cargo_ts_us != cargo_ts_us_) {
+        if (cargo.available && in.cargo_ts_us > cargo_ts_us_) {
             cargo_ts_us_ = in.cargo_ts_us;
             if (cargo.fixed) {
                 const bool x_ok = std::abs(cargo.rear.x - context.half_x) <= t.assume_cargo_x_tol_m;

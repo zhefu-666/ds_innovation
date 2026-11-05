@@ -346,7 +346,7 @@ def verify(binary, repository, directory):
     require(preview["request"]["class_names"] ==
             ["blue", "orange", "green", "black", "zone_blue", "zone_red"],
             "Preview must use the six-class detector contract")
-    require(preview["request"]["pose_model_path"] == str(repository / "models/zone_pose_int8.rknn"),
+    require(preview["request"]["pose_model_path"] == str(repository / "models/a_rawxy_20261105/A_rawxy_INT8_EXPERIMENTAL.rknn"),
             "Preview must use the supplied pose model")
     require(preview["request"]["zone_geometry_file"] == project + "#/zone_geometry",
             "Preview fragment lost its embedded zone geometry")

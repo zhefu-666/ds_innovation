@@ -1,0 +1,99 @@
+{
+  "platform": "rk3588",
+  "input": {
+    "shape": [
+      1,
+      640,
+      640,
+      3
+    ],
+    "layout": "NHWC",
+    "dtype": "uint8",
+    "color": "RGB",
+    "letterbox_fill": 114,
+    "normalization": "RKNN internal mean0/std255; no external division"
+  },
+  "classes": {
+    "0": [
+      "LA",
+      "LB",
+      "LC",
+      "LD"
+    ],
+    "1": [
+      "RC",
+      "RD",
+      "RE",
+      "RF"
+    ]
+  },
+  "thresholds": {
+    "detection_strict_greater_than": 0.5,
+    "visibility_greater_equal": 0.5,
+    "nms_iou": 0.45
+  },
+  "router": {
+    "far_max": 0.04392929565847024,
+    "near_min": 0.14768375983277818,
+    "basis": "training142 only, no heldout/protected tuning",
+    "fallback": "missing class or multiple same-class post-NMS -> original",
+    "blend": "linear in global max detected box image area fraction"
+  },
+  "filter": {
+    "coordinate_space": "640 square letterbox pixels",
+    "min_cutoff_hz": 1.2,
+    "max_cutoff_hz": 8.0,
+    "beta_hz_per_pixel_per_second": 0.016,
+    "derivative_cutoff_hz": 1.0,
+    "max_gap_seconds": 0.2,
+    "class_box_reset_iou": 0.2,
+    "visibility": 0.5,
+    "detection": 0.5
+  },
+  "model_file": "A_rawxy_INT8_EXPERIMENTAL.rknn",
+  "model_sha256": "d0249684fed94195f56e4ce273acb6f9997aaae04f6af3c7d8bbb6e7db2458ea",
+  "output_names": [
+    "boxes",
+    "scores",
+    "base_xy_raw",
+    "far_xy_raw",
+    "visibility"
+  ],
+  "output_shapes": [
+    [
+      1,
+      4,
+      8400
+    ],
+    [
+      1,
+      2,
+      8400
+    ],
+    [
+      1,
+      8,
+      8400
+    ],
+    [
+      1,
+      8,
+      8400
+    ],
+    [
+      1,
+      4,
+      8400
+    ]
+  ],
+  "output_dtype": "INT8",
+  "output_read": "want_float=1; no second dequantization",
+  "coordinate_decode": "(2*raw_xy+grid_xy)*stride; stride 8/16/32, grids 80/40/20 row-major",
+  "decoder": "rawxy_5_to_dual_expert_26",
+  "board_load_verified": true,
+  "main_pipeline_verified": true,
+  "business_acceptance_passed": false,
+  "default": true,
+  "smoothing_preview_default": "off; raw pose continues to control",
+  "evidence": "telemetry_logs/pose-rawxy-20261105/verification.json"
+}

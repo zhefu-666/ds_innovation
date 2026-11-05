@@ -72,74 +72,110 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                     split.margin_tick_us = 0;
                     split.margin_sent_reverse = false;
                 };
-                if (tick.now - split.started_us > t_.pile_budget_us) {
-                    failStop(tick, "first_trip_vertical_split_timeout");
-                    break;
-                }
                 capture_scene_.stage = "postsplit_before_approach";
                 const auto resetReobserve = [&] {
                     capture_scene_.reobserve_stopped_us = capture_scene_.reobserve_sample_us = 0;
                     capture_scene_.reobserve_frames = 0;
                 };
                 const auto resumeApproach = [&](const char* why) {
-                    // Reacquire in the normal UI120 approach flow when the split
-                    // ends outside the near capture region. Review again at UI140.
-                    split.pending = split.active = split.reacquire = split.vertical_swing = false;
-                    split.target_reselecting = false;
-                    split.target_candidate_id = split.target_id = -1;
-                    split.align_stage = "ui120_approach";
-                    trip_context_.target_id_ = trip_context_.capture_target_id_ = -1;
-                    trip_context_.label_.clear();
-                    trip_context_.pending_ = {};
-                    search_entry_ = {};
-                    pixel_alignment_ = {};
-                    search_phase_.far_target_recovery_ = {};
-                    search_phase_.pixel_approach_started_us_ = 0;
-                    search_phase_.pixel_reselection_ = {};
-                    search_phase_.pixel_reselection_.observing = true;
-                    capture_scene_ = {};
-                    reobserveCaptureLoad(tick.now);
-                    enter(PushState::APPROACH, tick.now, why);
-                    search_phase_.approach_pitch_ = t_.track_pitch_cdeg;
-                    // Discovery owns its own bounded window; approach starts only
-                    // after the selector confirms a fresh target in UI120.
-                    split.search_started_us = tick.now;
-                    search_phase_.pixel_approach_started_us_ = 0;
+                    resumePixelSplitSearch(tick, why);
                 };
+                // Only the balanced return and turn back yield to discovered cargo.
+                // UI120 discoveries enter normal approach, which still performs
+                // stopped UI140 capture review before closing the gripper.
+                const auto& observation = tick.in;
+                const bool fresh_candidate = t_.split_capture_preempt &&
+                    (split.recovery_stage == Stage::CornerReturn ||
+                     split.recovery_stage == Stage::CornerTurnBack) && !split.target_reselecting &&
+                    observation.capture_scene_valid && observation.capture_scene_us &&
+                    observation.capture_scene_us > std::max(split.started_us, split.recovery_view_us) &&
+                    observation.capture_scene_us <= tick.now &&
+                    tick.now - observation.capture_scene_us <= t_.frame_timeout_us &&
+                    candidate(observation, tick.now) && captureLoadAllows(observation.label) &&
+                    observation.pixel_selection_managed && observation.pixel_locked &&
+                    observation.pixel_grasp_view && !observation.pixel_grasp_near_view &&
+                    std::any_of(observation.capture_image_objects.begin(),
+                        observation.capture_image_objects.end(), [&](const auto& object) {
+                            return object.id == observation.target_id &&
+                                object.label == observation.label && object.complete && object.selectable;
+                        });
+                if (fresh_candidate) {
+                    const int id = observation.target_id;
+                    const auto label = observation.label;
+                    resumeApproach("pixel_split_target_interrupt");
+                    trip_context_.target_id_ = trip_context_.capture_target_id_ = id;
+                    trip_context_.label_ = label;
+                    search_phase_.pixel_reselection_ = {};
+                    search_phase_.pixel_approach_started_us_ = tick.now;
+                    break;
+                }
+                if (tick.now - split.started_us > t_.pile_budget_us) {
+                    if (split.observation_wait_us || split.recovery_stage == Stage::Verify) {
+                        reason_ = "first_trip_split_observation_wait";
+                        break; // retain zero until the observation watchdog restarts search
+                    }
+                    if (split.upper_corner &&
+                        (split.recovery_stage == Stage::CornerTurnRight ||
+                         split.recovery_stage == Stage::CornerPush ||
+                         split.recovery_stage == Stage::CornerReturn ||
+                         split.recovery_stage == Stage::CornerTurnBack))
+                        resumePixelSplitSearch(tick, "pixel_split_corner_timeout_research", true);
+                    else
+                        failStop(tick, "first_trip_vertical_split_timeout");
+                    break;
+                }
                 if (split.recovery_stage == Stage::InjuredTurn) {
                     split.align_stage = "injured_turn_before_retreat";
                     const auto& in = tick.in;
                     if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
-                        split.recovery_turn_us = 0;
+                        split.corner_turn_sample_us = split.corner_stopped_us = 0;
+                        split.corner_turn_braking = true;
                         reason_ = "injured_split_heading_wait";
                         break;
                     }
                     const float error = wrapAngle(split.injured_turn_goal - in.heading_rad);
-                    reason_ = split.recovery_direction > 0 ? "injured_split_turn_left"
-                                                           : "injured_split_turn_right";
-                    if (std::abs(error) > .02f) {
-                        split.recovery_turn_us = 0;
-                        drive(tick, 0, std::clamp(2.f * error, -.3f, .3f), true);
-                        if (tick.motion.wz_rps != 0)
-                            tick.motion.wz_rps = std::copysign(
-                                std::min({.3f, t_.max_wz, std::max(.05f, 2.f * std::abs(error))}), error);
+                    constexpr float tolerance = .02f, quiet_rate = .03f;
+                    const bool sampled = split.corner_turn_sample_us &&
+                        tick.now > split.corner_turn_sample_us &&
+                        tick.now - split.corner_turn_sample_us <= 200000;
+                    const float rate = sampled
+                        ? wrapAngle(in.heading_rad - split.corner_turn_heading) *
+                            (1000000.f / (tick.now - split.corner_turn_sample_us)) : 0.f;
+                    split.turn_rate = rate;
+                    split.corner_turn_sample_us = tick.now;
+                    split.corner_turn_heading = in.heading_rad;
+                    if (!sampled) split.corner_stopped_us = 0;
+                    const bool moving = sampled && std::abs(rate) > quiet_rate;
+                    split.corner_turn_braking |= std::abs(error) <= tolerance ||
+                        (moving && (rate * error < 0 ||
+                            std::abs(error) <= tolerance + .15f * std::abs(rate)));
+                    if (!split.corner_turn_braking) {
+                        reason_ = split.recovery_direction > 0 ? "injured_split_turn_left"
+                                                               : "injured_split_turn_right";
+                        const float speed = std::min({.15f, t_.max_wz,
+                            std::max(.05f, 2.f * std::abs(error))});
+                        drive(tick, 0, std::copysign(speed, error), true);
                         tick.immediate_motion_stop = tick.motion.wz_rps == 0;
                         break;
                     }
                     reason_ = "injured_split_turn_brake";
-                    if (!captureReviewStopped(in)) {
-                        split.recovery_turn_us = 0;
+                    split.align_stage = "injured_turn_brake";
+                    if (!captureReviewStopped(in) || !sampled || moving) {
+                        split.corner_stopped_us = 0;
                         break;
                     }
-                    if (!split.recovery_turn_us)
-                        split.recovery_turn_us = tick.now;
-                    if (tick.now - split.recovery_turn_us < 250000)
-                        break;
+                    if (!split.corner_stopped_us ||
+                        std::abs(wrapAngle(in.heading_rad - split.corner_turn_stop_heading)) > .005f) {
+                        split.corner_stopped_us = tick.now;
+                        split.corner_turn_stop_heading = in.heading_rad;
+                    }
+                    if (tick.now - split.corner_stopped_us < 250000) break;
+                    split.corner_stopped_us = split.corner_turn_sample_us = 0;
+                    split.corner_turn_braking = false;
+                    if (std::abs(error) > tolerance) break; // correction only after a measured stop
                     split.recovery_stage = Stage::Retreat;
                     split.recovery_view_us = tick.now;
                     split.recovery_turn_us = 0;
-                    // A unique complete injured candidate is latched in the new
-                    // UI140 view; pre-turn image positions cannot identify it.
                     split.retreat_objects.clear();
                     capture_scene_.confirmations = 0;
                     capture_scene_.stopped_us = tick.now;
@@ -152,6 +188,8 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                     split.recovery_stage == Stage::CornerTurnBack) {
                     const auto& in = tick.in;
                     if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
+                        split.corner_turn_sample_us = split.corner_stopped_us = 0;
+                        split.corner_turn_braking = true;
                         reason_ = "pixel_split_corner_heading_wait";
                         break;
                     }
@@ -164,17 +202,51 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                         // Right 90 degrees, then return left 80: finish 10 degrees right of entry.
                         const float goal = split.corner_heading - (right ? 1.570796327f : .174532925f);
                         const float error = wrapAngle(goal - in.heading_rad);
-                        if (std::abs(error) <= .02f) {
-                            if (!stopped) {
-                                if (right) split.corner_imu.reset();
+                        // Taper the last part of both turns, reserving 150 ms of
+                        // measured rotation for command latency and chassis braking.
+                        constexpr float tolerance = .02f, quiet_rate = .03f;
+                        const bool sampled = split.corner_turn_sample_us &&
+                            tick.now > split.corner_turn_sample_us &&
+                            tick.now - split.corner_turn_sample_us <= 200000;
+                        const float rate = sampled
+                            ? wrapAngle(in.heading_rad - split.corner_turn_heading) *
+                                (1000000.f / (tick.now - split.corner_turn_sample_us))
+                            : 0.f;
+                        split.turn_rate = rate;
+                        split.corner_turn_sample_us = tick.now;
+                        split.corner_turn_heading = in.heading_rad;
+                        if (!sampled) split.corner_stopped_us = 0;
+                        const bool moving = sampled && std::abs(rate) > quiet_rate;
+                        split.corner_turn_braking |= std::abs(error) <= tolerance ||
+                            (moving && (rate * error < 0 ||
+                                std::abs(error) <= tolerance + .15f * std::abs(rate)));
+                        if (split.corner_turn_braking) {
+                            // Sent zero is insufficient: also require a quiet heading
+                            // spanning 250 ms, with at most 0.005 rad total drift.
+                            split.align_stage = right ? "corner_turn_right_brake" : "corner_turn_back_brake";
+                            if (!stopped || !sampled || moving) {
+                                split.corner_stopped_us = 0;
                                 break;
                             }
+                            if (!split.corner_stopped_us ||
+                                std::abs(wrapAngle(in.heading_rad - split.corner_turn_stop_heading)) > .005f) {
+                                split.corner_stopped_us = tick.now;
+                                split.corner_turn_stop_heading = in.heading_rad;
+                            }
+                            if (tick.now - split.corner_stopped_us < 250000)
+                                break;
+                            split.corner_stopped_us = 0;
+                            split.corner_turn_braking = false;
+                            split.corner_turn_sample_us = 0;
+                            // Any correction starts after braking, never by reversing
+                            // a still-rotating chassis at full speed.
+                            if (std::abs(error) > tolerance)
+                                break;
                             if (right) {
-                                reason_ = "pixel_split_corner_imu_calibrate";
-                                if (!split.corner_imu.calibrate(in.imu_translation_samples, tick.now,
-                                                               goal))
-                                    break;
-                                split.corner_distance = .2f;
+                                // Only heading uses the IMU. Linear travel is the
+                                // actual sent-velocity integral for this action.
+                                split.corner_distance = .036f;
+                                split.corner_command_origin_m = split.corner_command_peak_m = odo_;
                                 split.corner_braking = false;
                                 split.corner_stopped_us = 0;
                                 split.recovery_stage = Stage::CornerPush;
@@ -183,23 +255,32 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                             }
                         } else {
                             if (right) split.corner_imu.reset();
-                            drive(tick, 0, std::copysign(.3f, error), true);
+                            const float speed = std::min({.3f + t_.split_wz_increment_rps,
+                                t_.max_wz, std::max(.08f, 2.f * std::abs(error))});
+                            drive(tick, 0, std::copysign(speed, error), true);
                             if (tick.motion.wz_rps != 0)
-                                tick.motion.wz_rps = std::copysign(std::min(.3f, t_.max_wz), error);
+                                tick.motion.wz_rps = std::copysign(speed, error);
                             tick.immediate_motion_stop = tick.motion.wz_rps == 0;
                         }
                         break;
                     }
                     const bool push = split.recovery_stage == Stage::CornerPush;
                     split.align_stage = push ? "corner_push" : "corner_return";
-                    reason_ = push ? "pixel_split_corner_push020_imu" : "pixel_split_corner_return_imu";
-                    if (!split.corner_imu.advance(in.imu_translation_samples, tick.now)) {
-                        failStop(tick, "pixel_split_corner_imu_gap");
+                    reason_ = push ? "pixel_split_corner_push036_command"
+                                   : "pixel_split_corner_return_command";
+                    if (!in.sent_velocity_valid || !std::isfinite(in.sent_vx_mps) ||
+                        !std::isfinite(in.sent_wz_rps)) {
+                        failStop(tick, "pixel_split_corner_command_feedback_missing");
                         break;
                     }
-                    const float remaining = push ? split.corner_distance - split.corner_imu.distance()
-                                                 : split.corner_imu.distance();
-                    split.corner_braking |= remaining <= .001f;
+                    if (push)
+                        split.corner_command_peak_m = std::max(split.corner_command_peak_m, odo_);
+                    const float command_remaining = odo_ - split.corner_command_origin_m;
+                    const float remaining = push ? split.corner_distance - command_remaining
+                                                 : command_remaining;
+                    // Complete the return when reverse commands balance the actual
+                    // forward commands, regardless of translation-IMU drift/gaps.
+                    split.corner_braking |= remaining <= 0;
                     if (split.corner_braking) {
                         if (!stopped) {
                             split.corner_stopped_us = 0;
@@ -208,17 +289,19 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                         if (!split.corner_stopped_us)
                             split.corner_stopped_us = tick.now;
                         if (tick.now - split.corner_stopped_us >= 250000) {
-                            split.corner_imu.zeroVelocity();
                             split.corner_braking = false;
                             split.corner_stopped_us = 0;
                             split.recovery_stage = push ? Stage::CornerReturn : Stage::CornerTurnBack;
+                            split.corner_turn_sample_us = 0;
+                            split.corner_turn_braking = false;
                         }
                     } else {
                         const float error = wrapAngle(split.corner_heading - 1.570796327f - in.heading_rad);
-                        // Slow down as measured distance approaches the endpoint, so
-                        // braking/coasting does not carry the chassis past the target.
-                        const float speed = std::min({t_.approach_speed, t_.rush_near_speed,
-                                                      std::max(.01f, 2.f * remaining)});
+                        // Slow the sent commands near each endpoint. This integral
+                        // is an action budget, not a measurement of physical travel.
+                        float speed = std::min({t_.approach_speed + t_.split_speed_increment_mps,
+                                                t_.rush_near_speed + t_.split_speed_increment_mps,
+                                                std::max(.01f, 2.f * remaining) + t_.split_speed_increment_mps});
                         drive(tick, push ? speed : -speed, std::clamp(error, -.15f, .15f), true);
                         tick.immediate_motion_stop = tick.motion.vx_mps == 0 && tick.motion.wz_rps == 0;
                     }
@@ -233,10 +316,10 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                     }
                     reason_ = split.recovery_direction > 0 ? "pixel_split_ui120_left"
                                                            : "first_trip_split_ui120_right";
-                    drive(tick, 0.f, split.recovery_direction * .3f, true);
+                    drive(tick, 0.f, split.recovery_direction * (.3f + t_.split_wz_increment_rps), true);
                     if (tick.motion.wz_rps != 0) {
                         // This timed split turn has its own speed, beyond the alignment cap.
-                        tick.motion.wz_rps = split.recovery_direction * std::min(.3f, t_.max_wz);
+                        tick.motion.wz_rps = split.recovery_direction * std::min(.3f + t_.split_wz_increment_rps, t_.max_wz);
                         if (!split.recovery_turn_us)
                             split.recovery_turn_us = tick.now;
                         tick.immediate_motion_stop = false;
@@ -299,6 +382,12 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                     for (const auto& reference : split.retreat_objects)
                         reserved.insert(reference.observation.id);
                     bool all_clear = !waiting;
+                    bool image_quiet = true;
+                    const float stop_y = split.upper_corner ? 280.f : 270.f;
+                    // The field trace kept moving for about 200 ms after zero; add image age.
+                    // Use that horizon to taper reverse speed, not to request an early
+                    // stop/restart cycle. Only observed clearance starts the final stop.
+                    const float stop_horizon_s = .20f + (tick.now - in.capture_scene_us) * 1e-6f;
                     split.retreat_reference_id = -1;
                     split.retreat_reference_y = 0;
                     for (auto& reference : split.retreat_objects) {
@@ -310,7 +399,40 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                                 match = &object;
                                 ++matches;
                             }
+                        const auto observeMotion = [&](const PushObservation::CaptureImageObject& object) {
+                            const float y = object.box.y + .5f * object.box.height;
+                            if (split.retreat_braking && std::abs(y - reference.brake_y) > 12.f)
+                                image_quiet = false;
+                            if (in.capture_scene_us <= reference.motion_sample_us)
+                                return; // repeated images cannot create a velocity sample
+                            const bool continuous = reference.motion_sample_us &&
+                                in.capture_scene_us - reference.motion_sample_us <= 200000 &&
+                                object.id == previous.id;
+                            if (continuous && !split.retreat_braking && in.sent_velocity_valid &&
+                                std::isfinite(in.sent_vx_mps) && in.sent_vx_mps < -.001f) {
+                                const float rate = (y - reference.motion_y) * 1000000.f /
+                                    (in.capture_scene_us - reference.motion_sample_us);
+                                if (y > stop_y && rate < 0) {
+                                    // Start tapering one stopping horizon before the
+                                    // coast reserve is needed: lower commands also
+                                    // take time to reach the chassis and image.
+                                    const float speed = -in.sent_vx_mps * (y - stop_y) /
+                                        (-rate * 2.f * stop_horizon_s);
+                                    // Keep the established 0.01 m/s endpoint speed.
+                                    // Latching the cap prevents a flat/noisy next frame
+                                    // from accelerating back to 0.05 m/s near the line.
+                                    split.retreat_speed_mps = std::min(split.retreat_speed_mps,
+                                        std::clamp(speed, .01f, .05f));
+                                }
+                            }
+                            reference.motion_sample_us = in.capture_scene_us;
+                            reference.motion_y = y;
+                        };
                         if (reference.cleared) {
+                            if (matches == 1 && match->complete) {
+                                observeMotion(*match);
+                                previous = *match;
+                            }
                             // A block already observed fully clear may disappear at the
                             // image top while reversing. Do not require it to reappear.
                             const bool known_top_exit = match && !match->complete &&
@@ -375,6 +497,7 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                                 : !match->complete ? "clipped" : "identity_reused";
                             continue;
                         }
+                        observeMotion(*match);
                         previous = *match;
                         const float y = match->box.y + .5f * match->box.height;
                         if (split.retreat_reference_id < 0 || y > split.retreat_reference_y) {
@@ -422,13 +545,41 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                     capture_scene_.blocker_id = -1;
                     capture_scene_.blocker_box = {};
                     capture_scene_.association.clear();
+                    const auto resetBrakeWindow = [&] {
+                        capture_scene_.confirmations = 0;
+                        capture_scene_.stopped_us = tick.now;
+                        capture_scene_.confirm_us = in.capture_scene_us;
+                        for (auto& reference : split.retreat_objects)
+                            reference.brake_y = reference.observation.box.y +
+                                .5f * reference.observation.box.height;
+                    };
+                    if (!split.retreat_braking && all_clear &&
+                        split.margin_stage == Margin::Idle) {
+                        split.retreat_braking = true;
+                        resetBrakeWindow();
+                    }
+                    if (split.retreat_braking) {
+                        interruptMargin();
+                        reason_ = "first_trip_split_retreat_brake";
+                        split.align_stage = "ui140_retreat_brake";
+                        if (!image_quiet)
+                            resetBrakeWindow();
+                        if (!confirmCaptureReview(in))
+                            break;
+                        // If the observed clearance recedes after stopping, continue
+                        // at the reduced speed; a prediction never authorizes a turn.
+                        split.retreat_braking = false;
+                        if (!all_clear)
+                            for (auto& reference : split.retreat_objects)
+                                reference.motion_sample_us = 0;
+                    }
                     if (!all_clear) {
                         interruptMargin();
                         split.margin_stage = Margin::Idle;
                         capture_scene_.confirmations = 0;
                         capture_scene_.stopped_us = tick.now;
                         reason_ = "first_trip_split_ui140_retreat";
-                        drive(tick, -.01f, 0.f, true);
+                        drive(tick, -split.retreat_speed_mps, 0.f, true);
                         tick.immediate_motion_stop = tick.motion.vx_mps == 0;
                         break;
                     }
@@ -458,7 +609,7 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                         split.margin_sent_reverse = reverse_sent;
                         if (split.margin_used_us < t_.split_margin_budget_us) {
                             reason_ = "first_trip_split_margin_retreat";
-                            drive(tick, -t_.split_margin_speed_mps, 0.f, true);
+                            drive(tick, -.05f, 0.f, true);
                             tick.immediate_motion_stop = tick.motion.vx_mps == 0;
                             break;
                         }
@@ -498,6 +649,8 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                     if (!split.upper_corner) split.margin_stage = Margin::Complete;
                     split.recovery_stage = split.upper_corner ? Stage::CornerTurnRight : Stage::Turn;
                     split.corner_heading = in.heading_rad;
+                    split.corner_turn_sample_us = split.corner_stopped_us = 0;
+                    split.corner_turn_braking = false;
                     split.recovery_turn_us = 0;
                     capture_scene_.confirmations = 0;
                     reason_ = "first_trip_split_switch_ui120";
@@ -592,15 +745,10 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                 // evidence for associating against the pre-turn image.
                 capture_scene_.objects.clear();
                 const auto verdict = evaluateCaptureScene(in);
-                // Upper-corner separation returns to PREPARE for normal approach;
-                // it does not need the target to have entered the closing range yet.
-                const bool target_y_inside =
-                    in.target_center_px_valid && in.target_grasp_range_valid &&
-                    !in.capture_area_px.empty() && std::isfinite(in.target_center_px.y) &&
-                    in.target_center_px.y >= 0 &&
-                    (split.upper_corner || in.target_center_px.y >= in.capture_area_px.y) &&
-                    in.target_center_px.y <= in.capture_area_px.y + in.capture_area_px.height;
-                if (verdict == CaptureSceneVerdict::Clear && target_y_inside) {
+                // A clear split returns to PREPARE for normal approach. Requiring
+                // the closing range here would wait at zero speed before the target
+                // can enter it. Normal positioning and preclose review still gate closure.
+                if (verdict == CaptureSceneVerdict::Clear) {
                     reason_ = "first_trip_split_separation_wait";
                     if (confirmCaptureReview(in)) {
                         split.pending = split.vertical_swing = false;
@@ -623,8 +771,7 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                 // A definite post-split risk requires another separation even when
                 // the retained target has moved outside the closing Y range.
                 // That range gates closure, not whether the scene still needs splitting.
-                if (verdict == CaptureSceneVerdict::Incomplete ||
-                    (verdict == CaptureSceneVerdict::Clear && !target_y_inside)) {
+                if (verdict == CaptureSceneVerdict::Incomplete) {
                     reason_ = "first_trip_split_observation_wait";
                     break;
                 }

@@ -5,13 +5,137 @@
 #include <iostream>
 #include <limits>
 namespace rescue {
+namespace {
+constexpr float kSearchUi120SpeedMps = .04f;
+constexpr float kSearchUi120HandoffHeight = .625f; // Y450 at 1280x720; initial field tuning
+constexpr uint64_t kSearchViewHandoffTimeoutUs = 1500000;
+} // namespace
+
+bool PushTask::updateSearchViewHandoff(TaskTick& tick) {
+    auto& handoff = search_phase_.view_handoff_;
+    const auto& in = tick.in;
+    if (phase_ != TaskPhase::Search || recovering_) {
+        handoff = {};
+        return false;
+    }
+    if (!handoff.started_us) {
+        const bool early_line =
+            in.pixel_grasp_image_height_px > 0 &&
+            in.target_center_px.y >= kSearchUi120HandoffHeight * in.pixel_grasp_image_height_px;
+        const bool fresh = in.pixel_grasp_sample_us && in.pixel_grasp_sample_us <= tick.now &&
+                           tick.now - in.pixel_grasp_sample_us <= t_.frame_timeout_us;
+        const bool retry_progress = search_phase_.pixel_handoff_retry_height_ <= 0 ||
+            (in.pixel_grasp_image_height_px > 0 && in.target_center_px.y >=
+                search_phase_.pixel_handoff_retry_height_ * in.pixel_grasp_image_height_px);
+        // Legacy replay observations may supply only the existing handoff flag.
+        if (!retry_progress || !t_.pixel_grasp_enabled || !in.pixel_grasp_view ||
+            in.pixel_grasp_near_view || !in.target_center_px_valid || !fresh ||
+            !candidate(in, tick.now) ||
+            in.target_id != trip_context_.target_id_ || in.label != trip_context_.label_ ||
+            (!early_line && !in.pixel_view_handoff_ready) ||
+            in.camera_pitch_cdeg == kCameraPitchInvalid ||
+            std::abs(int(in.camera_pitch_cdeg) - int(t_.track_pitch_cdeg)) >
+                t_.pitch_tolerance_cdeg)
+            return false;
+        handoff.started_us = tick.now;
+        if (in.pixel_grasp_image_height_px > 0)
+            handoff.retry_height = (in.target_center_px.y +
+                std::max(1.f, t_.pixel_align_brake_motion_px)) / in.pixel_grasp_image_height_px;
+        pixel_alignment_ = {};
+    }
+    tick.immediate_motion_stop = true;
+    if (tick.now - handoff.started_us >= kSearchViewHandoffTimeoutUs ||
+        (search_phase_.pixel_approach_started_us_ &&
+         tick.now - search_phase_.pixel_approach_started_us_ > t_.approach_budget_us)) {
+        // Repeated IDs at the same UI120 position cannot retry an empty/clipped
+        // near view. Resume normal low-speed approach until fresh image progress.
+        if (handoff.near && handoff.retry_height > 0)
+            search_phase_.pixel_handoff_retry_height_ = handoff.retry_height;
+        resumePixelSplitSearch(tick, "pixel_search_handoff_research", true);
+        return true;
+    }
+    const int pitch = pitchWait(in, tick.now);
+    const bool scene_fresh = in.capture_scene_valid && in.capture_scene_us &&
+                             in.capture_scene_us <= tick.now &&
+                             tick.now - in.capture_scene_us <= t_.frame_timeout_us;
+    const auto reset_window = [&] {
+        handoff.frames = 0;
+        handoff.sample_us = handoff.stable_us = 0;
+    };
+    if (pitch <= 0 || !scene_fresh || !captureReviewStopped(in)) {
+        reset_window();
+        // Decelerate through the existing sender ramp while the stationary camera still
+        // supplies fresh scene evidence. Missing target identity does not restart approach.
+        tick.controlled_motion_stop =
+            !handoff.near && pitch > 0 && scene_fresh && in.path_safe && in.opponent_zone_clear &&
+            (!in.directional_clearance_valid || (in.turn_safe && in.arc_safe));
+        tick.immediate_motion_stop = !tick.controlled_motion_stop;
+        reason_ = pitch <= 0     ? "camera_pitch_wait"
+                  : handoff.near ? "pixel_search_handoff_confirm"
+                                 : "pixel_search_handoff_stop";
+        return true;
+    }
+    commandFrame(1, tick.now);
+    const int frame = frameWait(in, 1, tick.now);
+    if (frame < 0) {
+        failStop(tick, "gripper_open_timeout");
+        return true;
+    }
+    if (!frame) {
+        reset_window();
+        reason_ = "gripper_feedback_wait";
+        return true;
+    }
+    if (!handoff.near) {
+        reason_ = "pixel_search_handoff_stop";
+        // Fresh whole-scene observations continue even when the old box leaves UI120.
+        // As in Startup's handoff, this is a stopped-command window, not wheel odometry.
+        if (in.capture_scene_us <= handoff.started_us || in.capture_scene_us <= handoff.sample_us)
+            return true;
+        if (!handoff.frames)
+            handoff.stable_us = in.capture_scene_us;
+        handoff.sample_us = in.capture_scene_us;
+        if (++handoff.frames < t_.pixel_align_stable_frames ||
+            in.capture_scene_us - handoff.stable_us < t_.pixel_align_stable_us)
+            return true;
+        enter(PushState::APPROACH, tick.now, "pixel_center_switch_to_140");
+        search_phase_.approach_pitch_ = t_.near_pitch_cdeg;
+        handoff.near = true;
+        handoff.started_us = tick.now;
+        reset_window();
+        pixel_alignment_ = {};
+        search_entry_ = {};
+        capture_scene_ = {};
+        trip_context_.target_id_ = trip_context_.capture_target_id_ = -1;
+        trip_context_.label_.clear();
+        return true;
+    }
+    // A fresh wanted block in this view is sufficient; no old ID/class linkage.
+    const bool selected = candidate(in, tick.now) &&
+                          (!in.pixel_selection_managed || in.pixel_locked);
+    const bool complete = std::any_of(
+        in.capture_image_objects.begin(), in.capture_image_objects.end(), [&](const auto& object) {
+            return object.id == in.target_id && object.label == in.label && object.complete;
+        });
+    if (in.capture_scene_us <= handoff.started_us || !in.pixel_grasp_near_view || !selected ||
+        !complete || !candidate(in, tick.now) || (in.pixel_selection_managed && !in.pixel_locked) ||
+        !pixelAlign(tick, true, true)) {
+        reason_ = "pixel_search_handoff_confirm";
+        return true;
+    }
+    handoff = {};
+    search_phase_.pixel_handoff_retry_height_ = 0;
+    reason_ = "pixel_search_handoff_ready";
+    return true; // retain zero; the normal near-view entry/selector review runs next tick
+}
+
 // Reconsider a pre-capture UI120 lock only after sustained lack of forward
 // progress and a better complete candidate. A progressing lock remains stable.
 bool PushTask::reselectPixelApproach(TaskTick& tick) {
     auto& watch = search_phase_.pixel_reselection_;
     const auto& in = tick.in;
-    const bool view = in.camera_pitch_stable &&
-        in.camera_pitch_cdeg != kCameraPitchInvalid &&
+    const bool view =
+        in.camera_pitch_stable && in.camera_pitch_cdeg != kCameraPitchInvalid &&
         std::abs(int(in.camera_pitch_cdeg) - int(t_.track_pitch_cdeg)) <= t_.pitch_tolerance_cdeg;
     const bool scene = in.capture_scene_valid && in.capture_scene_us &&
         in.capture_scene_us <= tick.now && tick.now - in.capture_scene_us <= t_.frame_timeout_us;
@@ -106,6 +230,16 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
                               search_phase_.action == SearchAction::SelectCargo ||
                               search_phase_.action == SearchAction::MidApproach ||
                               search_phase_.action == SearchAction::Approach;
+    // The selector has confirmed this lock. Check membership before any discovery,
+    // view handoff or split-search branch can command movement.
+    if (t_.pixel_grasp_enabled && image_search && tick.in.pixel_selection_managed &&
+        tick.in.pixel_locked && tick.in.target_valid && tick.in.target_id >= 0 &&
+        searchTargetRegion(tick.in) == PushObservation::SearchRegion::Inside) {
+        tick.immediate_motion_stop = true;
+        rejected_[tick.in.target_id] = tick.now + t_.blacklist_us;
+        scanAfterClear(tick, "search_target_in_zone");
+        return;
+    }
     if (t_.pixel_grasp_enabled && image_search && reselectPixelApproach(tick))
         return;
     if (t_.pixel_grasp_enabled && search_phase_.action == SearchAction::Approach &&
@@ -113,7 +247,9 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
         search_phase_.approach_pitch_ == t_.track_pitch_cdeg) {
         tick.immediate_motion_stop = true;
         if (tick.now - split.search_started_us > t_.pile_budget_us) {
-            failStop(tick, "pixel_split_search_timeout");
+            // An empty discovery window is recoverable: brake, renew the scene
+            // and selector, then continue searching the same retained cargo class.
+            resumePixelSplitSearch(tick, "pixel_split_search_restart", true);
             return;
         }
         const auto& in = tick.in;
@@ -159,6 +295,49 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
                               std::abs(int(tick.in.camera_pitch_cdeg) - int(t_.far_pitch_cdeg)) <=
                                   t_.pitch_tolerance_cdeg &&
                               !tick.in.pixel_grasp_view && !tick.in.pixel_view_handoff_ready;
+    const auto& in = tick.in;
+    const auto region = searchTargetRegion(in);
+    const bool same_lock = search_phase_.action == SearchAction::Approach &&
+        trip_context_.target_id_ >= 0 && in.target_valid &&
+        in.target_id == trip_context_.target_id_ && in.label == trip_context_.label_;
+    if (same_lock && region == PushObservation::SearchRegion::Inside) {
+        tick.immediate_motion_stop = true;
+        rejected_[in.target_id] = tick.now + t_.blacklist_us;
+        scanAfterClear(tick, "search_target_in_zone");
+        return;
+    }
+    // The deadline belongs to this lock. A geometry dropout cannot renew it.
+    if (search_phase_.action != SearchAction::Approach ||
+        region != PushObservation::SearchRegion::Unknown)
+        search_phase_.far_region_wait_started_us_ = 0;
+    auto& started = search_phase_.far_region_wait_started_us_;
+    if (started && tick.now - started > t_.prepare_budget_us) {
+        tick.immediate_motion_stop = true;
+        rejected_[trip_context_.target_id_] = tick.now + t_.blacklist_us;
+        scanAfterClear(tick, "pixel_far_region_timeout");
+        return;
+    }
+    const bool fresh_region = in.search_region_sample_us &&
+        in.search_region_sample_us <= tick.now &&
+        tick.now - in.search_region_sample_us <= t_.frame_timeout_us;
+    const auto rejected = rejected_.find(in.target_id);
+    const bool region_wait = same_lock && in.pixel_locked && in.camera_pitch_stable &&
+        region == PushObservation::SearchRegion::Unknown &&
+        (fresh_region || (far_tracking && in.target_center_px_valid && in.geometry_valid &&
+            std::isfinite(in.distance_m) && in.distance_m >= 0 &&
+            std::isfinite(in.heading_error) && std::abs(in.heading_error) <= 1.2f &&
+            in.pixel_grasp_sample_us && in.pixel_grasp_sample_us <= tick.now &&
+            tick.now - in.pixel_grasp_sample_us <= t_.frame_timeout_us)) &&
+        !in.target_is_search_cue && targetSelectable(in.label, first_) &&
+        (rejected == rejected_.end() || tick.now >= rejected->second);
+    if (region_wait) {
+        if (!started) started = tick.now;
+        actionProgress().misses = 0;
+        recovery = {};
+        tick.immediate_motion_stop = true;
+        reason_ = "pixel_far_region_wait";
+        return;
+    }
     const bool deceleration_clear = tick.forward_ok && (!tick.in.directional_clearance_valid ||
                                                         (tick.in.turn_safe && tick.in.arc_safe));
     if (!far_tracking || !deceleration_clear || recovery.target_id != trip_context_.target_id_)
@@ -208,6 +387,11 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
                 return;
             enter(PushState::APPROACH, tick.now, "pixel_center_switch_to_120");
             search_phase_.approach_pitch_ = t_.track_pitch_cdeg;
+            trip_context_.target_id_ = trip_context_.capture_target_id_ = -1;
+            trip_context_.label_.clear();
+            search_entry_ = {};
+            pixel_alignment_ = {};
+            capture_scene_ = {};
             return;
         }
         if (search_phase_.action == SearchAction::Approach) {
@@ -281,16 +465,8 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
         if (!accept_pixel_target())
             return;
         if (!tick.in.pixel_grasp_near_view) {
-            // Commit to a stopped view handoff for this target/pitch. Y540 box jitter
-            // must not toggle hold_position and restart the alignment window.
-            // update() resets alignment on missing/stale targets or a changed view.
-            if (tick.in.pixel_view_handoff_ready || pixel_alignment_.holding_position) {
-                if (!pixelAlign(tick, true, true))
-                    return;
-                enter(PushState::APPROACH, tick.now, "pixel_center_switch_to_140");
-                search_phase_.approach_pitch_ = t_.near_pitch_cdeg;
+            if (updateSearchViewHandoff(tick))
                 return;
-            }
             if (!pixelAlign(tick))
                 return;
             commandFrame(1, tick.now);
@@ -304,7 +480,7 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
                 return;
             }
             reason_ = "pixel_center_approach_120";
-            drive(tick, t_.approach_speed, 0);
+            drive(tick, std::min(t_.approach_speed, kSearchUi120SpeedMps), 0);
             return;
         }
         if (!tick.in.target_grasp_range_valid || tick.in.target_grasp_range_past_rear) {
@@ -321,6 +497,13 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
             invalidateEntryPosition();
             reason_ = "gripper_feedback_wait";
             return;
+        }
+        if (search_entry_.review_before_entry) {
+            tick.immediate_motion_stop = true;
+            if (reviewFirstTripCapture(tick, "startup_reselected") ||
+                search_phase_.first_trip_split_.pending)
+                search_entry_.review_before_entry = false;
+            return; // Even a clear review hands motion back on a later tick.
         }
         if (!locateSearchEntry(tick))
             return;

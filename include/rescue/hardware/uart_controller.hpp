@@ -15,14 +15,15 @@
 
 namespace rescue {
 
-// A6执行器反馈解析，支持拆包、粘包和坏帧恢复。
+// A6/A7混合流解析；完整处理A6，仅CRC有效的A7 start=1发布启动时间。
 class SensorPacketParser {
   public:
     bool consume(uint8_t byte, uint64_t received_us, ActuatorFeedback& state);
+    uint64_t latestStartUs() const { return start_us_; }
 
   private:
     std::vector<uint8_t> buffer_;
-    uint64_t last_byte_us_ = 0;
+    uint64_t last_byte_us_ = 0, start_us_ = 0;
 };
 
 // 上位机当前夹爪动作/相机pitch目标相对下位机反馈的判断结果。
@@ -73,6 +74,7 @@ class UARTController {
     FrameSensors feedbackAt(uint64_t capture_us) const;
     void closePort();
 
+    uint64_t latestStartUs() const { return start_us_.load(); }
     uint8_t getLatestCmd() const;
     void setLatestCmd(uint8_t cmd);
 
@@ -140,6 +142,7 @@ class UARTController {
     PitchHistory pitch_history_;
     std::array<int, 2> motor_speeds_{0, 0};
     std::array<int, 2> servo_angles_{0, 0};
+    std::atomic<uint64_t> start_us_{0};
     std::atomic<uint8_t> latest_cmd_{0xAA};
     std::atomic_bool running_{false};
     std::thread reader_;

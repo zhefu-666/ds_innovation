@@ -6,9 +6,11 @@ namespace rescue {
 struct ModelImage {
     cv::Mat rgb;
     float sx = 1, sy = 1;
-    int pad_x = 0, pad_y = 0;
+    float pad_x = 0, pad_y = 0;
 };
 ModelImage prepareModelImage(const cv::Mat& bgr, int size);
+// A_INT8 reference: nominal gain, fractional inverse pads and ties-to-even resize.
+ModelImage prepareExpertPoseImage(const cv::Mat& bgr);
 std::string taskLabel(const std::string& model_label);
 std::vector<SegDetection> decodeModelOutput(const cv::Mat& output,
                                             const ModelImage& image,

@@ -6,6 +6,7 @@
 #include "rescue/hardware/hipnuc_imu.hpp"
 #include "rescue/perception/multi_view_capture.hpp"
 #include "rescue/perception/pixel_selector.hpp"
+#include "rescue/perception/perception_adapter.hpp"
 #include "rescue/hardware/uart_controller.hpp"
 #include "rescue/perception/zone_color.hpp"
 
@@ -58,6 +59,7 @@ class ObservationBuilder {
                             uint64_t frame_sequence,
                             uint64_t timestamp,
                             const ObservationContext& context);
+    void resetForNewRun();
     const HoldDiagnostics& holdDiagnostics() const {
         return capture_.diagnostics();
     }
@@ -73,6 +75,7 @@ class ObservationBuilder {
     SensorFusion& fusion_;
     CaptureMonitor capture_;
     PixelSelector pixel_selector_;
+    StartupPileGuide startup_pile_guide_;
     uint64_t imu_translation_sequence_ = 0;
     uint64_t progress_ref_us_ = 0;
     int progress_total_ = -1;

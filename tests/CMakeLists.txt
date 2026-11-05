@@ -109,7 +109,8 @@ target_link_libraries(rescue_first_trip_capture_review_tests PRIVATE
     rescue_test_task_common rescue_app_config ${OpenCV_LIBS} nlohmann_json::nlohmann_json)
 # Large scenario fixture: avoid GCC IPA optimizer failures; production stays at Release settings.
 target_compile_options(rescue_first_trip_capture_review_tests PRIVATE -O0 -UNDEBUG -Wall -Wextra)
-foreach(scenario dangerous-front-risk supplied-grasp-ranges injured-removal)
+foreach(scenario dangerous-front-risk supplied-grasp-ranges injured-removal postsplit-search search-view-selection
+                 front-split-recovery upper-corner-motion corner-imu-drift corner-turn-brake capture-checkpoint postsplit-approach split-preempt retreat-overshoot retreat-continuity startup-first-grab)
     add_test(NAME rescue_capture_${scenario}
         COMMAND rescue_first_trip_capture_review_tests
             ${PROJECT_SOURCE_DIR}/tests/fixtures/first_trip_20261029_212327_boxes.txt ${scenario})
@@ -161,6 +162,16 @@ set_tests_properties(rescue_observation_builder_zone_sight_tests PROPERTIES TIME
 
 
 rescue_add_task_test(rescue_task_phase_tests task/integration/task_phase_tests.cpp)
+add_test(NAME rescue_search_ui120_speed_tests COMMAND rescue_task_phase_tests --search-ui120-speed)
+add_test(NAME rescue_search_ui120_handoff_tests COMMAND rescue_task_phase_tests --search-ui120-handoff)
+set_tests_properties(rescue_search_ui120_speed_tests rescue_search_ui120_handoff_tests
+    PROPERTIES TIMEOUT 10 LABELS "integration;task")
+add_test(NAME rescue_search_unseen_zone_tests COMMAND rescue_task_phase_tests --search-unseen-zone)
+set_tests_properties(rescue_search_unseen_zone_tests PROPERTIES TIMEOUT 10 LABELS "integration;task")
+add_test(NAME rescue_search_region_builder_tests
+    COMMAND rescue_observation_builder_capture_tests --search-region-builder-only)
+set_tests_properties(rescue_search_region_builder_tests PROPERTIES TIMEOUT 15 LABELS "integration;task;perception")
+
 set_tests_properties(rescue_task_phase_tests PROPERTIES TIMEOUT 10 LABELS "integration;task")
 
 add_executable(rescue_push_tests ${PROJECT_SOURCE_DIR}/tests/task/regression/push_task_tests.cpp
@@ -176,6 +187,10 @@ add_executable(rescue_push_tests ${PROJECT_SOURCE_DIR}/tests/task/regression/pus
     ${PROJECT_SOURCE_DIR}/src/config/config.cpp)
 target_include_directories(rescue_push_tests PRIVATE ${PROJECT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(rescue_push_tests PRIVATE rescue_test_task_common ${OpenCV_LIBS})
+# GCC 13 on the board ICEs in IPA ICF while hashing this large fixture.
+# Disable only that test-file optimization; production retains Release options.
+set_property(SOURCE task/regression/push_task_delivery_cases.cpp APPEND
+    PROPERTY COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU>:-fno-ipa-icf>")
 # These regression tests use assert, including in Release builds.
 target_compile_options(rescue_push_tests PRIVATE -UNDEBUG)
 add_test(NAME rescue_target_selection_tests COMMAND rescue_push_tests --selection-only)
@@ -211,6 +226,19 @@ target_link_libraries(rescue_sensor_protocol_tests PRIVATE ${OpenCV_LIBS} pthrea
 target_compile_options(rescue_sensor_protocol_tests PRIVATE -UNDEBUG)
 add_test(NAME rescue_sensor_protocol_tests COMMAND rescue_sensor_protocol_tests)
 set_tests_properties(rescue_sensor_protocol_tests PROPERTIES TIMEOUT 10)
+
+add_executable(rescue_uart_latency_tests hardware/uart_latency_tests.cpp
+    ${PROJECT_SOURCE_DIR}/src/hardware/motion_link.cpp
+    ${PROJECT_SOURCE_DIR}/src/hardware/uart_controller.cpp
+    ${PROJECT_SOURCE_DIR}/src/control/match_control.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/utils.cpp)
+target_include_directories(rescue_uart_latency_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rescue_uart_latency_tests PRIVATE pthread
+    -Wl,--wrap=tcdrain -Wl,--wrap=write)
+target_compile_options(rescue_uart_latency_tests PRIVATE -UNDEBUG -Wall -Wextra)
+add_test(NAME rescue_uart_latency_tests COMMAND rescue_uart_latency_tests)
+set_tests_properties(rescue_uart_latency_tests PROPERTIES TIMEOUT 5)
 
 if(RESCUE_ENABLE_TELEMETRY)
     add_executable(rescue_telemetry_tests ${PROJECT_SOURCE_DIR}/tests/telemetry/telemetry_tests.cpp
@@ -422,3 +450,106 @@ add_test(NAME rescue_capture_score_tests
     COMMAND rescue_first_trip_capture_review_tests
         ${PROJECT_SOURCE_DIR}/tests/fixtures/first_trip_20261029_212327_boxes.txt capture-score)
 set_tests_properties(rescue_capture_score_tests PROPERTIES TIMEOUT 15 LABELS "integration;task;perception")
+
+
+# Real SDK regression: inference and teardown only; never opens UART, IMU or camera.
+if(RESCUE_ENABLE_RKNN AND
+   EXISTS "${PROJECT_SOURCE_DIR}/models/detect_v5_int8.rknn" AND
+   EXISTS "${PROJECT_SOURCE_DIR}/models/zone_pose_int8.rknn" AND
+   EXISTS "${PROJECT_SOURCE_DIR}/benchmark_results/librknnrt.so")
+    add_executable(rescue_parallel_inference_tests
+        perception/perception_pipeline_tests.cpp
+        ${PROJECT_SOURCE_DIR}/src/app/perception_pipeline.cpp
+        ${PROJECT_SOURCE_DIR}/src/perception/detector.cpp
+        ${PROJECT_SOURCE_DIR}/src/perception/yolo_detector.cpp
+        ${PROJECT_SOURCE_DIR}/src/perception/model_io.cpp
+        ${PROJECT_SOURCE_DIR}/src/perception/zone_keypoints.cpp
+        ${PROJECT_SOURCE_DIR}/src/core/utils.cpp)
+    target_include_directories(rescue_parallel_inference_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(rescue_parallel_inference_tests PRIVATE
+        rescue_rknn rescue_pose_smoothing ${OpenCV_LIBS} pthread)
+    target_compile_options(rescue_parallel_inference_tests PRIVATE -UNDEBUG -Wall -Wextra)
+    add_test(NAME rescue_parallel_inference_tests COMMAND rescue_parallel_inference_tests
+        ${PROJECT_SOURCE_DIR}/models/detect_v5_int8.rknn
+        ${PROJECT_SOURCE_DIR}/models/zone_pose_int8.rknn
+        ${PROJECT_SOURCE_DIR}/benchmark_results/librknnrt.so
+        ${PROJECT_SOURCE_DIR}/tests/samples/ui120-left-half.jpg)
+    add_test(NAME rescue_parallel_inference_cli COMMAND rescue_upper_host
+        --config ${PROJECT_SOURCE_DIR}/config/project.json
+        --calibration ""
+        --detect-image ${PROJECT_SOURCE_DIR}/tests/samples/ui120-left-half.jpg
+        --no-show --parallel-infer)
+    set_tests_properties(rescue_parallel_inference_tests rescue_parallel_inference_cli
+        PROPERTIES TIMEOUT 30 LABELS "integration;perception"
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;ASAN_OPTIONS=detect_leaks=0:detect_stack_use_after_return=0;UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+endif()
+
+add_executable(rescue_task_revision_tests
+    perception/task_revision_tests.cpp
+    ${PROJECT_SOURCE_DIR}/src/control/controlled_field.cpp
+    ${PROJECT_SOURCE_DIR}/src/geometry/zone_geometry.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/perception_adapter.cpp)
+target_link_libraries(rescue_task_revision_tests PRIVATE rescue_test_task_common)
+# GCC 13 on the board ICEs in the fixture's GIMPLE PRE pass at -O3.
+# Production and the shared task implementation retain Release optimization.
+target_compile_options(rescue_task_revision_tests PRIVATE -O0 -UNDEBUG -Wall -Wextra)
+foreach(scenario startup score transport reject)
+    add_test(NAME rescue_revision_${scenario} COMMAND rescue_task_revision_tests ${scenario})
+    set_tests_properties(rescue_revision_${scenario} PROPERTIES TIMEOUT 15 LABELS "regression;task;perception")
+endforeach()
+
+add_test(NAME rescue_transport_inspected_lifecycle
+    COMMAND rescue_carry_task_integration_tests --transport-inspection)
+set_tests_properties(rescue_transport_inspected_lifecycle PROPERTIES TIMEOUT 15 LABELS "integration;task")
+
+# Keep large synthetic fixtures out of GCC 13's failing O3 passes on the
+# board (observation builder and carry integration); production stays optimized.
+set_source_files_properties(app/observation_builder_capture_tests.cpp
+    task/integration/carry_task_integration_tests.cpp
+    PROPERTIES COMPILE_OPTIONS "-O0")
+
+add_executable(rescue_pose_smoothing_tests perception/pose_smoothing_tests.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/zone_keypoints.cpp)
+target_include_directories(rescue_pose_smoothing_tests PRIVATE ${PROJECT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rescue_pose_smoothing_tests PRIVATE rescue_pose_smoothing rescue_rknn ${OpenCV_LIBS})
+target_compile_options(rescue_pose_smoothing_tests PRIVATE -UNDEBUG -Wall -Wextra)
+add_test(NAME rescue_pose_smoothing_tests COMMAND rescue_pose_smoothing_tests)
+
+add_executable(rescue_dual_expert_pose_tests
+    perception/dual_expert_pose_tests.cpp
+    ${PROJECT_SOURCE_DIR}/src/app/perception_pipeline.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/detector.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/yolo_detector.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/model_io.cpp
+    ${PROJECT_SOURCE_DIR}/src/perception/zone_keypoints.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/utils.cpp)
+target_include_directories(rescue_dual_expert_pose_tests PRIVATE ${PROJECT_SOURCE_DIR}/include ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(rescue_dual_expert_pose_tests PRIVATE rescue_rknn rescue_pose_smoothing nlohmann_json::nlohmann_json ${OpenCV_LIBS} pthread)
+target_compile_options(rescue_dual_expert_pose_tests PRIVATE -UNDEBUG -Wall -Wextra)
+add_test(NAME rescue_dual_expert_pose_tests COMMAND rescue_dual_expert_pose_tests)
+
+if(RESCUE_ENABLE_RKNN AND EXISTS "${PROJECT_SOURCE_DIR}/models/a_int8_20261105/A_INT8_confidence_fixed_EXPERIMENTAL.rknn")
+    add_test(NAME rescue_dual_expert_pose_cli COMMAND rescue_upper_host
+        --config ${PROJECT_SOURCE_DIR}/config/project.json --calibration ""
+        --pose-model ${PROJECT_SOURCE_DIR}/models/a_int8_20261105/A_INT8_confidence_fixed_EXPERIMENTAL.rknn
+        --detect-image ${PROJECT_SOURCE_DIR}/models/a_int8_20261105/fixtures/near_f000000.png
+        --pose-preview overlay --no-show --parallel-infer)
+    set_tests_properties(rescue_dual_expert_pose_cli PROPERTIES TIMEOUT 30 LABELS "integration;perception")
+endif()
+
+# Validate the configured default with the real NPU, without opening devices.
+if(RESCUE_ENABLE_RKNN AND EXISTS "${PROJECT_SOURCE_DIR}/models/a_rawxy_20261105/A_rawxy_INT8_EXPERIMENTAL.rknn")
+    add_test(NAME rescue_rawxy_pose_cli COMMAND rescue_upper_host
+        --config ${PROJECT_SOURCE_DIR}/config/project.json --calibration ""
+        --detect-image ${PROJECT_SOURCE_DIR}/models/a_int8_20261105/fixtures/near_f000000.png
+        --pose-preview overlay --no-show --parallel-infer)
+    set_tests_properties(rescue_rawxy_pose_cli PROPERTIES TIMEOUT 30 LABELS "integration;perception"
+        PASS_REGULAR_EXPRESSION "base_xy_raw")
+endif()
+
+# A7 repeat-start acceptance: pseudo-terminal only, no physical devices.
+add_test(NAME rescue_a7_restart_wire_tests COMMAND rescue_uart_latency_tests --a7-restart-only)
+add_test(NAME rescue_a7_restart_task_tests COMMAND rescue_task_phase_tests --a7-reset)
+set_tests_properties(rescue_a7_restart_wire_tests rescue_a7_restart_task_tests
+    PROPERTIES TIMEOUT 10 LABELS "integration;task;protocol")

@@ -33,14 +33,4 @@ float orangeSilhouetteAspect(const cv::Mat& bgr, const cv::Rect& box) {
     return w > 0 ? float(h) / float(w) : -1.f;
 }
 
-float silhouetteAdjustedDiff(float pose_diff, float aspect, const SilhouetteRule& rule) {
-    if (!(aspect > 0) || !std::isfinite(aspect))
-        return pose_diff;
-    if (aspect < rule.lying_below)
-        return std::min(pose_diff, rule.lying_diff);
-    if (aspect > rule.upright_above)
-        return std::max(pose_diff, rule.upright_diff);
-    return pose_diff;
-}
-
 } // namespace rescue

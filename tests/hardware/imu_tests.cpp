@@ -268,6 +268,83 @@ int main() {
         assert(imu.snapshot().backward_times == 0);
     }
     close(master);
+    // A USB receive stall can leave the tty open without POLLERR. Reopening the
+    // same port must recover, without exposing cached measurements as fresh.
+    char recovery_dir[] = "/tmp/rescue-imu-recovery-XXXXXX";
+    assert(mkdtemp(recovery_dir));
+    const std::string recovery_port = std::string(recovery_dir) + "/imu";
+    master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+    assert(symlink(ptsname(master), recovery_port.c_str()) == 0);
+    {
+        HipnucImu imu(recovery_port, 115200, 60);
+        timeAt(frame, 10000);
+        assert(write(master, frame.data(), frame.size()) == 82);
+        waitUntil([&] {
+            return imu.snapshot().fresh;
+        });
+        const auto before = imu.snapshot();
+        // Leave a partial frame pending when the stream stops.
+        assert(write(master, frame.data(), 17) == 17);
+        waitUntil([&] {
+            return !imu.snapshot().fresh;
+        });
+        waitUntil([&] {
+            return imu.snapshot().reconnects == 1 && imu.snapshot().connected;
+        });
+        const auto reopened = imu.snapshot();
+        assert(!reopened.fresh && reopened.sample.sequence == 0);
+        assert(!reopened.sample.measurements_valid);
+        assert(reopened.sample.received_us == before.sample.received_us);
+        assert(!imu.snapshotAt(before.sample.received_us).fresh);
+        assert(imu.samplesAfter(0).empty());
+        assert(reopened.bytes >= before.bytes && reopened.valid_frames >= before.valid_frames);
+        timeAt(frame, 10010);
+        assert(write(master, frame.data(), frame.size()) == 82);
+        waitUntil([&] {
+            return imu.snapshot().fresh;
+        });
+        const auto resumed = imu.snapshot();
+        assert(resumed.sample.sequence > before.sample.sequence);
+        assert(resumed.sample.device_time_ms == 10010);
+        uint8_t output;
+        assert(read(master, &output, 1) < 0); // Recovery sends no serial commands.
+
+        // A disappearing by-id path must remain invalid while open retries fail,
+        // then recover through the same path when the device appears again.
+        assert(unlink(recovery_port.c_str()) == 0);
+        close(master);
+        waitUntil([&] {
+            return !imu.snapshot().connected;
+        });
+        const auto disconnected = imu.snapshot();
+        assert(!disconnected.fresh && !disconnected.sample.measurements_valid);
+        assert(disconnected.sample.received_us == resumed.sample.received_us);
+        waitUntil([&] {
+            return imu.snapshot().io_errors >= 2;
+        });
+        assert(!imu.snapshot().connected && !imu.snapshot().fresh);
+        master = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+        assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+        assert(symlink(ptsname(master), recovery_port.c_str()) == 0);
+        waitUntil([&] {
+            return imu.snapshot().reconnects == 2 && imu.snapshot().connected;
+        });
+        assert(!imu.snapshot().fresh);
+        // A device restart may reset its clock; never integrate across sessions.
+        timeAt(frame, 10);
+        assert(write(master, frame.data(), frame.size()) == 82);
+        waitUntil([&] {
+            return imu.snapshot().fresh;
+        });
+        assert(imu.snapshot().sample.device_time_ms == 10);
+        assert(imu.snapshot().sample.sequence > resumed.sample.sequence);
+        assert(imu.samplesAfter(resumed.sample.sequence).size() == 1);
+        assert(read(master, &output, 1) < 0);
+    }
+    close(master);
+    assert(unlink(recovery_port.c_str()) == 0);
+    assert(rmdir(recovery_dir) == 0);
     const char* args[] = {
         "test", "--dry-run", "--imu", "--imu-port", "/dev/ttyUSB0", "--imu-timeout-ms", "150"};
     auto config = parseArgs(7, const_cast<char**>(args));
@@ -307,7 +384,7 @@ int main() {
         {"test", "--hardware", "--imu", "--pitch-feedback", "--calibration", "camera.yaml"});
     invalidConfig({"test", "--hardware", "--imu", "--push-replay", "push.json"});
     invalidConfig(
-        {"test", "--hardware", "--imu", "--port", "/dev/ttyUSB0"}); // same port as the IMU
+        {"test", "--hardware", "--imu", "--imu-port", "/dev/ttyUSB0", "--port", "/dev/ttyUSB0"}); // same port as the IMU
     invalidConfig({"test", "--pitch-presets", "0,2500"});           // FAR,TRACK,NEAR
     invalidConfig({"test", "--pitch-presets", "2500,0,2500"});      // not ordered
     invalidConfig({"test", "--pitch-presets", "0,2500,4001"});      // beyond the servo
@@ -326,5 +403,6 @@ int main() {
         assert(c.hardware && !c.dry_run && !c.pitch_feedback);
     }
     std::cout << "HI91 real fixture, mounting to base_link, CRC, recovery, SI, PTY freshness, "
-                 "duplicate/backward timestamps, disconnect and configuration passed\n";
+                 "duplicate/backward timestamps, silent-stall reopen, reconnect and configuration "
+                 "passed\n";
 }

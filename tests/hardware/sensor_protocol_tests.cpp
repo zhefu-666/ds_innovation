@@ -1,6 +1,8 @@
+#include "rescue/app/runtime.hpp"
 #include "rescue/hardware/uart_controller.hpp"
 #include "rescue/hardware/motion_link.hpp"
 #include <cstring>
+#include <iostream>
 #include <vector>
 #include "rescue/core/utils.hpp"
 #include <cassert>
@@ -105,6 +107,42 @@ int main() {
     Frame up{};
     packFeedback(up.data(), 1, 2, -1500);
     assert((up == Frame{0xA6, 0x01, 0x02, 0x69, 0x00, 0xA2, 0x75, 0x0A}));
+    {
+        SensorPacketParser mixed;
+        ActuatorFeedback observed;
+        std::array<uint8_t, 5> start{0xA7, 1, 0, 0, 0x0A};
+        const auto crc = UARTController::calculateCRC16(start.data(), 0, 1);
+        start[2] = crc & 255; start[3] = crc >> 8;
+        auto bad = start; bad[2] ^= 1;
+        for (auto byte : bad) mixed.consume(byte, 1000, observed);
+        assert(!mixed.latestStartUs());
+        bad = start; bad[4] = 0x0D;
+        for (auto byte : bad) mixed.consume(byte, 2000, observed);
+        assert(!mixed.latestStartUs());
+        for (int i = 0; i < 4; ++i) mixed.consume(start[i], 3000, observed);
+        assert(!mixed.latestStartUs());
+        mixed.consume(start[4], 3100, observed);
+        assert(mixed.latestStartUs() == 3100 && !observed.valid);
+        Frame embedded{};
+        embedded[0] = 0xA6;
+        std::copy(start.begin(), start.end(), embedded.begin() + 1);
+        auto a6crc = UARTController::calculateCRC16(embedded.data(), 0, 4);
+        embedded[5] = a6crc & 255; embedded[6] = a6crc >> 8; embedded[7] = 10;
+        for (auto byte : embedded) mixed.consume(byte, 4000, observed);
+        assert(mixed.latestStartUs() == 3100 && observed.timestamp_us == 4000);
+        auto zero = start; zero[1] = 0;
+        auto zero_crc = UARTController::calculateCRC16(zero.data(), 0, 1);
+        zero[2] = zero_crc & 255; zero[3] = zero_crc >> 8;
+        for (auto byte : zero) mixed.consume(byte, 5000, observed);
+        assert(mixed.latestStartUs() == 3100);
+        for (auto byte : frame) mixed.consume(byte, 6000, observed);
+        for (auto byte : start) mixed.consume(byte, 6000, observed);
+        for (auto byte : moving) mixed.consume(byte, 6000, observed);
+        assert(mixed.latestStartUs() == 6000 && observed.gripper_open == 0);
+        mixed.consume(start[0], 7000, observed);
+        for (size_t i = 1; i < start.size(); ++i) mixed.consume(start[i], 200000, observed);
+        assert(mixed.latestStartUs() == 6000);
+    }
     SensorPacketParser parser;
     ActuatorFeedback state;
     auto feed = [&](const auto& bytes, uint64_t time) {
@@ -610,7 +648,41 @@ int main() {
             assert(std::abs(stats.wire_wz_rps - .4f * .177f) < 1e-6f);
             compensated.submit(target); // repeated sends must never scale the ramp state
             check(collect(50), .4f * .177f);
-            // Startup/Search/Capture raise the request by 1/K, then still apply K.
+            // Own-zone transport scan: 0.6 business rad/s must reach the UART as 0.1062.
+            target.wz_rps = .6f;
+            compensated.submit(target);
+            const auto scan_packets = collect(90);
+            assert(!scan_packets.empty());
+            assert(std::abs(wz(scan_packets.back()) - .1062f) < 1e-6f);
+            stats = compensated.stats();
+            assert(std::abs(stats.sent_wz_rps - .6f) < 1e-6f);
+            assert(std::abs(stats.precomp_wz_rps - .6f) < 1e-6f);
+            assert(std::abs(stats.wire_wz_rps - .1062f) < 1e-6f);
+            // Use the same phase policy as Runtime and decode real PTY packets.
+            // Transport -> Search must not restore the old unscaled scan speed.
+            for (TaskPhase phase : {TaskPhase::Transport, TaskPhase::Search,
+                                   TaskPhase::Startup, TaskPhase::Capture, TaskPhase::Search}) {
+                const bool legacy = phase == TaskPhase::Startup || phase == TaskPhase::Capture;
+                for (float scan_wz : {.6f, -.6f}) {
+                    target.wz_rps = scan_wz;
+                    compensated.submit(target, false, app::preserveAngularTuning(phase));
+                    const auto packets = collect(90);
+                    assert(!packets.empty());
+                    const float expected = legacy ? scan_wz : scan_wz * .177f;
+                    assert(std::abs(wz(packets.back()) - expected) < 1e-6f);
+                    stats = compensated.stats();
+                    assert(std::abs(stats.sent_wz_rps - scan_wz) < 1e-6f);
+                    assert(std::abs(stats.precomp_wz_rps - (legacy ? scan_wz / .177f : scan_wz)) < 1e-6f);
+                    assert(std::abs(stats.wire_wz_rps - expected) < 1e-6f);
+                    // Periodic resends retain the phase policy without scaling ramp state again.
+                    const auto repeated = collect(25);
+                    assert(!repeated.empty());
+                    assert(std::abs(wz(repeated.back()) - expected) < 1e-6f);
+                }
+            }
+            std::cout << "PASS phase UART scaling: Search/Transport 0.6 -> 0.1062, Startup/Capture preserved\n";
+            target.wz_rps = .4f;
+            // Startup/Capture raise the request by 1/K, then still apply K.
             // Periodic resends keep this choice with the command; transport restores gain 1.
             for (float legacy_wz : {.3f, -.3f, .1f}) {
                 target.wz_rps = legacy_wz;

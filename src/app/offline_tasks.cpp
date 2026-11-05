@@ -175,6 +175,12 @@ std::optional<int> runOfflineTask(const Config& config, const TaskTuning& tuning
                       << " confidence=" << d.confidence << " box=" << d.box.x << "," << d.box.y
                       << "," << d.box.width << "," << d.box.height << "\n";
         if (result.pose_ran) {
+            std::cout << "[POSE_ROUTE] dual_expert=" << result.pose_route.dual_expert
+                      << " weight_far=" << result.pose_route.weight_far
+                      << " area=" << result.pose_route.max_area_fraction
+                      << " counts=" << result.pose_route.counts[0] << ","
+                      << result.pose_route.counts[1] << " reason=" << result.pose_route.reason
+                      << "\n";
             printZone(result.halves,
                       zoneHalvesToKeypoints(result.halves, config.pose_keypoint_confidence));
             ZoneColorClassifier colors(config.zone_color_file.empty()
@@ -186,6 +192,15 @@ std::optional<int> runOfflineTask(const Config& config, const TaskTuning& tuning
                       << " verified=" << identity.verified
                       << " own=" << (identity.verified && identity.color == config.team)
                       << " reason=" << identity.reason << "\n";
+        }
+        if (result.preview_enabled) {
+            std::cout << "[POSE_PREVIEW] mode=" << config.pose_smoothing_preview
+                      << " ok=" << result.display.ok << " frame=" << result.display.frame_id
+                      << " measurement_us=" << result.display.measurement_us
+                      << " control=raw error=" << result.display.error << "\n";
+            for (int c = 0; c < 2; ++c)
+                std::cout << "[POSE_NMS] class=" << c
+                          << " candidates=" << result.pose_metadata[c].nms_candidates << "\n";
         }
         std::cout << "[PERF] detect_ms=" << result.detect_ms << " pose_ms=" << result.pose_ms
                   << " total_ms=" << result.total_ms << " parallel=" << config.parallel_inference

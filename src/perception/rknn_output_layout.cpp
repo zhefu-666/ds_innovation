@@ -1,4 +1,5 @@
 #include "rescue/perception/rknn_output_layout.hpp"
+#include "rescue/perception/rawxy_to_26.hpp"
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -31,8 +32,8 @@ RknnOutputLayout validateRknnOutputLayout(const std::string& model,
                                           const std::vector<std::vector<uint32_t>>& dims) {
     RknnOutputLayout layout;
     layout.dims = dims;
-    if (dims.empty() || (dims.size() != 1 && dims.size() != 2 && dims.size() != 4))
-        throw std::runtime_error("Expected one, two or four RKNN outputs: " + model);
+    if (dims.empty() || (dims.size() != 1 && dims.size() != 2 && dims.size() != 4 && dims.size() != 5))
+        throw std::runtime_error("Expected one, two, four or five RKNN outputs: " + model);
     for (const auto& shape : dims) {
         if (shape.empty() || shape[0] != 1)
             throw std::runtime_error("Expected batch-one RKNN output: " + model);
@@ -61,11 +62,28 @@ RknnOutputLayout validateRknnOutputLayout(const std::string& model,
         return layout;
     }
 
+    if (dims.size() == 5) {
+        const uint32_t channels[] = {4, 2, 8, 8, 4};
+        for (size_t i = 0; i < dims.size(); ++i)
+            requireDims(model, dims[i], {1, channels[i], 8400});
+        layout.channels = 26;
+        layout.anchors = 8400;
+        return layout;
+    }
+
     const uint32_t anchors = dims[0].size() == 3 ? dims[0][2] : 0;
     if (anchors == 0)
         throw std::runtime_error("Expected [1,4,N] pose boxes first: " + model);
     requireDims(model, dims[0], {1, 4, anchors});
     requireDims(model, dims[1], {1, 2, anchors});
+    if (dims[2] == std::vector<uint32_t>{1, 16, anchors}) {
+        requireDims(model, dims[3], {1, 4, anchors});
+        if (anchors != 8400)
+            throw std::runtime_error("Dual-expert pose requires 8400 anchors: " + model);
+        layout.channels = 26;
+        layout.anchors = static_cast<int>(anchors);
+        return layout;
+    }
     requireDims(model, dims[2], {1, 4, 2, anchors});
     requireDims(model, dims[3], {1, 4, 1, anchors});
     layout.channels = 18;
@@ -94,7 +112,19 @@ cv::Mat mergeRknnOutputBranches(const std::vector<cv::Mat>& branches) {
     float* dst = result.ptr<float>();
     const size_t anchors = static_cast<size_t>(layout.anchors);
 
-    if (branches.size() != 4) {
+    if (branches.size() == 5) {
+        std::array<const float*, 5> buffers{};
+        std::array<size_t, 5> elements{};
+        for (size_t i = 0; i < branches.size(); ++i) {
+            buffers[i] = branches[i].ptr<float>();
+            elements[i] = branches[i].total();
+        }
+        const auto merged = pose_rawxy_to_26(buffers, elements);
+        std::memcpy(dst, merged.data(), merged.size() * sizeof(float));
+        return result;
+    }
+
+    if (branches.size() != 4 || layout.channels == 26) {
         size_t offset = 0;
         for (const auto& branch : branches) {
             const size_t count = branch.total();

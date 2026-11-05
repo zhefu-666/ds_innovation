@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("seconds must be positive");
         std::signal(SIGINT, stop);
         std::signal(SIGTERM, stop);
-        rescue::HipnucImu imu(argc > 1 ? argv[1] : "/dev/ttyUSB0",
+        rescue::HipnucImu imu(argc > 1 ? argv[1] : "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0",
                               argc > 2 ? std::stoi(argv[2]) : 115200);
         const auto begin = rescue::imuNowUs();
         uint64_t sequence = 0;

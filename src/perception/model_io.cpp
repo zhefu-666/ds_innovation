@@ -46,6 +46,31 @@ ModelImage prepareModelImage(const cv::Mat& bgr, int size) {
     }
     return out;
 }
+ModelImage prepareExpertPoseImage(const cv::Mat& bgr) {
+    if (bgr.empty() || bgr.type() != CV_8UC3)
+        throw std::runtime_error("Expected nonempty BGR uint8 image");
+    const double gain = std::min(640. / bgr.cols, 640. / bgr.rows);
+    const int w = int(std::nearbyint(bgr.cols * gain));
+    const int h = int(std::nearbyint(bgr.rows * gain));
+    if (w < 1 || h < 1)
+        throw std::runtime_error("Expert pose resized image is empty");
+    ModelImage image;
+    image.sx = image.sy = float(gain);
+    image.pad_x = float(640 - w) / 2;
+    image.pad_y = float(640 - h) / 2;
+    cv::Mat resized, canvas;
+    cv::resize(bgr, resized, {w, h}, 0, 0, cv::INTER_LINEAR);
+    cv::copyMakeBorder(resized,
+                       canvas,
+                       int(std::nearbyint(image.pad_y - .1)),
+                       int(std::nearbyint(image.pad_y + .1)),
+                       int(std::nearbyint(image.pad_x - .1)),
+                       int(std::nearbyint(image.pad_x + .1)),
+                       cv::BORDER_CONSTANT,
+                       cv::Scalar(114, 114, 114));
+    cv::cvtColor(canvas, image.rgb, cv::COLOR_BGR2RGB);
+    return image;
+}
 std::vector<SegDetection> decodeModelOutput(const cv::Mat& output,
                                             const ModelImage& image,
                                             cv::Size original,

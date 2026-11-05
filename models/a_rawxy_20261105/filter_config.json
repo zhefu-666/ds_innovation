@@ -1,0 +1,11 @@
+{
+  "coordinate_space": "640 square letterbox pixels",
+  "min_cutoff_hz": 1.2,
+  "max_cutoff_hz": 8.0,
+  "beta_hz_per_pixel_per_second": 0.016,
+  "derivative_cutoff_hz": 1.0,
+  "max_gap_seconds": 0.2,
+  "class_box_reset_iou": 0.2,
+  "visibility": 0.5,
+  "detection": 0.5
+}

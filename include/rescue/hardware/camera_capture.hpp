@@ -32,6 +32,7 @@ class CameraCapture {
     bool start();
     void stop();
     bool latest(CameraFrame& out) const;
+    // Wait for a newer frame no older than timeout_ms; refreshes share one deadline.
     bool waitNext(uint64_t after, CameraFrame& out, int timeout_ms);
     bool isRunning() const {
         return running_.load();

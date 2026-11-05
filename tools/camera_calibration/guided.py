@@ -534,7 +534,7 @@ def main():
     parser.add_argument('--mode', choices=('intrinsics', 'handeye'), default='intrinsics',
                         help='handeye: fixed board + rigid camera/IMU multi-axis rotation, AX=XB rotation only')
     parser.add_argument('--intrinsics', type=Path, default=ROOT/'config/camera.yaml')
-    parser.add_argument('--imu-port', default='/dev/ttyUSB0')
+    parser.add_argument('--imu-port', default='/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_7a068e3dffefef1180ad4f5a6d9880ab-if00-port0')
     parser.add_argument('--imu-baud', type=int, default=115200)
     parser.add_argument('--imu-recorder', type=Path, default=ROOT/'build-release/rescue_imu_record')
     parser.add_argument('--camera-time-offset-ms', type=float, default=0.,
