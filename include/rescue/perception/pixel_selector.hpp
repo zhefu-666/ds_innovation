@@ -265,7 +265,7 @@ class PixelSelector {
                                    std::abs(int(pitch) - int(range.pitch_cdeg)) <=
                                        near_config->pitch_tolerance_cdeg;
                         });
-        std::map<int, int> priority; // 0: complete inside, 1: complete outside, 2: unselectable.
+        std::map<int, int> priority; // complete inside/outside, detected clipped fallback, uncalibrated
         std::ostringstream candidates;
         std::set<int> geo_ok;
         std::map<int, cv::Point2f> centers;
@@ -323,7 +323,7 @@ class PixelSelector {
                 const bool calibrated = range != near_config->grasp_center_ranges.end();
                 const bool complete = captureBoxComplete(d.box, size);
                 const bool inside = calibrated && range->containsCenter(d.box);
-                const int rank = calibrated && complete ? (inside ? 0 : 1) : 2;
+                const int rank = !calibrated ? 3 : complete ? (inside ? 0 : 1) : 2;
                 priority[d.track_id] = rank;
                 candidates << " id=" << d.track_id << ":inside=" << inside
                            << ",complete=" << complete << ",priority=" << rank
@@ -357,11 +357,11 @@ class PixelSelector {
         }
         if (near_view) {
             if (locked_ < 0) {
-                int rank = 2;
+                int rank = 3;
                 for (const auto& [id, v] : values)
                     rank = std::min(rank, priority[id]);
                 for (auto it = values.begin(); it != values.end();)
-                    if (rank == 2 || priority[it->first] != rank)
+                    if (rank == 3 || priority[it->first] != rank)
                         it = values.erase(it);
                     else
                         ++it;

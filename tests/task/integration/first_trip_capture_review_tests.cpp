@@ -119,7 +119,11 @@ struct SceneRig {
             in.gripper_closed_observed = task.frame_raised_ == 0;
         }
         if (managed_selection) {
-            selector.setCaptureLoad(out.capture_keep_inventory);
+            const bool preparing = out.phase == TaskPhase::Capture &&
+                out.capture_action == CaptureAction::Prepare && !out.recovering;
+            Inventory selection_load = out.capture_keep_inventory;
+            if (preparing) { selection_load = {}; selection_load.add(task.targetLabel()); }
+            selector.setCaptureLoad(selection_load);
             if (out.pixel_selection_paused)
                 selector.reset();
             selector.syncSplitSelection(out.split_target_reselecting,
@@ -129,10 +133,10 @@ struct SceneRig {
             else if (!out.split_target_reselecting)
                 selector.syncTaskState(
                     task.state_, task.trip_context_.target_id_, task.trip_context_.label_,
-                    task.phase_ == TaskPhase::Search && !task.recovering_ &&
+                    preparing || (task.phase_ == TaskPhase::Search && !task.recovering_ &&
                         task.search_phase_.action != SearchAction::Prepare &&
                         task.search_phase_.action != SearchAction::TurnAway &&
-                        task.search_phase_.action != SearchAction::Recover);
+                        task.search_phase_.action != SearchAction::Recover));
             selection = selector.update(objects,
                                         {1280, 720},
                                         in.camera_pitch_cdeg,
@@ -1083,24 +1087,87 @@ void postcloseRejectsTwoWithoutSuccessOrMotion() {
     std::cout << "PASS post-close rejection credits no success and stops before local splitting\n";
 }
 
-void postcloseCannotForgetOriginalNeighbor() {
-    SceneRig rig;
-    rig.risk();
-    rig.step();
-    rig.task.setSinglePhase("capture");
-    rig.task.enter(PushState::VERIFY_CAPTURE, rig.in.now_us, "postclose_missing_fixture");
-    rig.task.frame_raised_ = 0;
-    rig.objects.pop_back();
-    for (int i = 0; i < 300 && rig.out.run_status != RunStatus::Fault; ++i) {
+void postcloseUsesOnlyHeldCargo() {
+    for (bool outside_visible : {false, true}) {
+        SceneRig rig;
+        auto config = calibration();
+        config.pixel_center_membership = true;
+        rig.monitor = CaptureMonitor(config);
+        rig.objects = {detection(1, {600, 350, 80, 80}), detection(2, {600, 150, 80, 80})};
+        rig.objects[1].label = "core_supply";
         rig.step();
-        assert(rig.out.capture_evidence == CaptureEvidence::None);
-        assert(stopped(rig.out.motion));
+        // Remember an unwanted core in the approach path, outside the jaw.
+        rig.task.evaluateCaptureScene(rig.in);
+        assert(rig.task.capture_scene_.objects.size() == 2);
+        rig.task.enter(PushState::VERIFY_CAPTURE, rig.in.now_us, "held_only_fixture");
+        rig.task.frame_raised_ = 0;
+        rig.task.trip_context_.pending_ = inv(1);
+        if (!outside_visible)
+            rig.objects.pop_back();
+        bool verified = false;
+        for (int i = 0; i < 16 && !verified; ++i) {
+            rig.step();
+            assert(rig.in.held == inv(1));
+            assert(rig.task.frame_raised_ == 0);
+            assert(!rig.task.search_phase_.first_trip_split_.pending);
+            assert(stopped(rig.out.motion));
+            verified = rig.out.capture_evidence == CaptureEvidence::Verified;
+        }
+        assert(verified && rig.out.state == PushState::CARRY);
+        assert(rig.out.phase == TaskPhase::Transport && rig.out.final_validation == "passed");
     }
-    assert(rig.out.run_status == RunStatus::Fault && rig.out.final_validation == "failed");
-    assert(rig.out.failure_source == "postclose_verification");
-    assert(rig.out.original_reason.find("association_ambiguous") != std::string::npos);
-    std::cout << "PASS postclose retains original neighbor and rejects missing evidence\n";
+    std::cout << "PASS postclose transports the wanted held block despite visible or missing "
+                 "outside core\n";
 }
+
+void postcloseOutsideBoxesDoNotBlockHeldEvidence() {
+    SceneRig rig;
+    auto config = calibration();
+    config.pixel_center_membership = true;
+    config.occlusion_iou = .01f;
+    rig.monitor = CaptureMonitor(config);
+    rig.objects = {detection(1, {600, 240, 80, 200}), detection(2, {600, 100, 80, 180})};
+    rig.objects[1].label = "core_supply"; // centre Y190 is outside the core jaw range
+    rig.task.enter(PushState::VERIFY_CAPTURE, rig.in.now_us, "outside_box_overlap_fixture");
+    rig.task.frame_raised_ = 0;
+    rig.task.trip_context_.pending_ = inv(1);
+    for (int i = 0; i < 16 && rig.out.state != PushState::CARRY; ++i) {
+        rig.step();
+        assert(rig.in.held == inv(1));
+        assert(stopped(rig.out.motion) && rig.task.frame_raised_ == 0);
+    }
+    assert(rig.in.held_complete && rig.out.state == PushState::CARRY);
+    std::cout << "PASS outside projected boxes cannot invalidate complete held cargo\n";
+}
+
+void postcloseRequiresFreshHeldImages() {
+    SceneRig rig;
+    rig.objects.resize(1);
+    rig.step();
+    rig.task.enter(PushState::VERIFY_CAPTURE, rig.in.now_us, "held_freshness_fixture");
+    rig.task.frame_raised_ = 0;
+    rig.task.t_.capture_frames = 2;
+    rig.task.trip_context_.pending_ = inv(1);
+    // Repeated pre-close images cannot establish post-close evidence.
+    for (int i = 0; i < 8; ++i) {
+        rig.step(false);
+        assert(rig.out.capture_evidence == CaptureEvidence::None);
+        assert(rig.task.frame_raised_ == 0 && stopped(rig.out.motion));
+    }
+    for (int i = 0; i < 16 && !rig.in.held_complete; ++i)
+        rig.step();
+    assert(rig.in.held_complete && rig.out.capture_evidence == CaptureEvidence::None);
+    // A complete image counts only once, even across multiple control ticks.
+    for (int i = 0; i < 4; ++i) {
+        rig.step(false);
+        assert(rig.out.capture_evidence == CaptureEvidence::None);
+    }
+    rig.step();
+    assert(rig.out.capture_evidence == CaptureEvidence::Verified);
+    assert(rig.out.state == PushState::CARRY);
+    std::cout << "PASS postclose requires fresh distinct held images after closure\n";
+}
+
 void riskReviewStartsSplitByYOnly() {
     for (bool single : {false, true})
         for (int shift : {-100, 100})
@@ -1774,7 +1841,48 @@ void splitActionBudgetsStayBounded() {
     std::cout << "PASS corner and ordinary budgets are independent, bounded and reset per trip\n";
 }
 
+void splitTurnStartupDrift() {
+    using Stage = SearchPhaseData::FirstTripSplit::RecoveryStage;
+    for (Stage stage : {Stage::CornerTurnRight, Stage::CornerTurnBack, Stage::InjuredTurn})
+    for (int direction : {-1, 1}) {
+        if (stage != Stage::InjuredTurn &&
+            direction != (stage == Stage::CornerTurnRight ? -1 : 1)) continue;
+        // Field 2026-11-06 05:26: +0.034 rad/s at right-turn startup
+        // latched a brake for 11.45 s while the goal was still 90 degrees away.
+        // Include the observed peak drift (~0.055) and real opposing rotation.
+        for (float drift : {.0341366f, .0554773f, .3f}) {
+            SceneRig rig;
+            auto& split = rig.task.search_phase_.first_trip_split_;
+            split.pending = split.capture_retry = true;
+            split.upper_corner = stage != Stage::InjuredTurn;
+            split.keep_injured = stage == Stage::InjuredTurn;
+            split.started_us = rig.in.now_us;
+            split.recovery_stage = stage;
+            split.recovery_direction = direction;
+            split.injured_turn_goal = direction * .15f;
+            rig.task.t_.split_wz_increment_rps = .2f;
+            rig.task.t_.max_wz = .6f;
+            rig.task.enter(PushState::ABORT_DROP, rig.in.now_us, "split_startup_drift_fixture");
+            rig.in.camera_pitch_cdeg = rig.task.pitch_cmd_ = 0;
+            rig.in.heading_rad = stage == Stage::CornerTurnBack ? -1.570796327f : 0;
+            rig.step(true, true, 33000);
+            for (int i = 0; i < 12; ++i) {
+                rig.in.heading_rad -= direction * drift * .033f;
+                rig.step(true, true, 33000);
+                if (drift == .3f) {
+                    assert(split.corner_turn_braking && stopped(rig.out.motion));
+                } else {
+                    assert(!split.corner_turn_braking);
+                    assert(direction * rig.out.motion.wz_rps > 0);
+                }
+            }
+        }
+    }
+    std::cout << "PASS split startup tolerates logged heading drift and still brakes opposing rotation\n";
+}
+
 void cornerTurnBrakesBeforePush() {
+    splitTurnStartupDrift();
     using Stage = SearchPhaseData::FirstTripSplit::RecoveryStage;
     const auto seed = [](SceneRig& rig, Stage stage) {
         auto& split = rig.task.search_phase_.first_trip_split_;
@@ -3706,6 +3814,35 @@ void postSplitMissingTargetSpinsBeforeApproach() {
 
 // UI120 -> UI140 chooses wanted in-frame cargo, independently of old ID,
 // class, image location, ground mapping and IMU heading.
+void recognizedEdgeTargetReachesCapture() {
+    SceneRig rig;
+    auto cfg=calibration(); cfg.pixel_center_membership=true;
+    rig.monitor=CaptureMonitor(cfg);
+    rig.selector_config=&cfg;
+    rig.managed_selection=true;
+    rig.task.first_=true;
+    rig.in.label=rig.task.trip_context_.label_="injured_person";
+    rig.task.trip_context_.target_id_=rig.task.trip_context_.capture_target_id_=312;
+    rig.task.enter(PushState::PREPARE,rig.in.now_us,"recognized_top_edge");
+    auto& handoff=rig.task.capture_phase_.view_handoff_;
+    handoff.near=true; handoff.started_us=rig.in.now_us;
+    rig.objects={detection(312,{440,0,400,600})};
+    rig.objects[0].label="injured_person";
+    bool confirmed=false;
+    for(int i=0;i<100 && rig.out.state!=PushState::CARRY;++i) {
+        rig.step();
+        confirmed |= rig.out.reason=="pixel_capture_handoff_ready";
+        assert(rig.out.reason!="capture_view_retry_120");
+        assert(rig.out.reason!="first_trip_scene_reobserve_turn");
+        assert(rig.out.phase==TaskPhase::Capture || rig.out.phase==TaskPhase::Transport);
+    }
+    if(rig.out.state!=PushState::CARRY)
+        std::cerr<<"edge target stalled: "<<rig.out.reason<<" scene="<<rig.task.capture_scene_.detail<<'\n';
+    assert(confirmed && rig.out.state==PushState::CARRY);
+    assert(rig.out.capture_evidence==CaptureEvidence::Verified);
+    std::cout<<"PASS recognized top-clipped injury passes selection, near confirmation, positioning and verified capture\n";
+}
+
 void postSplitNearViewSelectsCurrentCargo() {
     for (int scenario = 0; scenario < 5; ++scenario) {
         SceneRig rig;
@@ -3726,12 +3863,13 @@ void postSplitNearViewSelectsCurrentCargo() {
         const auto deadline_origin = split.search_started_us;
         rig.in.camera_pitch_cdeg = rig.t.track_pitch_cdeg;
         rig.objects = {detection(167, {493, 505, 242, 215})};
+        if (scenario == 2 || scenario == 4) rig.objects[0].label = "core_supply";
         bool switched = false;
         for (int i = 0; i < 60 && !switched; ++i) {
             rig.step();
-            switched = rig.out.reason == "pixel_center_switch_to_140";
+            switched = rig.out.phase == TaskPhase::Capture;
         }
-        assert(switched && rig.out.target_id == -1);
+        assert(switched && rig.out.target_id == 167);
         rig.in.camera_pitch_stable = false;
         rig.in.camera_pitch_cdeg = rig.t.near_pitch_cdeg;
         rig.step();
@@ -3749,7 +3887,7 @@ void postSplitNearViewSelectsCurrentCargo() {
             rig.step();
             assert(rig.out.motion.camera_pitch_cdeg == rig.t.near_pitch_cdeg);
             assert(rig.out.reason != "pixel_target_released");
-            selected = rig.out.reason == "pixel_search_handoff_ready";
+            selected = rig.out.reason == "pixel_capture_handoff_ready";
         }
         assert(selected && rig.out.target_id == selected_id);
         assert(rig.selection.rebound_from == -1);
@@ -3790,79 +3928,53 @@ void postSplitNearViewLossResumesSearch() {
         for (int i = 0; i < 60 && !switched; ++i) {
             rig.step();
             assert(!rig.task.fault_ && rig.out.motion.vx_mps == 0);
-            switched = rig.out.reason == "pixel_center_switch_to_140";
+            switched = rig.out.phase == TaskPhase::Capture;
         }
-        assert(switched && rig.out.target_id == -1);
+        assert(switched && rig.out.target_id == 173);
         assert(rig.out.motion.camera_pitch_cdeg == rig.t.near_pitch_cdeg);
         rig.in.camera_pitch_cdeg = rig.t.near_pitch_cdeg;
         rig.objects.clear();
         if (clipped) {
-            rig.objects = {detection(175, {0, 203, 131, 242}),
-                           detection(176, {312, 1, 222, 203})};
-            rig.objects[1].label = "dangerous_object";
+            rig.objects = {detection(176, {312, 1, 222, 203})};
+            rig.objects[0].label = "dangerous_object";
         }
-        bool released = false;
-        for (int i = 0; i < 40 && !released; ++i) {
+        const auto approach_started = rig.task.search_phase_.pixel_approach_started_us_;
+        bool retried = false;
+        for (int i=0;i<40 && !retried;++i) {
             rig.step();
-            assert(stopped(rig.out.motion) && rig.task.frame_raised_ == 1);
-            released = rig.out.reason == "pixel_target_released" ||
-                       rig.out.reason == "pixel_search_handoff_research";
+            assert(rig.out.phase == TaskPhase::Capture && stopped(rig.out.motion));
+            retried = rig.out.reason == "capture_view_retry_120";
         }
-        assert(released && rig.out.target_id == -1);
-        assert(rig.task.search_phase_.pixel_approach_started_us_ == 0);
-        assert(rig.out.motion.camera_pitch_cdeg == rig.t.track_pitch_cdeg);
-        assert(split.runs == 2 && !rig.task.search_phase_.view_handoff_.started_us);
-        if (rig.out.reason == "pixel_search_handoff_research") {
-            assert(split.search_started_us > deadline_origin);
-            deadline_origin = split.search_started_us;
-        } else assert(split.search_started_us == deadline_origin);
-        rig.in.camera_pitch_stable = false;
-        rig.step();
-        assert(stopped(rig.out.motion));
-        rig.in.camera_pitch_stable = true;
+        assert(retried && rig.out.target_id == 173);
+        assert(rig.task.targetLabel() == "ordinary_supply");
+        assert(rig.task.search_phase_.pixel_approach_started_us_ == approach_started);
+        assert(split.search_started_us == deadline_origin && split.runs == 2);
         rig.in.camera_pitch_cdeg = rig.t.track_pitch_cdeg;
+        rig.in.camera_pitch_stable = true;
         rig.objects.clear();
-        bool searched = false;
-        for (int i = 0; i < 30 && !searched; ++i) {
+        for (int i=0;i<20;++i) {
             rig.step();
-            assert(!rig.task.fault_ && rig.out.motion.vx_mps == 0);
-            searched = rig.out.reason == "pixel_split_search_spin" && rig.out.motion.wz_rps != 0;
+            assert(rig.out.phase == TaskPhase::Capture && stopped(rig.out.motion));
+            assert(rig.out.motion.camera_pitch_cdeg == rig.t.track_pitch_cdeg);
         }
-        assert(searched);
-        // The old trace waited 8.49s at rest; discovery must remain active throughout.
-        for (int i = 0; i < 180; ++i) {
+        // Re-associate the retained cargo in UI120. No unrelated scan or turn.
+        rig.objects = {detection(179,{600,500,80,100})};
+        bool approached=false;
+        for(int i=0;i<35 && !approached;++i) {
             rig.step();
-            assert(rig.out.reason == "pixel_split_search_spin" && rig.out.motion.wz_rps != 0);
-            assert(rig.out.motion.vx_mps == 0 && !rig.task.fault_);
+            assert(rig.out.phase==TaskPhase::Capture);
+            assert(rig.out.motion.camera_pitch_cdeg==rig.t.track_pitch_cdeg);
+            approached=rig.out.motion.vx_mps>0;
         }
-        rig.in.directional_clearance_valid = true;
-        rig.in.turn_safe = false;
-        rig.step();
-        assert(stopped(rig.out.motion));
-        rig.in.turn_safe = rig.in.arc_safe = true;
-        rig.objects = {detection(177, {600, 260, 80, 80})};
-        bool approached = false;
-        for (int i = 0; i < 60 && !approached; ++i) {
+        assert(approached && rig.out.target_id==179);
+        assert(rig.task.search_phase_.pixel_approach_started_us_==approach_started);
+        rig.objects[0].box.y=550; // Y600: new progress permits the next stopped view change
+        for(int i=0;i<24 && rig.out.motion.camera_pitch_cdeg!=rig.t.near_pitch_cdeg;++i)
             rig.step();
-            assert(!rig.task.fault_);
-            approached = rig.out.motion.vx_mps > 0;
-        }
-        assert(approached && rig.out.target_id == 177);
-        rig.objects.clear();
-        searched = false;
-        for (int i = 0; i < 40 && !searched; ++i) {
-            rig.step();
-            assert(rig.out.motion.vx_mps == 0);
-            searched = rig.out.reason == "pixel_split_search_spin" && rig.out.motion.wz_rps != 0;
-        }
-        assert(searched && split.search_started_us == deadline_origin && split.runs == 2);
-        while (rig.in.now_us <= deadline_origin + rig.t.pile_budget_us)
-            rig.step();
-        assert(!rig.task.fault_ && rig.out.state == PushState::APPROACH);
-        assert(stopped(rig.out.motion) && rig.out.reason == "pixel_split_search_restart");
-        assert(split.search_started_us > deadline_origin);
+        assert(rig.out.phase==TaskPhase::Capture);
+        assert(rig.out.motion.camera_pitch_cdeg==rig.t.near_pitch_cdeg);
     }
-    std::cout << "PASS UI140 target loss restores UI120 discovery and preserves its deadline\n";
+    std::cout << "PASS clipped/missing UI140 target retries in Capture with retained class and deadline\n";
 }
 
 void independentSplitRegionGatesCapture(const char* fixture) {
@@ -4995,7 +5107,7 @@ void splitObservationReturnsToSearch() {
         }
         assert(!rig.task.fault_ && !split.pending && rig.out.state == PushState::APPROACH);
         assert(rig.task.trip_context_.target_id_ == -1 && split.retreat_objects.empty());
-        assert(rig.task.search_phase_.view_handoff_.started_us == 0);
+        assert(rig.task.capture_phase_.view_handoff_.started_us == 0);
         assert(rig.task.capture_load_.choice.inventory == inv(0, 0, 1));
         assert(rig.task.capture_load_.objects.empty());
         rig.in.camera_pitch_cdeg = 0;
@@ -5036,14 +5148,14 @@ void searchCaptureCheckpointKeepsEntryOrder() {
         rig.monitor = CaptureMonitor(config);
         rig.objects = {detection(1, {211, 288, 283, 293})};
         rig.task.setPhaseStepping(true);
-        rig.task.enter(PushState::PREPARE, rig.in.now_us, "checkpoint_search");
+        rig.task.enter(PushState::APPROACH, rig.in.now_us, "checkpoint_search");
+        rig.task.search_phase_.approach_pitch_=rig.t.near_pitch_cdeg;
         for (int i = 0; i < 40 && !rig.out.phase_waiting; ++i)
             rig.step();
         std::cout << "checkpoint search: phase=" << int(rig.out.phase)
                   << " reason=" << rig.out.reason << std::endl;
         assert(rig.out.phase_waiting && rig.out.phase == TaskPhase::Search);
-        assert(rig.out.next_phase == TaskPhase::Capture && rig.out.entry_confirmed);
-        const auto accepted = rig.task.search_entry_.accepted_us;
+        assert(rig.out.next_phase == TaskPhase::Capture && !rig.out.entry_confirmed);
         const auto transaction = rig.out.motion.frame_transaction;
         rig.in.run = rig.in.safety_ok = false;
         // Fresh, stationary observations continue while the operator inspects the scene.
@@ -5065,21 +5177,15 @@ void searchCaptureCheckpointKeepsEntryOrder() {
         std::cout << "checkpoint NEXT: phase=" << int(rig.out.phase)
                   << " reason=" << rig.out.reason
                   << " first_id=" << rig.task.search_entry_.first_id << std::endl;
-        if (interruption != 0) {
-            assert(rig.out.phase == TaskPhase::Search);
-            assert(rig.out.reason == "entry_handoff_position_invalid");
-            assert(stopped(rig.out.motion) && rig.task.frame_raised_ == 1);
-            continue;
-        }
         assert(rig.out.phase == TaskPhase::Capture);
         assert(rig.out.reason != "entry_handoff_position_invalid");
-        assert(rig.task.search_entry_.first_id == 1);
-        assert(rig.task.search_entry_.accepted_us == accepted);
+        // Entry and inventory are established after NEXT with fresh observations.
         for (int i = 0; i < 40 && rig.task.frame_raised_ != 0; ++i)
             rig.step();
         assert(rig.out.phase == TaskPhase::Capture && rig.task.frame_raised_ == 0);
+        assert(rig.task.search_entry_.first_id == 1 && rig.out.entry_confirmed);
     }
-    std::cout << "PASS near-view SEARCH checkpoint -> NEXT -> enclosure; unstable, missing and stale observations still reject handoff\n";
+    std::cout << "PASS SEARCH checkpoint precedes Capture entry/inventory; NEXT rechecks fresh evidence after inspection\n";
 }
 
 void splitCapturePreemption() {
@@ -5347,6 +5453,15 @@ void startupFirstGrabFromLoggedPair() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[2]) == "postclose-held-only") {
+        postcloseUsesOnlyHeldCargo();
+        postcloseOutsideBoxesDoNotBlockHeldEvidence();
+        postcloseRequiresFreshHeldImages();
+        postcloseRejectsTwoWithoutSuccessOrMotion();
+        postcloseRejectsLatestLogBoxes();
+        mixedPostcloseReturnsToReview();
+        return 0;
+    }
     if (argc == 3 && std::string(argv[2]) == "startup-first-grab") {
         startupFirstGrabFromLoggedPair(); return 0;
     }
@@ -5357,7 +5472,7 @@ int main(int argc, char** argv) {
         if (std::string(argv[2]) == "postsplit-approach") { postSplitClearOutsideGraspResumesApproach(); return 0; }
         if (std::string(argv[2]) == "capture-checkpoint") { searchCaptureCheckpointKeepsEntryOrder(); return 0; }
         if (std::string(argv[2]) == "injured-removal") { injuredRemovalTests(); return 0; }
-        if (std::string(argv[2]) == "search-view-selection") { postSplitNearViewSelectsCurrentCargo(); return 0; }
+        if (std::string(argv[2]) == "search-view-selection") { recognizedEdgeTargetReachesCapture(); postSplitNearViewSelectsCurrentCargo(); return 0; }
         if (std::string(argv[2]) == "postsplit-search") { postSplitNearViewSelectsCurrentCargo(); postSplitMissingTargetSpinsBeforeApproach(); postSplitNearViewLossResumesSearch(); return 0; }
         if (std::string(argv[2]) == "capture-score") { captureScoreTests(); return 0; }
         if (std::string(argv[2]) == "independent-confirmation") { splitConfirmationIgnoresCaptureBoundaryJitter(); confirmationUsesInventoryForItsVerdict(); return 0; }
@@ -5408,6 +5523,7 @@ int main(int argc, char** argv) {
     completedOrdinaryMarginRequiresFreshSecondStop();
     independentSplitRegionGatesCapture(argv[1]);
     postSplitMissingTargetSpinsBeforeApproach();
+    recognizedEdgeTargetReachesCapture();
     postSplitNearViewSelectsCurrentCargo();
     postSplitNearViewLossResumesSearch();
     suppliedGraspableAndOutsideSamples(argv[1]);
@@ -5482,7 +5598,9 @@ int main(int argc, char** argv) {
     splitSelectorReleaseAndNewIdsRetry();
     splitReselectionMissingEvidenceStops();
     riskReviewStartsSplitByYOnly();
-    postcloseCannotForgetOriginalNeighbor();
+    postcloseUsesOnlyHeldCargo();
+    postcloseOutsideBoxesDoNotBlockHeldEvidence();
+    postcloseRequiresFreshHeldImages();
     precloseNeverBypassesMissingOrMovingEvidence();
     clearWindowRestartsWhenRiskReturns();
     postcloseRejectsTwoWithoutSuccessOrMotion();

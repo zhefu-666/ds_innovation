@@ -915,18 +915,19 @@ ResolvedRuntimeConfig resolveLegacyRuntimeConfig(const Config& config, std::ostr
                 ranges(p.at("hsv"), "blue", floor.blue); ranges(p.at("hsv"), "red", floor.red);
                 ranges(p.at("hsv"), "purple", floor.purple); ranges(p.at("hsv"), "white", floor.white);
                 ranges(p.at("hsv"), "cargo", floor.cargo);
-                if (p.contains("transport_region")) {
-                    const auto& raw=p.at("transport_region");
-                    auto& region=floor.transport_region;
-                    region.min_width_fraction=raw.at("min_width_fraction").get<float>();
-                    region.min_height_fraction=raw.at("min_height_fraction").get<float>();
-                    region.min_bottom_fraction=raw.at("min_bottom_fraction").get<float>();
-                    for (float value : {region.min_width_fraction, region.min_height_fraction,
-                                        region.min_bottom_fraction})
-                        if (!std::isfinite(value) || value<=0 || value>1)
-                            throw std::runtime_error("Invalid transport region threshold");
-                    ranges(raw.at("hsv"), "blue", region.blue);
-                    ranges(raw.at("hsv"), "red", region.red);
+                if (p.contains("transport_surroundings")) {
+                    const auto& raw=p.at("transport_surroundings");
+                    auto& surroundings=floor.transport_surroundings;
+                    surroundings.gap_px=raw.at("gap_px").get<int>();
+                    surroundings.band_px=raw.at("band_px").get<int>();
+                    surroundings.min_own=raw.at("min_own").get<float>();
+                    surroundings.min_total_own=raw.value("min_total_own",surroundings.min_total_own);
+                    if (surroundings.gap_px<0 || surroundings.band_px<1 ||
+                        surroundings.gap_px>config.frame_width || surroundings.band_px>config.frame_width ||
+                        !std::isfinite(surroundings.min_own) || surroundings.min_own<.5f || surroundings.min_own>1.f ||
+                        !std::isfinite(surroundings.min_total_own) || surroundings.min_total_own<.5f ||
+                        surroundings.min_total_own>1.f)
+                        throw std::runtime_error("Invalid transport surroundings thresholds");
                 }
                 tuning.pushboard_floor_enabled = floor.enabled;
                 tuning.pushboard_floor_confirm_us = p.at("confirm_us").get<uint64_t>();
@@ -1498,21 +1499,12 @@ void writeEffectiveConfig(const ResolvedRuntimeConfig& r, std::ostream& output) 
     f << "windows_xywh" << "[";
     for (const auto& w : r.pushboard_floor.windows)
         f << "[" << w.x << w.y << w.width << w.height << "]";
-    f << "]" << "transport_region" << "{";
-    const auto& region=r.pushboard_floor.transport_region;
-    scalar(f, "min_width_fraction", region.min_width_fraction);
-    scalar(f, "min_height_fraction", region.min_height_fraction);
-    scalar(f, "min_bottom_fraction", region.min_bottom_fraction);
-    f << "hsv" << "{";
-    const auto write_ranges=[&](const char* key, const auto& ranges) {
-        f << key << "[";
-        for (const auto& range : ranges)
-            f << "[" << range.low[0] << range.low[1] << range.low[2]
-              << range.high[0] << range.high[1] << range.high[2] << "]";
-        f << "]";
-    };
-    write_ranges("blue",region.blue); write_ranges("red",region.red);
-    f << "}" << "}" << "}";
+    f << "]" << "transport_surroundings" << "{";
+    scalar(f, "gap_px", r.pushboard_floor.transport_surroundings.gap_px);
+    scalar(f, "band_px", r.pushboard_floor.transport_surroundings.band_px);
+    scalar(f, "min_own", r.pushboard_floor.transport_surroundings.min_own);
+    scalar(f, "min_total_own", r.pushboard_floor.transport_surroundings.min_total_own);
+    f << "}" << "}";
     f << "capture" << "{";
     visitCapture(r.capture, [&](const char* name, const auto& value) {
         scalar(f, name, value);

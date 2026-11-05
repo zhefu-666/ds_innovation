@@ -6,36 +6,25 @@
 #include <limits>
 namespace rescue {
 namespace {
-constexpr float kSearchUi120SpeedMps = .04f;
-constexpr float kSearchUi120HandoffHeight = .625f; // Y450 at 1280x720; initial field tuning
+constexpr float kSearchUi120SpeedMps = .10f;
+constexpr float kSearchUi120HandoffHeight = .75f; // Y540 at 1280x720; coarse approach only
 constexpr uint64_t kSearchViewHandoffTimeoutUs = 1500000;
 } // namespace
 
 bool PushTask::updateSearchViewHandoff(TaskTick& tick) {
-    auto& handoff = search_phase_.view_handoff_;
+    auto& handoff = capture_phase_.view_handoff_;
     const auto& in = tick.in;
-    if (phase_ != TaskPhase::Search || recovering_) {
-        handoff = {};
-        return false;
-    }
     if (!handoff.started_us) {
-        const bool early_line =
-            in.pixel_grasp_image_height_px > 0 &&
+        const bool at_line = in.pixel_grasp_image_height_px > 0 &&
             in.target_center_px.y >= kSearchUi120HandoffHeight * in.pixel_grasp_image_height_px;
         const bool fresh = in.pixel_grasp_sample_us && in.pixel_grasp_sample_us <= tick.now &&
-                           tick.now - in.pixel_grasp_sample_us <= t_.frame_timeout_us;
-        const bool retry_progress = search_phase_.pixel_handoff_retry_height_ <= 0 ||
+            tick.now - in.pixel_grasp_sample_us <= t_.frame_timeout_us;
+        const bool progress = capture_phase_.pixel_handoff_retry_height_ <= 0 ||
             (in.pixel_grasp_image_height_px > 0 && in.target_center_px.y >=
-                search_phase_.pixel_handoff_retry_height_ * in.pixel_grasp_image_height_px);
-        // Legacy replay observations may supply only the existing handoff flag.
-        if (!retry_progress || !t_.pixel_grasp_enabled || !in.pixel_grasp_view ||
-            in.pixel_grasp_near_view || !in.target_center_px_valid || !fresh ||
-            !candidate(in, tick.now) ||
+                capture_phase_.pixel_handoff_retry_height_ * in.pixel_grasp_image_height_px);
+        if (!progress || !in.target_center_px_valid || !fresh || !candidate(in, tick.now) ||
             in.target_id != trip_context_.target_id_ || in.label != trip_context_.label_ ||
-            (!early_line && !in.pixel_view_handoff_ready) ||
-            in.camera_pitch_cdeg == kCameraPitchInvalid ||
-            std::abs(int(in.camera_pitch_cdeg) - int(t_.track_pitch_cdeg)) >
-                t_.pitch_tolerance_cdeg)
+            (!at_line && !in.pixel_view_handoff_ready && !in.pixel_grasp_near_view))
             return false;
         handoff.started_us = tick.now;
         if (in.pixel_grasp_image_height_px > 0)
@@ -44,89 +33,50 @@ bool PushTask::updateSearchViewHandoff(TaskTick& tick) {
         pixel_alignment_ = {};
     }
     tick.immediate_motion_stop = true;
-    if (tick.now - handoff.started_us >= kSearchViewHandoffTimeoutUs ||
-        (search_phase_.pixel_approach_started_us_ &&
-         tick.now - search_phase_.pixel_approach_started_us_ > t_.approach_budget_us)) {
-        // Repeated IDs at the same UI120 position cannot retry an empty/clipped
-        // near view. Resume normal low-speed approach until fresh image progress.
-        if (handoff.near && handoff.retry_height > 0)
-            search_phase_.pixel_handoff_retry_height_ = handoff.retry_height;
-        resumePixelSplitSearch(tick, "pixel_search_handoff_research", true);
+    const int pitch = pitchWait(in, tick.now);
+    if (pitch < 0) {
+        failStop(tick, "camera_pitch_timeout");
         return true;
     }
-    const int pitch = pitchWait(in, tick.now);
-    const bool scene_fresh = in.capture_scene_valid && in.capture_scene_us &&
-                             in.capture_scene_us <= tick.now &&
-                             tick.now - in.capture_scene_us <= t_.frame_timeout_us;
-    const auto reset_window = [&] {
+    const bool scene = in.capture_scene_valid && in.capture_scene_us &&
+        in.capture_scene_us <= tick.now && tick.now-in.capture_scene_us <= t_.frame_timeout_us;
+    if (tick.now-handoff.started_us >= kSearchViewHandoffTimeoutUs) {
+        // Keep the lock and total budget; an unconfirmed stop cannot hand over motion.
+        handoff = {};
+        reason_ = "pixel_search_handoff_stop_retry";
+        return true;
+    }
+    if (!pitch || !scene || !captureReviewStopped(in)) {
         handoff.frames = 0;
         handoff.sample_us = handoff.stable_us = 0;
-    };
-    if (pitch <= 0 || !scene_fresh || !captureReviewStopped(in)) {
-        reset_window();
-        // Decelerate through the existing sender ramp while the stationary camera still
-        // supplies fresh scene evidence. Missing target identity does not restart approach.
-        tick.controlled_motion_stop =
-            !handoff.near && pitch > 0 && scene_fresh && in.path_safe && in.opponent_zone_clear &&
+        tick.controlled_motion_stop = pitch > 0 && scene && in.path_safe && in.opponent_zone_clear &&
             (!in.directional_clearance_valid || (in.turn_safe && in.arc_safe));
         tick.immediate_motion_stop = !tick.controlled_motion_stop;
-        reason_ = pitch <= 0     ? "camera_pitch_wait"
-                  : handoff.near ? "pixel_search_handoff_confirm"
-                                 : "pixel_search_handoff_stop";
+        reason_ = !pitch ? "camera_pitch_wait" : "pixel_search_handoff_stop";
         return true;
     }
-    commandFrame(1, tick.now);
-    const int frame = frameWait(in, 1, tick.now);
-    if (frame < 0) {
-        failStop(tick, "gripper_open_timeout");
+    reason_ = "pixel_search_handoff_stop";
+    if (in.capture_scene_us <= handoff.started_us || in.capture_scene_us <= handoff.sample_us)
         return true;
-    }
-    if (!frame) {
-        reset_window();
-        reason_ = "gripper_feedback_wait";
+    if (!handoff.frames) handoff.stable_us = in.capture_scene_us;
+    handoff.sample_us = in.capture_scene_us;
+    if (++handoff.frames < t_.pixel_align_stable_frames ||
+        in.capture_scene_us-handoff.stable_us < t_.pixel_align_stable_us)
         return true;
-    }
-    if (!handoff.near) {
-        reason_ = "pixel_search_handoff_stop";
-        // Fresh whole-scene observations continue even when the old box leaves UI120.
-        // As in Startup's handoff, this is a stopped-command window, not wheel odometry.
-        if (in.capture_scene_us <= handoff.started_us || in.capture_scene_us <= handoff.sample_us)
-            return true;
-        if (!handoff.frames)
-            handoff.stable_us = in.capture_scene_us;
-        handoff.sample_us = in.capture_scene_us;
-        if (++handoff.frames < t_.pixel_align_stable_frames ||
-            in.capture_scene_us - handoff.stable_us < t_.pixel_align_stable_us)
-            return true;
-        enter(PushState::APPROACH, tick.now, "pixel_center_switch_to_140");
-        search_phase_.approach_pitch_ = t_.near_pitch_cdeg;
-        handoff.near = true;
-        handoff.started_us = tick.now;
-        reset_window();
-        pixel_alignment_ = {};
-        search_entry_ = {};
-        capture_scene_ = {};
-        trip_context_.target_id_ = trip_context_.capture_target_id_ = -1;
-        trip_context_.label_.clear();
-        return true;
-    }
-    // A fresh wanted block in this view is sufficient; no old ID/class linkage.
-    const bool selected = candidate(in, tick.now) &&
-                          (!in.pixel_selection_managed || in.pixel_locked);
-    const bool complete = std::any_of(
-        in.capture_image_objects.begin(), in.capture_image_objects.end(), [&](const auto& object) {
-            return object.id == in.target_id && object.label == in.label && object.complete;
-        });
-    if (in.capture_scene_us <= handoff.started_us || !in.pixel_grasp_near_view || !selected ||
-        !complete || !candidate(in, tick.now) || (in.pixel_selection_managed && !in.pixel_locked) ||
-        !pixelAlign(tick, true, true)) {
-        reason_ = "pixel_search_handoff_confirm";
-        return true;
-    }
-    handoff = {};
-    search_phase_.pixel_handoff_retry_height_ = 0;
-    reason_ = "pixel_search_handoff_ready";
-    return true; // retain zero; the normal near-view entry/selector review runs next tick
+    handoff.near = true;
+    handoff.started_us = tick.now;
+    handoff.confirmation_started_us = 0;
+    handoff.frames = 0;
+    handoff.sample_us = handoff.stable_us = 0;
+    capture_phase_.prepare_pitch_ = t_.near_pitch_cdeg;
+    search_entry_ = {};
+    pixel_alignment_ = {};
+    capture_scene_ = {};
+    if (phase_ == TaskPhase::Search)
+        requestPhase(PhaseOutcome::CaptureReady, "search_target_approached");
+    else
+        reason_ = "pixel_center_switch_to_140";
+    return true;
 }
 
 // Reconsider a pre-capture UI120 lock only after sustained lack of forward
@@ -230,6 +180,11 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
                               search_phase_.action == SearchAction::SelectCargo ||
                               search_phase_.action == SearchAction::MidApproach ||
                               search_phase_.action == SearchAction::Approach;
+    // Once the coarse stop begins, loss of the old box does not undo the handoff.
+    if (capture_phase_.view_handoff_.started_us && !capture_phase_.view_handoff_.near) {
+        updateSearchViewHandoff(tick);
+        return;
+    }
     // The selector has confirmed this lock. Check membership before any discovery,
     // view handoff or split-search branch can command movement.
     if (t_.pixel_grasp_enabled && image_search && tick.in.pixel_selection_managed &&
@@ -480,97 +435,10 @@ void PushTask::updateSearchPhase(TaskTick& tick) {
                 return;
             }
             reason_ = "pixel_center_approach_120";
-            drive(tick, std::min(t_.approach_speed, kSearchUi120SpeedMps), 0);
+            drive(tick, kSearchUi120SpeedMps, 0);
             return;
         }
-        if (!tick.in.target_grasp_range_valid || tick.in.target_grasp_range_past_rear) {
-            enter(PushState::CAPTURE_FAIL, tick.now, "target_outside_grasp_center_range");
-            return;
-        }
-        commandFrame(1, tick.now);
-        const int entry_frame = frameWait(tick.in, 1, tick.now);
-        if (entry_frame < 0) {
-            failStop(tick, "gripper_open_timeout");
-            return;
-        }
-        if (entry_frame == 0) {
-            invalidateEntryPosition();
-            reason_ = "gripper_feedback_wait";
-            return;
-        }
-        if (search_entry_.review_before_entry) {
-            tick.immediate_motion_stop = true;
-            if (reviewFirstTripCapture(tick, "startup_reselected") ||
-                search_phase_.first_trip_split_.pending)
-                search_entry_.review_before_entry = false;
-            return; // Even a clear review hands motion back on a later tick.
-        }
-        if (!locateSearchEntry(tick))
-            return;
-        // Keep an already-open search overlay open across the phase transition.
-        commandFrame(1, tick.now);
-        enter(PushState::PREPARE, tick.now, "pixel_target_prepare");
-        return;
-    }
-    // Pixel PREPARE keeps UI140 throughout opening and inventories the image corridor.
-    if (t_.pixel_grasp_enabled && search_phase_.action == SearchAction::Prepare) {
-        const int p = pitchWait(tick.in, tick.now);
-        if (p < 0) {
-            failStop(tick, "camera_pitch_timeout");
-            return;
-        }
-        if (p == 0) {
-            reason_ = "camera_pitch_wait";
-            return;
-        }
-        commandFrame(1, tick.now);
-        const int g = frameWait(tick.in, 1, tick.now);
-        if (g < 0) {
-            failStop(tick, "gripper_open_timeout");
-            return;
-        }
-        if (g == 0) {
-            reason_ = "gripper_feedback_wait";
-            return;
-        }
-        if (tick.elapsed > t_.prepare_budget_us) {
-            enter(PushState::CAPTURE_FAIL, tick.now, "pixel_corridor_unresolved");
-            return;
-        }
-        if (!tracking(tick.in)) {
-            reason_ = "pixel_target_wait";
-            actionProgress().confirmations = 0;
-            return;
-        }
-        if (!locateSearchEntry(tick))
-            return;
-        // Inventory review starts only AFTER the selected target entered first; mixed boxes may enter.
-        if (!reviewFirstTripCapture(tick, "search_positioned"))
-            return;
-        trip_context_.verdict_ = checkCorridor(tick.in.corridor,
-                                               tick.in.corridor_complete,
-                                               tick.in.corridor_occlusion_free,
-                                               trip_context_.label_,
-                                               first_);
-        if (trip_context_.verdict_ == RuleVerdict::INCOMPLETE) {
-            actionProgress().confirmations = 0;
-            reason_ = "pixel_corridor_incomplete";
-            return;
-        }
-        if (trip_context_.verdict_ != RuleVerdict::OK) {
-            beginPixelSplit(tick);
-            return;
-        }
-        if (trip_context_.seen_ != tick.in.corridor) {
-            trip_context_.seen_ = tick.in.corridor;
-            actionProgress().confirmations = 0;
-        }
-        if (++actionProgress().confirmations < t_.corridor_confirm_frames)
-            return;
-        trip_context_.pending_ = tick.in.corridor;
-        search_entry_.handoff = true;
-        search_entry_.accepted_us = tick.in.pixel_grasp_sample_us;
-        requestPhase(PhaseOutcome::CaptureReady, "pixel_first_entry_inventory_ok");
+        updateSearchViewHandoff(tick);
         return;
     }
     switch (search_phase_.action) {

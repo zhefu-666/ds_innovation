@@ -2595,20 +2595,20 @@ void searchUi120StopsBeforeBottom(bool speed_only) {
             sample(178);
         assert(out.reason == "pixel_center_approach_120" && out.motion.vx_mps > 0);
         if (speed_only) {
-            assert(out.motion.vx_mps <= .04f + 1e-6f);
-            std::cout << "PASS search UI120 approach capped at 0.04 m/s\n";
+            assert(std::abs(out.motion.vx_mps - .10f) < 1e-6f);
+            std::cout << "PASS search UI120 approach requests 0.10 m/s despite approach_speed 0.07\n";
             continue;
         }
         // A stale detection at the new line must not commit a handoff.
         in.now_us += kTick;
-        in.target_center_px.y = .625f * height;
+        in.target_center_px.y = .75f * height;
         in.pixel_grasp_sample_us = in.now_us - t.frame_timeout_us - 1;
         out = rig.task.update(in);
         assert(out.motion.camera_pitch_cdeg == t.track_pitch_cdeg);
         for (int i = 0; i < 22; ++i)
             sample(178);
         in.sent_vx_mps = .04f;
-        const float line = .625f * height;
+        const float line = .75f * height;
         sample(line - 1);
         assert(out.motion.vx_mps > 0); // centre, not box bottom, controls the crossing
         sample(line);
@@ -2633,95 +2633,267 @@ void searchUi120StopsBeforeBottom(bool speed_only) {
                 switched = true;
                 break;
             }
-            if (out.state == PushState::SAFE_STOP || out.reason == "pixel_search_handoff_research")
+            if (out.state == PushState::SAFE_STOP || out.reason == "pixel_search_handoff_stop_retry")
                 break;
         }
         if (scenario == 2 || scenario == 3) {
-            assert(!switched && out.state == PushState::APPROACH);
-            assert(out.reason == "pixel_search_handoff_research" && out.target_id == -1);
-            assert(!rig.task.search_phase_.view_handoff_.started_us);
-            // An unconfirmed sender stop cannot authorize renewed movement.
-            if (scenario == 3)
-                for (int i = 0; i < 8; ++i) {
-                    sample(178);
-                    assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
-                }
+            assert(!switched && out.phase == TaskPhase::Search);
+            assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
+            assert(out.reason == "pixel_search_handoff_stop_retry" ||
+                   out.reason == "pixel_search_handoff_stop");
+            assert(out.target_id == 5);
             in.sent_vx_mps = 0;
-            bool reacquired = false;
-            for (int i = 0; i < 30 && !reacquired; ++i) {
-                sample(178);
-                assert(out.state != PushState::SAFE_STOP);
-                reacquired = out.target_id == 5;
-            }
-            assert(reacquired);
+            for (int i=0;i<16 && out.phase != TaskPhase::Capture;++i)
+                sample(line);
+            assert(out.phase == TaskPhase::Capture && out.state == PushState::PREPARE);
             continue;
         }
-        assert(switched && out.reason == "pixel_center_switch_to_140");
-        in.pixel_released_id = -1;
-        // Moving camera and an absent near-view target never permit chassis motion.
-        in.camera_pitch_stable = false;
-        sample(337, false);
-        assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
-        in.camera_pitch_cdeg = t.near_pitch_cdeg;
-        in.camera_pitch_stable = true;
-        in.pixel_grasp_near_view = true;
-        if (scenario == 5 || scenario == 6 || scenario == 8) {
-            const auto old_scene = in.capture_scene_us;
-            for (int i = 0; i < 38 && out.reason != "pixel_search_handoff_research"; ++i) {
-                if (scenario == 6)
-                    in.capture_scene_us = old_scene;
-                sample(337, scenario == 6, scenario != 6);
-                assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
-            }
-            assert(out.state == PushState::APPROACH && out.target_id == -1);
-            assert(out.reason == "pixel_search_handoff_research");
-            assert(!rig.task.search_phase_.view_handoff_.started_us);
-            // Replay 21:08: returning at the same UI120 image position must
-            // approach, rather than repeat the failed pitch switch with a new ID.
-            in.camera_pitch_cdeg = t.track_pitch_cdeg;
-            in.pixel_grasp_near_view = false;
-            bool approaching = false;
-            for (int i = 0; i < 36; ++i) {
-                sample(line + (i % 2 ? 10 : 0), true, true, 23);
-                assert(out.motion.camera_pitch_cdeg == t.track_pitch_cdeg);
-                approaching |= out.reason == "pixel_center_approach_120" &&
-                               out.motion.vx_mps > 0;
-            }
-            assert(approaching);
-            // A stale progress frame is insufficient; a fresh image beyond the
-            // existing motion tolerance may commit the next stopped handoff.
-            in.target_center_px.y = line + t.pixel_align_brake_motion_px + 1;
-            in.pixel_grasp_sample_us = in.now_us - t.frame_timeout_us - 1;
-            in.now_us += kTick;
-            out = rig.task.update(in);
-            assert(out.motion.camera_pitch_cdeg == t.track_pitch_cdeg);
-            bool retried = false;
-            for (int i = 0; i < 24 && !retried; ++i) {
-                sample(line + t.pixel_align_brake_motion_px + 1, true, true, 23);
-                retried = out.reason == "pixel_center_switch_to_140";
-            }
-            assert(retried && out.target_id == -1);
-        } else {
-            // The next view supplies its own confirmed cargo, without an old-ID event.
-            bool acknowledged = false;
-            for (int i = 0; i < 16; ++i) {
-                sample(337, true, true, scenario == 7 ? 15 : 5);
-                assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
-                if (out.reason == "search_view_target_selected") {
-                    acknowledged = true;
-                    in.pixel_reselected_from = -1; // no old-ID acknowledgment is needed
-                }
-                if (out.reason == "pixel_search_handoff_ready") break;
-            }
-            assert(out.reason == "pixel_search_handoff_ready");
-            assert(rig.task.search_phase_.pixel_handoff_retry_height_ == 0);
-            if (scenario == 7) assert(acknowledged && out.target_id == 15);
-        }
+        assert(switched && out.phase == TaskPhase::Capture);
+        assert(out.state == PushState::PREPARE);
+        assert(out.reason == "search_target_approached");
+        assert(out.target_id == 5); // retain cargo context; Capture re-associates each view
+        assert(!rig.task.search_entry_.handoff); // no inventory check in Search
+
     }
     if (!speed_only)
         std::cout
-            << "PASS UI120 early handoff: jitter, lock release, repeated frames, moving sender, "
-               "scaled image, near-target loss, stale near images, retry progress and independent view selection\n";
+            << "PASS Search hands stopped UI120 target to Capture at Y540; jitter, released lock, "
+               "repeated frames, moving sender and scaled images\n";
+}
+
+
+// Replay 06:04: injury approaches in UI120, then UI140 clips its top.
+// Search must hand over before near-view inventory/entry review.
+void searchHandsCloseTargetToCapture() {
+    TaskTuning t;
+    t.startup_advance_us = 0;
+    t.require_multi_view = false;
+    t.pixel_grasp_enabled = true;
+    t.far_pitch_cdeg = -3000;
+    t.intermediate_pitch_cdeg = t.track_pitch_cdeg = 0;
+    t.near_pitch_cdeg = 2000;
+    for (bool slow_camera : {false, true}) {
+        Rig rig(t); rig.tick();
+        rig.task.first_ = true;
+        rig.task.enter(PushState::APPROACH, rig.input.now_us, "logged_injured_approach");
+        rig.task.search_phase_.approach_pitch_ = t.track_pitch_cdeg;
+        rig.task.trip_context_.target_id_ = rig.task.trip_context_.capture_target_id_ = 289;
+        rig.task.trip_context_.label_ = "injured_person";
+        rig.task.setInitialFrameOpen(true);
+        auto& in = rig.input;
+        in.camera_pitch_cdeg = t.track_pitch_cdeg;
+        in.sent_velocity_valid = in.gripper_done = in.pixel_selection_managed = true;
+        in.gripper_feedback_open = 1;
+        in.pixel_grasp_view = in.pixel_locked = true;
+        in.pixel_grasp_image_height_px = 720;
+        in.capture_scene_valid = true;
+        const auto sample = [&](float y, bool complete = true, int id = 289) {
+            in.target_valid = in.target_center_px_valid = in.pixel_grasp_target_valid = true;
+            in.target_id = id; in.label = "injured_person";
+            in.target_center_px = {640, y};
+            in.target_box = !complete ? cv::Rect{440,0,400,int(2*y)}
+                                     : cv::Rect{440,int(y)-130,400,260};
+            in.pixel_grasp_error_px = in.pixel_grasp_steering = 0;
+            in.pixel_view_handoff_ready = !in.pixel_grasp_near_view && y >= 540;
+            in.pixel_grasp_sample_us = in.capture_scene_us = in.now_us + kTick;
+            in.capture_image_objects = {{id, in.label, in.target_box, complete}};
+            return rig.tick();
+        };
+        PushOutput out;
+        for (int i=0; i<22; ++i) out=sample(454);
+        assert(out.phase == TaskPhase::Search);
+        assert(out.motion.camera_pitch_cdeg == t.track_pitch_cdeg);
+        assert(out.motion.vx_mps > 0);
+        const auto approach_started = rig.task.search_phase_.pixel_approach_started_us_;
+        for (int i=0; i<20 && out.phase != TaskPhase::Capture; ++i) out=sample(550);
+        assert(out.phase == TaskPhase::Capture && out.state == PushState::PREPARE);
+        assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
+
+        if (slow_camera) {
+            in.camera_pitch_stable = false;
+            for (int i=0; i<32; ++i) {
+                out=sample(145, false, 312);
+                assert(out.phase == TaskPhase::Capture);
+                assert(out.reason != "pixel_search_handoff_research");
+                assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
+            }
+        }
+        in.camera_pitch_cdeg=t.near_pitch_cdeg;
+        in.camera_pitch_stable=in.pixel_grasp_near_view=true;
+        in.target_grasp_range_applicable=in.target_grasp_range_valid=true;
+        in.target_grasp_range_inside=false;
+        in.target_grasp_range_lateral=in.target_grasp_range_lateral_measured=true;
+        in.capture_area_px={395,236,511,243};
+        in.capture_class_regions_px[in.label]=in.capture_area_px;
+        bool detected_confirmed = false;
+        for (int i=0;i<16;++i) {
+            out=sample(145,false,312);
+            assert(out.phase==TaskPhase::Capture);
+            if(out.reason=="pixel_capture_handoff_ready") { detected_confirmed=true;break; }
+        }
+        assert(detected_confirmed); // recognition is sufficient despite an edge-touching box
+        // Test missing-target retry as a separate acquisition episode.
+        auto& handoff=rig.task.capture_phase_.view_handoff_;
+        handoff={}; handoff.near=true; handoff.started_us=in.now_us;
+        handoff.retry_height=(550.f+t.pixel_align_brake_motion_px)/720.f;
+        for (int i=0; i<40; ++i) {
+            in.target_valid=in.target_center_px_valid=in.pixel_grasp_target_valid=false;
+            in.capture_image_objects.clear();
+            in.pixel_grasp_sample_us=in.capture_scene_us=in.now_us+kTick;
+            out=rig.tick();
+            assert(out.phase==TaskPhase::Capture && out.motion.vx_mps==0 && out.motion.wz_rps==0);
+            if(out.motion.camera_pitch_cdeg==t.track_pitch_cdeg) break;
+        }
+        assert(out.motion.camera_pitch_cdeg==t.track_pitch_cdeg);
+        assert(rig.task.targetLabel()=="injured_person");
+        assert(rig.task.search_phase_.pixel_approach_started_us_==approach_started);
+        in.camera_pitch_cdeg=t.track_pitch_cdeg;
+        in.pixel_grasp_near_view=false;
+        bool resumed=false;
+        for(int i=0;i<24;++i) {
+            out=sample(550,true,313);
+            assert(out.phase==TaskPhase::Capture);
+            assert(out.motion.camera_pitch_cdeg==t.track_pitch_cdeg);
+            resumed |= out.motion.vx_mps>0;
+        }
+        assert(resumed && out.target_id==313);
+        assert(rig.task.search_phase_.pixel_approach_started_us_==approach_started);
+        for(int i=0;i<16 && out.motion.camera_pitch_cdeg!=t.near_pitch_cdeg;++i)
+            out=sample(590,true,313);
+        assert(out.phase==TaskPhase::Capture && out.motion.camera_pitch_cdeg==t.near_pitch_cdeg);
+        // Retry cannot renew the complete approach deadline.
+        // Keep periodic control updates: a large jump would instead test stale-loop safety.
+        while (in.now_us <= approach_started+t.approach_budget_us &&
+               out.reason != "pixel_approach_timeout") {
+            in.camera_pitch_cdeg = out.motion.camera_pitch_cdeg;
+            in.camera_pitch_stable = true;
+            in.pixel_grasp_near_view = in.camera_pitch_cdeg == t.near_pitch_cdeg;
+            in.target_valid=in.target_center_px_valid=in.pixel_grasp_target_valid=false;
+            in.capture_image_objects.clear();
+            in.pixel_grasp_sample_us=in.capture_scene_us=in.now_us+kTick;
+            out=rig.tick();
+            if (out.state == PushState::SAFE_STOP) break;
+        }
+        assert(out.reason=="pixel_approach_timeout");
+        assert(out.phase==TaskPhase::Capture);
+    }
+    std::cout << "PASS Search approaches only; Capture owns clipped-view retry, class, camera timing and total deadline\n";
+}
+
+// Replay the injured #375/#376 near-view handoff: box-height jitter and tracker
+// replacement must reach normal entry review, without spending its alignment budget here.
+void searchInjuredNearHandoffSurvivesBoxJitter() {
+    for (int scenario = 0; scenario < 10; ++scenario) {
+        TaskTuning t;
+        t.startup_advance_us = 0;
+        t.require_multi_view = false;
+        t.pixel_grasp_enabled = true;
+        t.pixel_align_brake_motion_px = 30;
+        t.far_pitch_cdeg = -3000;
+        t.intermediate_pitch_cdeg = t.track_pitch_cdeg = 0;
+        t.near_pitch_cdeg = 2000;
+        Rig rig(t); rig.tick();
+        rig.task.first_ = true;
+        rig.input.now_us += 100000000;
+        rig.task.last_us_ = rig.input.now_us;
+        rig.task.enter(PushState::PREPARE, rig.input.now_us, "injured_handoff_replay");
+        rig.task.search_phase_.approach_pitch_ = t.near_pitch_cdeg;
+        rig.task.trip_context_.target_id_ = rig.task.trip_context_.capture_target_id_ = 375;
+        rig.task.trip_context_.label_ = "injured_person";
+        rig.task.setInitialFrameOpen(true);
+        auto& h = rig.task.capture_phase_.view_handoff_;
+        h.near = true;
+        h.started_us = rig.input.now_us;
+        rig.task.search_phase_.pixel_approach_started_us_ = rig.input.now_us;
+        auto& in = rig.input;
+        in.camera_pitch_cdeg = t.near_pitch_cdeg;
+        in.sent_velocity_valid = in.gripper_done = in.pixel_selection_managed = true;
+        in.gripper_feedback_open = 1;
+        in.pixel_grasp_view = in.pixel_grasp_near_view = in.pixel_locked = true;
+        in.target_valid = in.target_center_px_valid = in.pixel_grasp_target_valid = true;
+        in.target_id = 375;
+        in.label = "injured_person";
+        in.capture_scene_valid = true;
+        in.target_grasp_range_applicable = in.target_grasp_range_valid = true;
+        in.target_grasp_range_inside = scenario != 8;
+        in.target_grasp_range_lateral = in.target_grasp_range_lateral_measured = true;
+        in.capture_area_px = {209, 180, 862, 320};
+        in.capture_class_regions_px[in.label] = in.capture_area_px;
+        const bool succeeds = scenario <= 2 || scenario == 4;
+        if (scenario == 1 || scenario == 2)
+            h.started_us -= scenario == 1 ? 1300000 : 1500000;
+        if (scenario == 9)
+            rig.task.search_phase_.pixel_approach_started_us_ =
+                in.now_us - t.approach_budget_us;
+        PushOutput out;
+        bool ready = false;
+        const auto sample = [&](int frame) {
+            const int top = frame % 2 ? 60 : 150; // >30 px centre drift, still in region
+            const int left = scenario == 8 && frame % 2 ? 100 : 520;
+            in.target_id = frame >= 2 ? 376 : 375;
+            in.target_box = {left, top, 400, 440};
+            in.target_center_px = {left + 200.f, top + 220.f};
+            in.pixel_grasp_error_px = 640.f - in.target_center_px.x;
+            in.pixel_grasp_sample_us = in.capture_scene_us = in.now_us + kTick;
+            if (scenario == 3) in.pixel_grasp_sample_us = in.capture_scene_us = kStart;
+            if (scenario == 5) in.target_valid = in.pixel_grasp_target_valid = false;
+            if (scenario == 6) in.sent_vx_mps = .04f;
+            if (scenario == 7) in.camera_pitch_stable = false;
+            in.capture_image_objects = {{in.target_id, in.label, in.target_box, scenario != 4}};
+            out = rig.tick();
+        };
+        for (int frame = 0; frame < 82; ++frame) {
+            sample(frame);
+            assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0);
+            if (out.reason == "pixel_capture_handoff_ready") { ready = true; break; }
+            if (out.reason == "capture_view_retry_120" || out.reason == "camera_pitch_timeout" ||
+                out.reason == "pixel_approach_timeout") break;
+        }
+        std::cout << "injured_near_handoff scenario=" << scenario
+                  << " ready=" << ready << " reason=" << out.reason << std::endl;
+        assert(ready == succeeds);
+        if (succeeds) {
+            assert(!rig.task.capture_phase_.view_handoff_.started_us);
+            assert(out.motion.camera_pitch_cdeg == t.near_pitch_cdeg);
+            // Handoff grants no capture: normal first-entry confirmation still runs.
+            sample(44);
+            assert(out.state == PushState::PREPARE);
+            assert(!rig.task.search_entry_.confirmed);
+            assert(out.motion.gripper_offset == frameAngle(FrameAction::Open));
+            if (scenario == 0) {
+                in.capture_path_valid = true;
+                in.layout_count_region_px = in.capture_area_px;
+                in.corridor.injured = 1;
+                in.corridor_complete = in.corridor_occlusion_free = true;
+                for (int frame = 0; frame < 60 && out.state != PushState::VERIFY_CAPTURE; ++frame) {
+                    in.gripper_feedback_open =
+                        out.motion.gripper_offset == frameAngle(FrameAction::Open);
+                    sample(44); // the detector settles after the logged jitter
+                }
+                std::cout << "injured after handoff state=" << static_cast<int>(out.state)
+                          << " reason=" << out.reason << std::endl;
+                assert(out.state == PushState::VERIFY_CAPTURE);
+                for (int frame = 0; frame < 3; ++frame) {
+                    sample(44);
+                    assert(out.state == PushState::VERIFY_CAPTURE);
+                }
+                // Closing alone is insufficient: only observed injured cargo permits CARRY.
+                in.hold_observable = in.captured = in.held_complete = true;
+                in.held.injured = 1;
+                for (int frame = 0; frame < 15 && out.state != PushState::CARRY; ++frame)
+                    sample(44);
+                assert(out.state == PushState::CARRY);
+                assert(out.capture_evidence == CaptureEvidence::Verified);
+            }
+        } else {
+            if (scenario != 7) assert(!rig.task.capture_phase_.view_handoff_.started_us);
+            assert(out.reason == (scenario == 9 ? "pixel_approach_timeout"
+                                 : scenario == 7 ? "camera_pitch_timeout"
+                                                 : "capture_view_retry_120"));
+        }
+    }
+    std::cout << "PASS injured near handoff tolerates box jitter/re-ID and timeout-edge arrivals; "
+                 "recognized edge targets pass; stale, missing, moving and unrelated observations do not pass\n";
 }
 
 // Exercise task -> sender ramp, including a lost lock, replacement and UI120 ordinary-search
@@ -3817,6 +3989,9 @@ int main(int argc, char** argv) {
         return 0;
     }
     a7ResetDiscardsEveryPhase();
+    if (argc == 2 && std::string(argv[1]) == "--search-capture-boundary") {
+        searchHandsCloseTargetToCapture(); return 0;
+    }
 
     if (argc == 2 && std::string(argv[1]) == "--search-ui120-speed") {
         searchUi120StopsBeforeBottom(true);
@@ -3826,6 +4001,10 @@ int main(int argc, char** argv) {
         searchUi120StopsBeforeBottom(false);
         return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--injured-near-handoff") {
+        searchInjuredNearHandoffSurvivesBoxJitter(); return 0;
+    }
+    searchInjuredNearHandoffSurvivesBoxJitter();
     searchUi120StopsBeforeBottom(true);
     searchUi120StopsBeforeBottom(false);
     if (argc == 2 && std::string(argv[1]) == "--startup-zone-bias") {

@@ -469,7 +469,7 @@ int main(int argc, char** argv) {
         auto inside = block(4, {354, 134, 244, 184});
         auto outside = block(7, {1090, 200, 100, 150});
         assert(select({clipped, outside}, 2000).id == 7);
-        assert(!select({clipped}, 2000).locked);
+        assert(select({clipped}, 2000).locked);
         assert(select({clipped, inside}, 0).id == 3); // Far/UI120 retains its area policy.
         auto danger = inside;
         danger.track_id = 8;
@@ -484,7 +484,7 @@ int main(int argc, char** argv) {
         core.box = {600, 340, 150, 140};
         assert(select({core}, 2000, true).id == 9);
         assert(select({core, inside}, 2000, true, "core_supply").id == 9);
-        std::cout << "PASS complete fallback, clipped-only wait, far policy and trip class gates\n";
+        std::cout << "PASS complete preference, recognized clipped fallback, far policy and trip class gates\n";
         PushTask stalled(cfg.task);
         stalled.enter(PushState::RUSH, chosen.now_us, "clipped_review_fixture");
         stalled.frame_raised_ = 1;
@@ -497,18 +497,22 @@ int main(int argc, char** argv) {
         evidence.heading_valid = true;
         evidence.heading_rad = 0;
         CaptureMonitor monitor(cfg.capture);
-        for (int i = 0; i < 8 && !stalled.search_phase_.first_trip_split_.pending; ++i) {
+        bool clipped_reviewed=false;
+        for (int i = 0; i < 12; ++i) {
             evidence.now_us += 50000;
             clipped.timestamp_us = evidence.now_us;
             monitor.update(evidence, {clipped}, evidence.now_us);
             TaskTick tick(evidence);
-            assert(!stalled.reviewFirstTripCapture(tick, "approach"));
-            assert(tick.immediate_motion_stop && stopped(tick.motion));
+            clipped_reviewed |= stalled.reviewFirstTripCapture(tick, "approach");
+            assert(!stalled.search_phase_.first_trip_split_.pending);
         }
-        assert(stalled.search_phase_.first_trip_split_.pending);
-        assert(stalled.reason_ == "first_trip_scene_reobserve_turn");
-        std::cout
-            << "PASS clipped locked target without alternative enters bounded reobservation\n";
+        assert(clipped_reviewed);
+        assert(!evidence.target_grasp_range_inside && !evidence.pixel_grasp_ready);
+        // Model recognition permits review; the measured position still prevents enclosure.
+        TaskTick preclose(evidence);
+        assert(!stalled.reviewFirstTripCapture(preclose,"preclose",true));
+        assert(stopped(preclose.motion));
+        std::cout << "PASS recognized clipped target stays selected and reviewed; position still gates closure\n";
         return 0;
     }
     PushObservation input;
@@ -579,7 +583,7 @@ int main(int argc, char** argv) {
     input = step(1040);
     assert(input.pushboard_floor.valid && !input.pushboard_floor.inside);
     cfg.pushboard_floor.enabled = false;
-    // Real builder: sighted own-zone recovery needs no metric pose; UI120 uses the unpainted image.
+    // Real builder: sighted own-zone recovery needs no metric pose; UI140 uses the unpainted image.
     // No geometry pipeline or serial device exists; only run/IMU/gripper acknowledgements
     // and heading are supplied by this fixture. Never seed path_safe, turn_safe or arc_safe.
     cfg.request.controlled_empty_field = true;
@@ -641,11 +645,14 @@ int main(int argc, char** argv) {
     assert(!input.layout_count_region_px.empty() && input.capture_class_regions_px.empty());
     assert(!input.capture_path_valid && !input.hold_observable);
     assert(!input.transport_floor.valid);
-    // Floor evidence is still independently observable at UI120.
+    // UI120 cannot provide final-push evidence; UI140 samples around the held target.
+    camera_pitch=0;
+    for(int i=0;i<8;++i) input=step(1040,true,{},true);
+    assert(!input.transport_floor.valid);
     frame.setTo(cv::Scalar(160,100,60));
     bool colour_seen=false;
     for (int i=0;i<12;++i) {
-        camera_pitch=0;
+        camera_pitch=2000;
         input=step(1040,true,{},true);
         if (input.camera_pitch_stable) {
             assert(input.transport_floor.valid && input.transport_floor.region_valid && input.transport_floor.inside);
@@ -657,10 +664,16 @@ int main(int argc, char** argv) {
     assert(colour_seen);
     cfg.request.team="red";
     input=step(1040,true,{},true);
-    assert(input.transport_floor.valid && !input.transport_floor.region_valid && !input.transport_floor.inside);
+    assert(input.transport_floor.valid && input.transport_floor.region_valid && !input.transport_floor.inside);
     frame.setTo(cv::Scalar(0,0,200));
     input=step(1040,true,{},true);
     assert(input.transport_floor.valid && input.transport_floor.region_valid && input.transport_floor.inside);
+    assert(input.transport_floor.cargo_count==1 && input.transport_floor.windows.size()==4);
+    // Expected batch count is wired through the real observation builder.
+    previous.batch_size=2;
+    input=step(1040,true,{},true);
+    assert(input.transport_floor.valid && !input.transport_floor.region_valid && !input.transport_floor.inside);
+    previous.batch_size=1;
     // Real builder: raw per-half landmarks produce centreline evidence even
     // with no camera calibration or geometry pipeline (both are absent here).
     zone.width_m=.6f;zone.confirmed=true;

@@ -7,15 +7,14 @@ namespace rescue {
 struct FloorHsvRange {
     cv::Vec3i low, high;
 };
-struct TransportRegionConfig {
-    float min_width_fraction = .65f, min_height_fraction = .55f, min_bottom_fraction = .95f;
-    // Near-view floor colours exclude the purple wall and dark middle divider.
-    std::vector<FloorHsvRange> blue{{{90, 65, 65}, {115, 255, 255}}};
-    std::vector<FloorHsvRange> red{{{0, 80, 65}, {10, 255, 255}},
-                                 {{170, 80, 65}, {179, 255, 255}}};
+struct GraspCenterRange;
+struct TransportSurroundingsConfig {
+    // Pixels at the UI140 reference resolution; sample every side of each held box.
+    int gap_px = 8, band_px = 24;
+    float min_own = .50f, min_total_own = .80f;
 };
 struct PushboardFloorConfig {
-    TransportRegionConfig transport_region;
+    TransportSurroundingsConfig transport_surroundings;
     bool enabled = false;
     cv::Size image_size{1280, 720};
     int16_t pitch_cdeg = 2000;
@@ -39,16 +38,17 @@ struct PushboardFloorWindow {
 struct TransportFloorEvidence {
     uint64_t sample_us = 0;
     bool valid = false;
-    float own_fraction = 0; // Diagnostic only; never the transport release condition.
+    float own_fraction = 0; // Visible-pixel-weighted diagnostic across all cargo; each cargo qualifies separately.
     bool region_valid = false, inside = false;
-    cv::Rect region_box;
-    std::vector<cv::Point> region_contour;
-    float width_fraction = 0, height_fraction = 0, bottom_fraction = 0;
+    int cargo_count = 0;
+    // Four windows per cargo: front, rear, left and right in image coordinates.
+    std::vector<PushboardFloorWindow> windows;
 };
 TransportFloorEvidence observeTransportFloor(
     const cv::Mat& frame, const std::vector<SegDetection>& detections,
     const PushboardFloorConfig& config, const std::string& team,
-    bool stable_ui120, uint64_t capture_us);
+    bool stable_ui140, uint64_t capture_us,
+    const std::vector<GraspCenterRange>& grasp_ranges, int expected_cargo_count);
 
 struct PushboardFloorEvidence {
     uint64_t sample_us = 0;

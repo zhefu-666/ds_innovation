@@ -445,17 +445,17 @@ void captureTests() {
                out.motion.camera_pitch_cdeg == 0 && !in.pixel_view_handoff_ready);
         step(false);
         assert(stopped(out.motion) && out.reason == "pixel_target_wait");
-        d.box.y = 390; // Centre Y440 stays before the search UI120 handoff Y450.
+        d.box.y = 480; // Centre Y530 stays before the search UI120 handoff Y540.
         for (int i=0;i<20;++i) step();
-        assert(out.motion.vx_mps > 0 && out.motion.vx_mps <= .04f &&
+        assert(std::abs(out.motion.vx_mps - .10f) < 1e-6f &&
                out.motion.camera_pitch_cdeg == 0);
-        d.box.y = 400; // Centre reaches the earlier search UI120 handoff Y450.
+        d.box.y = 490; // Centre reaches the coarse Search -> Capture handoff Y540.
         d.box.x = 750; // off-centre must not prevent the stationary view switch
-        for (int i=0;i<20 && out.reason!="pixel_center_switch_to_140";++i) {
+        for (int i=0;i<20 && out.phase!=TaskPhase::Capture;++i) {
             step();
             assert(stopped(out.motion) && out.immediate_motion_stop);
         }
-        assert(out.reason == "pixel_center_switch_to_140" && stopped(out.motion) &&
+        assert(out.reason == "search_target_approached" && out.phase==TaskPhase::Capture && stopped(out.motion) &&
                out.motion.camera_pitch_cdeg == 2000);
         in.camera_pitch_stable = false;
         step();
@@ -468,7 +468,7 @@ void captureTests() {
         d.box.x = int(std::round(area.x + .45f * area.width)) - 50;
         d.box.y = 150; // centre Y200 is still outside the calibrated front boundary
         for (int i=0;i<30 && out.motion.vx_mps==0;++i) step();
-        assert(out.state == PushState::APPROACH || out.state == PushState::MID_APPROACH);
+        assert(out.state == PushState::PREPARE && out.phase==TaskPhase::Capture);
         assert(out.reason == "first_entry_approach" && out.motion.vx_mps > 0);
         step(false);
         assert(stopped(out.motion) && !task.search_entry_.confirmed);

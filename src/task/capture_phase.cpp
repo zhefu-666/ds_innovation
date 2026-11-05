@@ -5,8 +5,184 @@
 #include <iostream>
 #include <limits>
 namespace rescue {
+bool PushTask::updateCaptureViewHandoff(TaskTick& tick) {
+    auto& handoff = capture_phase_.view_handoff_;
+    const auto& in = tick.in;
+    tick.immediate_motion_stop = true;
+    const int pitch = pitchWait(in, tick.now);
+    if (pitch < 0) {
+        failStop(tick, "camera_pitch_timeout");
+        return true;
+    }
+    if (pitch > 0 && !handoff.confirmation_started_us)
+        handoff.confirmation_started_us = tick.now;
+    const bool scene_fresh = in.capture_scene_valid && in.capture_scene_us &&
+        in.capture_scene_us <= tick.now && tick.now-in.capture_scene_us <= t_.frame_timeout_us;
+    const auto object = std::find_if(in.capture_image_objects.begin(), in.capture_image_objects.end(),
+        [&](const auto& item) {
+            return item.id == in.target_id && item.label == trip_context_.label_ &&
+                   !item.box.empty();
+        });
+    const bool near_target = pitch > 0 && in.pixel_grasp_near_view && candidate(in,tick.now) &&
+        (!in.pixel_selection_managed || in.pixel_locked) && in.target_id == trip_context_.target_id_ &&
+        object != in.capture_image_objects.end() && scene_fresh &&
+        in.capture_scene_us > handoff.started_us && in.pixel_grasp_sample_us > handoff.started_us &&
+        in.pixel_grasp_sample_us <= tick.now &&
+        tick.now-in.pixel_grasp_sample_us <= t_.frame_timeout_us;
+    if (handoff.confirmation_started_us &&
+        tick.now-handoff.confirmation_started_us >= 1500000 &&
+        !(near_target && captureReviewStopped(in) && in.target_grasp_range_valid &&
+          in.target_grasp_range_inside && !in.target_grasp_range_past_rear)) {
+        // Return to the coarse view within Capture. The class, lock episode and
+        // total approach deadline survive; a fresh selector may replace its ID.
+        capture_phase_.pixel_handoff_retry_height_ = handoff.retry_height;
+        handoff = {};
+        capture_phase_.prepare_pitch_ = t_.track_pitch_cdeg;
+        pixel_alignment_ = {};
+        search_entry_ = {};
+        capture_scene_ = {};
+        reason_ = "capture_view_retry_120";
+        return true;
+    }
+    if (!pitch || !scene_fresh || !captureReviewStopped(in) || !near_target) {
+        handoff.frames = 0;
+        handoff.sample_us = handoff.stable_us = 0;
+        handoff.near_box = {};
+        handoff.near_label.clear();
+        reason_ = !pitch ? "camera_pitch_wait" : "pixel_capture_handoff_confirm";
+        return true;
+    }
+    if (in.capture_scene_us <= handoff.sample_us)
+        return true;
+    const double overlap = (handoff.near_box & object->box).area();
+    const double smaller = std::min(handoff.near_box.area(), object->box.area());
+    if (handoff.near_label != in.label || smaller <= 0 || overlap < .5 * smaller ||
+        (handoff.sample_us && in.capture_scene_us - handoff.sample_us > t_.frame_timeout_us))
+    {
+        handoff.frames = 0;
+        handoff.sample_us = handoff.stable_us = 0;
+    }
+    handoff.near_box = object->box;
+    handoff.near_label = in.label;
+    if (!handoff.frames)
+        handoff.stable_us = in.capture_scene_us;
+    handoff.sample_us = in.capture_scene_us;
+    if (++handoff.frames < t_.pixel_align_stable_frames ||
+        in.capture_scene_us - handoff.stable_us < t_.pixel_align_stable_us)
+        return true;
+    handoff = {};
+    capture_phase_.pixel_handoff_retry_height_ = 0;
+    actionProgress().started_us = tick.now; // entry budget begins after view acquisition
+    reason_ = "pixel_capture_handoff_ready";
+    return true; // Capture performs entry positioning and inventory review next tick
+}
+
 void PushTask::updateCapturePhase(TaskTick& tick) {
     switch (capture_phase_.action) {
+        case CaptureAction::Prepare: {
+            if (search_phase_.pixel_approach_started_us_ &&
+                tick.now-search_phase_.pixel_approach_started_us_ > t_.approach_budget_us) {
+                enter(PushState::CAPTURE_FAIL,tick.now,"pixel_approach_timeout");
+                break;
+            }
+            if (capture_phase_.prepare_pitch_ == t_.track_pitch_cdeg) {
+                if (capture_phase_.view_handoff_.started_us) {
+                    updateSearchViewHandoff(tick);
+                    break;
+                }
+                if (!tracking(tick.in)) {
+                    tick.immediate_motion_stop = true;
+                    reason_ = "capture_retry_target_wait";
+                    break;
+                }
+                if (updateSearchViewHandoff(tick))
+                    break;
+                if (!captureReviewStopped(tick.in) && !pixel_alignment_.last_sample_us) {
+                    tick.immediate_motion_stop = true;
+                    reason_ = "capture_retry_stop_wait";
+                    break;
+                }
+                if (!pixelAlign(tick)) break;
+                commandFrame(1,tick.now);
+                const int frame = frameWait(tick.in,1,tick.now);
+                if (frame < 0) {
+                    failStop(tick,"gripper_open_timeout");
+                    break;
+                }
+                if (!frame) {
+                    reason_ = "gripper_feedback_wait";
+                    break;
+                }
+                reason_ = "capture_retry_approach_120";
+                drive(tick,.10f,0);
+                break;
+            }
+            const int p = pitchWait(tick.in, tick.now);
+            if (p < 0) {
+                failStop(tick, "camera_pitch_timeout");
+                break;
+            }
+            if (p == 0) {
+                reason_ = "camera_pitch_wait";
+                break;
+            }
+            commandFrame(1, tick.now);
+            const int g = frameWait(tick.in, 1, tick.now);
+            if (g < 0) {
+                failStop(tick, "gripper_open_timeout");
+                break;
+            }
+            if (g == 0) {
+                reason_ = "gripper_feedback_wait";
+                break;
+            }
+            if (tick.elapsed > t_.prepare_budget_us) {
+                enter(PushState::CAPTURE_FAIL, tick.now, "pixel_corridor_unresolved");
+                break;
+            }
+            if (!tracking(tick.in)) {
+                reason_ = "pixel_target_wait";
+                actionProgress().confirmations = 0;
+                break;
+            }
+            if (search_entry_.review_before_entry) {
+                if (reviewFirstTripCapture(tick, "startup_reselected") ||
+                    search_phase_.first_trip_split_.pending)
+                    search_entry_.review_before_entry = false;
+                break;
+            }
+            if (!locateSearchEntry(tick))
+                break;
+            // Inventory review starts only AFTER the selected target entered first; mixed boxes may enter.
+            if (!reviewFirstTripCapture(tick, "search_positioned"))
+                break;
+            trip_context_.verdict_ = checkCorridor(tick.in.corridor,
+                                                   tick.in.corridor_complete,
+                                                   tick.in.corridor_occlusion_free,
+                                                   trip_context_.label_,
+                                                   first_);
+            if (trip_context_.verdict_ == RuleVerdict::INCOMPLETE) {
+                actionProgress().confirmations = 0;
+                reason_ = "pixel_corridor_incomplete";
+                break;
+            }
+            if (trip_context_.verdict_ != RuleVerdict::OK) {
+                beginPixelSplit(tick);
+                break;
+            }
+            if (trip_context_.seen_ != tick.in.corridor) {
+                trip_context_.seen_ = tick.in.corridor;
+                actionProgress().confirmations = 0;
+            }
+            if (++actionProgress().confirmations < t_.corridor_confirm_frames)
+                break;
+            trip_context_.pending_ = tick.in.corridor;
+            search_entry_.handoff = true;
+            search_entry_.accepted_us = tick.in.pixel_grasp_sample_us;
+            enter(PushState::RUSH, tick.now, "pixel_first_entry_inventory_ok");
+            break;
+        }
+
         case CaptureAction::Advance: {
             if (t_.pixel_grasp_enabled && search_entry_.handoff) {
                 tick.immediate_motion_stop = true;
@@ -307,23 +483,27 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
             final_validation_ = "running";
             const bool pixel_review =
                 t_.pixel_grasp_enabled && targetSelectable(trip_context_.label_, first_);
-            auto scene_verdict = CaptureSceneVerdict::Clear;
             if (pixel_review) {
-                scene_verdict = evaluateCaptureScene(tick.in);
-                const bool new_image = tick.in.capture_scene_us > capture_scene_.confirm_us;
-                if (scene_verdict == CaptureSceneVerdict::Incomplete || !new_image) {
-                    reason_ = "first_trip_postclose_review_" + capture_scene_.detail;
+                // Closure has finished. Verify the actual jaw contents using fresh
+                // post-close images; approach-path neighbours no longer veto transport.
+                const auto sample = tick.in.capture_scene_us;
+                const bool fresh_image =
+                    tick.in.camera_pitch_stable && tick.in.pixel_grasp_near_view &&
+                    tick.in.capture_scene_valid && sample > tick.now - tick.elapsed &&
+                    sample > capture_scene_.confirm_us && sample <= tick.now &&
+                    tick.now - sample <= t_.frame_timeout_us;
+                if (!fresh_image) {
+                    reason_ = "first_trip_postclose_held_image_wait";
                     if (tick.elapsed > t_.verify_budget_us) {
                         final_validation_ = "failed";
                         enter(PushState::CAPTURE_FAIL, tick.now, reason_.c_str());
                     }
                     break;
                 }
-                capture_scene_.confirm_us = tick.in.capture_scene_us;
-                // Choose while stopped before releasing mixed contents. A valid
-                // single-view count may not replace the selected whole load.
-                if (!reviewCaptureLoad(tick))
-                    break;
+                capture_scene_.confirm_us = capture_scene_.sample_us = sample;
+                capture_scene_.blocker_id = -1;
+                capture_scene_.blocker_box = {};
+                capture_scene_.association.clear();
                 if (capture_load_.active && tick.in.hold_observable && tick.in.held_complete &&
                     tick.in.held != capture_load_.choice.inventory) {
                     final_validation_ = "failed";
@@ -352,11 +532,20 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                 verification.reason = "first_trip_actual_count_unverified";
                 reason_ = verification.reason;
             }
-            if (pixel_review && scene_verdict != CaptureSceneVerdict::Clear &&
-                verification.outcome == CaptureVerificationOutcome::Verified) {
-                verification.outcome = CaptureVerificationOutcome::CaptureFail;
-                verification.reason = "first_trip_postclose_neighbor_in_capture_path";
-                reason_ = verification.reason;
+            if (pixel_review) {
+                capture_scene_.inventory = tick.in.held;
+                const auto held_verdict = checkTrip(tick.in.held, first_);
+                const bool illegal_held =
+                    held_verdict != RuleVerdict::OK && held_verdict != RuleVerdict::EMPTY;
+                capture_scene_.status =
+                    verification.outcome == CaptureVerificationOutcome::Verified ? "clear"
+                    : illegal_held || verification.outcome == CaptureVerificationOutcome::AbortDrop
+                        ? "risk"
+                        : "incomplete";
+                capture_scene_.detail = !verification.reason.empty() ? verification.reason
+                                        : illegal_held
+                                            ? std::string("held_") + verdictName(held_verdict)
+                                            : "held_inventory_unverified";
             }
             if (verification.outcome == CaptureVerificationOutcome::Verified)
                 final_validation_ = "passed";
@@ -397,8 +586,6 @@ void PushTask::updateCapturePhase(TaskTick& tick) {
                 }
                 case CaptureVerificationOutcome::CaptureFail:
                     enter(PushState::CAPTURE_FAIL, tick.now, "");
-                    if (pixel_review && scene_verdict == CaptureSceneVerdict::Risk)
-                        split.capture_retry = true;
                     break;
                 case CaptureVerificationOutcome::AbortDrop:
                     enter(PushState::ABORT_DROP, tick.now, "");

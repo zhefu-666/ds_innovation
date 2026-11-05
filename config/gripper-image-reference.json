@@ -390,7 +390,12 @@
   "approach_camera_ui_deg": 120,
   "approach_camera_pitch_cdeg": 0,
   "membership_feature": "bbox_center_xy",
-  "dangerous_front_risk_region_xyxy_px": [209, 160, 1071, 180],
+  "dangerous_front_risk_region_xyxy_px": [
+    209,
+    160,
+    1071,
+    180
+  ],
   "dangerous_front_risk_source": "2026-11-04 engineering risk extension: logged dangerous box [394,38,264,275] centre [526,175.5] was physically retained but omitted by Y180. Additional centre band only; keep existing cargo union and eight confirmed outside samples. This is a risk gate, not a newly measured grasp boundary.",
   "membership_source": "User 2026-10-31: eight outside jaw positions apply to every cargo kind; ordinary runtime centre region widened symmetrically to X209..1071 after confirmed in-frame split target; dangerous occupancy uses the union of current cargo ranges, never a selectable target.",
   "non_graspable_samples": [
@@ -699,41 +704,12 @@
       "Both windows must have sufficient visible floor; first own-colour hit stops, then fresh stationary confirmation permits release.",
       "Initial windows/HSV verified on user white-floor and blue-floor screenshots; red and full physical entry require field validation."
     ],
-    "transport_region": {
-      "min_width_fraction": 0.65,
-      "min_height_fraction": 0.55,
-      "min_bottom_fraction": 0.95,
-      "hsv": {
-        "blue": [
-          [
-            90,
-            65,
-            65,
-            115,
-            255,
-            255
-          ]
-        ],
-        "red": [
-          [
-            0,
-            80,
-            65,
-            10,
-            255,
-            255
-          ],
-          [
-            170,
-            80,
-            65,
-            179,
-            255,
-            255
-          ]
-        ]
-      },
-      "source": "Initial UI120 thresholds from operator-accepted left-half view (2026-11-03); width AND height AND bottom; tune with field replay."
+    "transport_surroundings": {
+      "gap_px": 8,
+      "band_px": 24,
+      "min_own": 0.5,
+      "min_total_own": 0.8,
+      "source": "UI140 final push: every side >=50% own colour and all four bands combined >=80%, weighted by visible pixels, independently for every held cargo. Tolerates internal white markings in 20261106-051410 trace; initial image thresholds, not physical motion validation."
     }
   }
 }

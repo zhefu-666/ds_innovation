@@ -505,7 +505,7 @@ static void firstTripPrePushQuantityReview() {
         assert(out.reason!="carry_pre_push_clear");
         if(out.motion.vx_mps>0) {
             assert(r.reversed && r.turned && r.reviews>=3);
-            assert(out.reason=="carry_ui120_region_advance");
+            assert(out.reason=="carry_ui140_surroundings_advance");
             pushing=true;break;
         }
     }
@@ -521,13 +521,14 @@ static void categoryReviewLifecycle() {
         for(int n=0;n<90;++n) {
             const auto out=clean.step();
             assert(out.state!=PushState::SAFE_STOP && !clean.opened && !clean.turned);
-            if(out.reason.find("carry_pre_push_")==0)
+            if(out.reason.find("carry_pre_push_")==0 && out.reason!="carry_pre_push_clear")
                 assert(clean.task.desiredPitch()==kTransportReviewPitchCdeg);
-            if(out.reason=="carry_ui120_region_advance")
-                assert(clean.task.desiredPitch()==clean.tuning.track_pitch_cdeg);
-            assert(!clean.in.pixel_grasp_near_view);
+            if(out.reason=="carry_ui140_surroundings_advance")
+                assert(clean.task.desiredPitch()==clean.tuning.near_pitch_cdeg);
+            if(out.reason=="carry_ui140_surroundings_advance")
+                assert(clean.in.pixel_grasp_near_view);
             cleared=cleared || out.reason=="carry_pre_push_clear";
-            if(out.reason=="carry_ui120_region_advance" && out.motion.vx_mps>0) {pushing=true;break;}
+            if(out.reason=="carry_ui140_surroundings_advance" && out.motion.vx_mps>0) {pushing=true;break;}
         }
         assert(cleared && pushing);
     }
@@ -549,17 +550,18 @@ static void avoidanceLifecycle() {
             if(r.reversed)r.obstacle_x=r.expected_turn<0 ? 650 : 550;
             assert(out.state==PushState::CARRY && !r.opened);
             assert(r.task.trip_context_.trip_.total()==1 && r.task.total_==0);
-            if(out.reason.find("carry_pre_push_")==0)
+            if(out.reason.find("carry_pre_push_")==0 && out.reason!="carry_pre_push_clear")
                 assert(r.task.desiredPitch()==kTransportReviewPitchCdeg);
             if(out.motion.vx_mps!=0 || out.motion.wz_rps!=0)
-                assert(r.task.desiredPitch()==r.tuning.track_pitch_cdeg);
+                assert(r.task.desiredPitch()==(out.motion.vx_mps>0 ? r.tuning.near_pitch_cdeg
+                                                                 : r.tuning.track_pitch_cdeg));
             if(out.motion.vx_mps>0) {
                 assert(r.reversed && r.turned && r.reviews>=3);
                 const float wanted=wrapAngle(initial_yaw+r.expected_turn*10.f*float(CV_PI)/180.f);
                 assert(std::abs(wrapAngle(r.yaw-wanted))<.02f);
                 assert(std::abs(wrapAngle(r.task.transport_phase_.jaw_sequence_.heading-wanted))<.001f);
                 assert(r.turn_position>=-.12f && r.turn_position<=-.095f);
-                assert(out.reason=="carry_ui120_region_advance");pushing=true;break;
+                assert(out.reason=="carry_ui140_surroundings_advance");pushing=true;break;
             }
         }
         assert(pushing);
@@ -568,7 +570,7 @@ static void avoidanceLifecycle() {
         const int reviewed=r.reviews;
         for(int n=0;n<12;++n) {
             const auto out=r.step();
-            assert(out.reason=="carry_ui120_region_advance" && out.motion.vx_mps>0);
+            assert(out.reason=="carry_ui140_surroundings_advance" && out.motion.vx_mps>0);
             assert(!r.opened && r.reviews==reviewed);
         }
     }
@@ -622,7 +624,7 @@ static void avoidanceIgnoresHeadingChanges() {
                 assert(std::abs(wrapAngle(r.yaw-wanted))<.02f);
                 assert(std::abs(wrapAngle(r.task.transport_phase_.jaw_sequence_.heading-wanted))<.001f);
                 assert(r.turn_position>=-.12f && r.turn_position<=-.095f);
-                assert(out.reason=="carry_ui120_region_advance");
+                assert(out.reason=="carry_ui140_surroundings_advance");
                 pushing=true;break;
             }
         }
@@ -634,7 +636,7 @@ static void cleanPushAndMissingEvidence() {
     AvoidRig clean;clean.obstacle=false;bool pushing=false;
     for(int n=0;n<100;++n) {
         auto out=clean.step();assert(!clean.opened && !clean.turned && !clean.reversed);
-        if(out.reason=="carry_ui120_region_advance" && out.motion.vx_mps>0) {pushing=true;break;}
+        if(out.reason=="carry_ui140_surroundings_advance" && out.motion.vx_mps>0) {pushing=true;break;}
     }
     assert(pushing);
     AvoidRig missing;missing.visible=false;

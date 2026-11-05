@@ -239,7 +239,14 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     const bool selecting_task =
         previous.run_status == RunStatus::Running &&
         (previous.phase == TaskPhase::Search || previous.phase == TaskPhase::Capture);
-    pixel_selector.setCaptureLoad(previous.capture_keep_inventory);
+    const bool capture_preparing = previous.phase == TaskPhase::Capture &&
+        previous.capture_action == CaptureAction::Prepare && !previous.recovering;
+    Inventory selection_load = previous.capture_keep_inventory;
+    if (capture_preparing) {
+        selection_load = {};
+        selection_load.add(task.targetLabel());
+    }
+    pixel_selector.setCaptureLoad(selection_load);
     if (previous.pixel_selection_paused)
         pixel_selector.reset();
     pixel_selector.syncSplitSelection(previous.split_target_reselecting,
@@ -249,10 +256,11 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     else if (!previous.split_target_reselecting)
         pixel_selector.syncTaskState(
             previous.state, selecting_task ? previous.target_id : -1, task.targetLabel(),
-            previous.phase == TaskPhase::Search && !previous.recovering &&
-                previous.search_action != SearchStatusAction::Prepare &&
-                previous.search_action != SearchStatusAction::TurnAway &&
-                previous.search_action != SearchStatusAction::Recover);
+            capture_preparing ||
+                (previous.phase == TaskPhase::Search && !previous.recovering &&
+                 previous.search_action != SearchStatusAction::Prepare &&
+                 previous.search_action != SearchStatusAction::TurnAway &&
+                 previous.search_action != SearchStatusAction::Recover));
     // Zone detections are navigation landmarks; they never enter cargo selection,
     // crowding, row grouping or gripper inventory as solid objects.
     std::vector<SegDetection> cargo_detections;
@@ -497,10 +505,11 @@ ObservationResult ObservationBuilder::build(const cv::Mat& frame,
     const bool transport_floor_view = stable_view && previous.phase == TaskPhase::Transport &&
         previous.state == PushState::CARRY &&
         input.camera_pitch_cdeg != kCameraPitchInvalid &&
-        std::abs(int(input.camera_pitch_cdeg) - int(config_.task.track_pitch_cdeg)) <=
+        std::abs(int(input.camera_pitch_cdeg) - int(config_.task.near_pitch_cdeg)) <=
             config_.task.pitch_tolerance_cdeg;
     input.transport_floor = observeTransportFloor(frame, detections, config_.pushboard_floor,
-                                                   config.team, transport_floor_view, timestamp);
+                                                   config.team, transport_floor_view, timestamp,
+                                                   config_.capture.grasp_center_ranges, previous.batch_size);
     // Gripper completion: id echoed and observed open/closed state matches the last target.
     // Read-only feedback never sends, so it never acknowledges anything.
     UARTController::GripperAck gripper_ack;

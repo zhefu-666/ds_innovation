@@ -62,7 +62,8 @@ enum class CaptureAction {
     Advance,
     LowerFrame,
     Verify,
-    Recover
+    Recover,
+    Prepare
 };
 enum class TransportAction {
     Carry,

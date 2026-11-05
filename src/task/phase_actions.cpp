@@ -171,7 +171,7 @@ bool PushTask::locateSearchEntry(TaskTick& tick) {
             const bool inside = center.x >= area.x && center.x <= area.x + area.width &&
                                 center.y >= area.y && center.y <= area.y + area.height;
             target_seen |= object.id == in.target_id && object.label == in.label;
-            if (!object.complete && (inside || object.id == in.target_id)) {
+            if (!object.complete && object.id != in.target_id && inside) {
                 reason_ = "first_entry_incomplete_scene";
                 return false;
             }
@@ -254,7 +254,9 @@ bool PushTask::pixelAlignTarget(TaskTick& tick, bool strict, bool hold_position,
     // Brake/Settle below still wait for stopped commands and fresh stable images.
     const bool approach_alignment =
         (phase_ == TaskPhase::Search && search_phase_.action == SearchAction::Approach) ||
-        (phase_ == TaskPhase::Capture && capture_phase_.action == CaptureAction::Advance);
+        (phase_ == TaskPhase::Capture &&
+         (capture_phase_.action == CaptureAction::Advance ||
+          capture_phase_.action == CaptureAction::Prepare));
     const bool first_object_clear = !in.pixel_grasp_near_view ||
         search_entry_.first_id == -1 || search_entry_.first_id == in.target_id;
     if (approach_alignment && first_object_clear && in.run && in.safety_ok &&

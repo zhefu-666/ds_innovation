@@ -479,7 +479,7 @@ void jawEnterReleaseRetreat() {
         rig.input.sent_velocity_valid = rig.input.heading_valid = true;
         rig.input.gripper_feedback_open = 0;
         rig.input.heading_rad = 0;
-        for (int i=0;i<50 && rig.task.desiredPitch()!=0;++i) {
+        for (int i=0;i<50 && rig.task.desiredPitch()!=parameters.near_pitch_cdeg;++i) {
             rig.input.supply_view={};
             auto& half=rig.input.supply_view;
             half.valid=half.inside=half.entrance_valid=true;
@@ -498,24 +498,21 @@ void jawEnterReleaseRetreat() {
             rig.stationary(false);
             assert(rig.output.state==PushState::CARRY && rig.output.motion.vx_mps==0);
         }
-        assert(rig.task.desiredPitch()==0);
+        assert(rig.task.desiredPitch()==parameters.near_pitch_cdeg);
         for (int i=0;i<20 && rig.output.state==PushState::CARRY;++i) {
-            rig.input.camera_pitch_cdeg=0;
+            rig.input.camera_pitch_cdeg=parameters.near_pitch_cdeg;
             rig.input.transport_floor={};
             rig.input.transport_floor.sample_us=rig.input.now_us+kTick;
             rig.input.transport_floor.valid=rig.input.transport_floor.region_valid=true;
             rig.input.transport_floor.inside=true;
             rig.tick();
             assert(rig.output.motion.gripper_offset==20);
-            if (rig.output.reason=="carry_ui120_region_overrun")
-                assert(rig.output.motion.vx_mps==.06f);
-            else
-                assert(rig.output.motion.vx_mps==0 && rig.output.motion.wz_rps==0);
+            assert(rig.output.motion.vx_mps==0 && rig.output.motion.wz_rps==0);
         }
         assert(rig.output.state==PushState::RAISE_RELEASE);
-        assert(rig.output.reason=="carry_ui120_region_stopped");
+        assert(rig.output.reason=="carry_ui140_surroundings_stopped");
         rig.input.camera_pitch_cdeg=rig.task.desiredPitch();
-        assert(rig.input.camera_pitch_cdeg==0);
+        assert(rig.input.camera_pitch_cdeg==parameters.near_pitch_cdeg);
         rig.tick();
         assert(rig.output.motion.gripper_offset==0);
         rig.stationary(true);
@@ -527,7 +524,7 @@ void jawEnterReleaseRetreat() {
         retreat.ready();
         assert(rig.output.state==PushState::BACK_OUT && rig.output.motion.vx_mps<0);
         assert(rig.output.reason=="jaw_back_out_015m");
-        rig.report("jaw_020m_align_ui120_colour_open_then_imu_retreat");
+        rig.report("jaw_020m_align_ui140_surroundings_open_then_imu_retreat");
     }
 }
 

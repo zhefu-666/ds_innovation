@@ -64,7 +64,7 @@
     "controlled_empty_field": true
   },
   "runtime": {
-    "team": "blue",
+    "team": "red",
     "show": true,
     "save_output": false,
     "dry_run": false,

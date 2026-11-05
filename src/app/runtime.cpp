@@ -1151,14 +1151,19 @@ int Runtime::run() {
             }
             if (input.transport_floor.sample_us) {
                 const auto& f=input.transport_floor;
-                log << "[TRANSPORT_REGION] sample_us=" << f.sample_us
-                    << " valid=" << f.valid << " found=" << f.region_valid
-                    << " inside=" << f.inside << " width=" << f.width_fraction
-                    << " height=" << f.height_fraction << " bottom=" << f.bottom_fraction
-                    << " box=" << f.region_box << " own_fraction_diagnostic=" << f.own_fraction
-                    << " min_width=" << resolved.pushboard_floor.transport_region.min_width_fraction
-                    << " min_height=" << resolved.pushboard_floor.transport_region.min_height_fraction
-                    << " min_bottom=" << resolved.pushboard_floor.transport_region.min_bottom_fraction << "\n";
+                log << "[TRANSPORT_SURROUNDINGS] sample_us=" << f.sample_us
+                    << " valid=" << f.valid << " observable=" << f.region_valid
+                    << " inside=" << f.inside << " cargo=" << f.cargo_count
+                    << " expected=" << out.batch_size
+                    << " min_own=" << resolved.pushboard_floor.transport_surroundings.min_own
+                    << " min_total_own=" << resolved.pushboard_floor.transport_surroundings.min_total_own
+                    << " own_fraction=" << f.own_fraction;
+                for (size_t i=0; i<f.windows.size(); ++i) {
+                    const auto& w=f.windows[i];
+                    log << " sample" << i << "=" << w.own << ",visible=" << w.visible
+                        << ",enemy=" << w.enemy << ",valid=" << w.valid;
+                }
+                log << "\n";
             }
             for (const auto& d : detections)
                 log << "[TARGET] id=" << d.track_id << " label=" << d.label
@@ -1319,15 +1324,23 @@ int Runtime::run() {
             }
         }
 
-        if (input.transport_floor.region_valid) {
+        if (input.transport_floor.sample_us) {
             const auto& f=input.transport_floor;
-            const cv::Scalar color=f.inside ? cv::Scalar(0,255,0) : cv::Scalar(0,180,255);
-            cv::polylines(frame,std::vector<std::vector<cv::Point>>{f.region_contour},true,color,3);
-            const std::string text="UI120 HALF W="+std::to_string(int(f.width_fraction*100))+
-                "% H="+std::to_string(int(f.height_fraction*100))+
-                "% B="+std::to_string(int(f.bottom_fraction*100))+"%"+
-                (f.inside ? " STOP/CONFIRM" : " APPROACH");
-            cv::putText(frame,text,{20,frame.rows-20},cv::FONT_HERSHEY_SIMPLEX,.6,color,2);
+            const cv::Rect image(0,0,frame.cols,frame.rows);
+            for (size_t i=0; i<f.windows.size(); ++i) {
+                const auto& w=f.windows[i];
+                const auto roi=w.roi & image;
+                if (roi.empty()) continue;
+                const bool own=w.valid && w.own>=resolved.pushboard_floor.transport_surroundings.min_own;
+                const cv::Scalar color=own ? cv::Scalar(0,255,0) : cv::Scalar(0,180,255);
+                cv::rectangle(frame,roi,color,2);
+                cv::putText(frame,std::to_string(i)+":"+std::to_string(int(w.own*100))+"%",
+                            {roi.x,std::max(15,roi.y-4)},cv::FONT_HERSHEY_SIMPLEX,.4,color,1);
+            }
+            const std::string text="UI140 CARGO="+std::to_string(f.cargo_count)+
+                (f.inside ? " INSIDE/CONFIRM" : f.region_valid ? " APPROACH" : " FLOOR WAIT");
+            cv::putText(frame,text,{20,frame.rows-20},cv::FONT_HERSHEY_SIMPLEX,.6,
+                        f.inside ? cv::Scalar(0,255,0) : cv::Scalar(0,180,255),2);
         }
         const char* output_label = !link ? "PREVIEW - NO MCU LINK"
                                    : out.hardware_output_enabled

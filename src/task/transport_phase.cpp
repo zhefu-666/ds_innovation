@@ -444,6 +444,7 @@ bool PushTask::updatePrePushReview(TaskTick& tick) {
         if (++review.frames<3) return true;
         if (!in.transport_external_blocked) {
             review.checked=true;review.stage=Stage::Idle;
+            d.approach_pitch_=t_.near_pitch_cdeg;
             reason_="carry_pre_push_clear";return true;
         }
         if (in.transport_front_objects.empty()) {
@@ -486,6 +487,7 @@ bool PushTask::updatePrePushReview(TaskTick& tick) {
             q.stage=TransportPhaseData::JawSequence::Stage::ColourAdvance;
             q.stopped_us=q.visual_last_us=0;q.visual_frames=0;
             review.checked=true;stage(Stage::Idle);
+            d.approach_pitch_=t_.near_pitch_cdeg;
             reason_="carry_avoid_complete";
             std::cout<<"[TRANSPORT_AVOID] completed=1 side="<<(review.turn_sign>0?"left":"right")
                      <<" reverse_m=0.1 turn_deg=10 next=push"<<std::endl;
@@ -586,9 +588,8 @@ void PushTask::updatePixelCarry(TaskTick& tick) {
     q.active = true;
     carry_alignment_ = {};
     if (updatePrePushReview(tick)) return;
-    const bool colour_leg = q.stage == Stage::ColourAdvance || q.stage == Stage::ColourStop ||
-        q.stage == Stage::ColourOverrun;
-    const int16_t route_pitch = colour_leg ? t_.track_pitch_cdeg : t_.far_pitch_cdeg;
+    const bool colour_leg = q.stage == Stage::ColourAdvance || q.stage == Stage::ColourStop;
+    const int16_t route_pitch = colour_leg ? t_.near_pitch_cdeg : t_.far_pitch_cdeg;
     d.approach_pitch_ = route_pitch;
     const bool view = in.camera_pitch_stable && in.camera_pitch_cdeg != kCameraPitchInvalid &&
         std::abs(int(in.camera_pitch_cdeg) - int(d.approach_pitch_)) <= t_.pitch_tolerance_cdeg;
@@ -607,82 +608,49 @@ void PushTask::updatePixelCarry(TaskTick& tick) {
     };
     if (q.stage != Stage::ColourStop)
         d.jaw_retreat_ = {};
-    if (!view) {
+    if (!view && q.stage != Stage::ColourStop) {
         d.jaw_retreat_ = {};
         q.stopped_us = 0; q.visual_frames=0; q.visual_last_us=0;
         stop("carry_zone_view_wait");
         return;
     }
     if (colour_leg) {
-        // Close-range keypoints no longer select, veto or restart the final
-        // push. The already-aligned half's floor contour supplies the endpoint.
+        // UI140 samples the floor around every held object; close-range
+        // keypoints and whole-image colour extent do not supply the endpoint.
         const auto& floor = in.transport_floor;
+        // Floor evidence supplies a positive endpoint, not permission to keep pushing.
+        // Missing cargo/bands must not alternate immediate stops with acceleration.
         const bool fresh = floor.valid && floor.sample_us && floor.sample_us <= tick.now &&
             tick.now - floor.sample_us <= t_.frame_timeout_us;
-        if (!fresh) {
-            d.jaw_retreat_ = {};
-            q.stopped_us=0; q.visual_frames=0; q.visual_last_us=0;
-            stop("carry_ui120_region_wait");
-            return;
-        }
-        const bool reached = floor.region_valid && floor.inside;
+        const bool reached = fresh && floor.region_valid && floor.inside;
         if (q.stage == Stage::ColourAdvance) {
             if (reached) {
-                q.stage=Stage::ColourOverrun;
-                q.colour_overrun_us=tick.now;
-                q.colour_overrun_wz=std::clamp(t_.heading_gain*wrapAngle(q.heading-in.heading_rad),-.15f,.15f);
-                reason_="carry_ui120_region_overrun";
-                drive(tick,.06f,q.colour_overrun_wz,true);
+                stop("carry_ui140_surroundings_stop");
+                q.stage=Stage::ColourStop;
+                q.stopped_us=0; q.visual_frames=0; q.visual_last_us=0;
                 return;
             }
             if (!in.heading_valid || !std::isfinite(in.heading_rad)) {
-                stop("carry_ui120_heading_wait");
+                stop("carry_ui140_heading_wait");
                 return;
             }
             const float error=wrapAngle(q.heading-in.heading_rad);
             if (std::abs(error)>10.f*float(CV_PI)/180.f) {
-                stop("carry_ui120_heading_realign");
+                stop("carry_ui140_heading_realign");
                 if (in.sent_velocity_valid && std::isfinite(in.sent_vx_mps) &&
                     std::abs(in.sent_vx_mps)<.001f)
                     drive(tick,0,std::clamp(t_.heading_gain*error,-.3f,.3f),true);
                 return;
             }
-            reason_="carry_ui120_region_advance";
+            reason_="carry_ui140_surroundings_advance";
             drive(tick,.06f,std::clamp(t_.heading_gain*error,-.15f,.15f),true);
             return;
         }
-        if (q.stage == Stage::ColourOverrun) {
-            if (tick.now-q.colour_overrun_us < 300000) {
-                reason_="carry_ui120_region_overrun";
-                drive(tick,.06f,q.colour_overrun_wz,true);
-                return;
-            }
-            stop("carry_ui120_region_stop");
-            q.stage=Stage::ColourStop;
-            q.stopped_us=0; q.visual_frames=0; q.visual_last_us=0;
-            return;
-        }
-        stop("carry_ui120_region_confirm");
-        if (!reached) {
-            d.jaw_retreat_ = {};
-            q.stage=Stage::ColourAdvance;
-            q.stopped_us=0; q.visual_frames=0; q.visual_last_us=0;
-            return;
-        }
+        // ColourStop latches the first observed entry. Brake before opening;
+        // later missing/changed floor observations cannot restart translation.
+        stop("carry_ui140_surroundings_confirm");
         prepareJawRetreat(tick);
-        // Confirm only with three distinct captures made after the chassis
-        // has been stopped for 250 ms. A stale/failed contour revokes the hit.
-        if (!settled()) {
-            q.visual_frames=0; q.visual_last_us=0;
-            return;
-        }
-        if (floor.sample_us<=q.stopped_us+250000)
-            return;
-        if (floor.sample_us>q.visual_last_us) {
-            q.visual_last_us=floor.sample_us;
-            q.visual_frames=std::min(3,q.visual_frames+1);
-        }
-        if (q.visual_frames<3)
+        if (!settled())
             return;
         d.baseline_ = in.zone_counts_valid && in.zone_inventory_complete
             ? (d.half_injured_ ? in.zone_injured_count : in.zone_supply_count) : -1;
@@ -690,7 +658,7 @@ void PushTask::updatePixelCarry(TaskTick& tick) {
             ? (d.half_injured_ ? in.zone_supply_count : in.zone_injured_count) : -1;
         d.delivery_geometry_id_=in.zone_estimate.geometry_id;
         d.delivery_verification_.resetInventoryEvidence();
-        enter(PushState::RAISE_RELEASE,tick.now,"carry_ui120_region_stopped");
+        enter(PushState::RAISE_RELEASE,tick.now,"carry_ui140_surroundings_stopped");
         return;
     }
     const auto& selected = d.half_injured_ ? in.injured_view : in.supply_view;
@@ -1134,7 +1102,11 @@ void PushTask::updatePixelCarry(TaskTick& tick) {
                 tick.immediate_motion_stop=tick.motion.wz_rps==0;
                 return;
             }
-            stop("carry_half_reacquire_wait");
+            // No own-zone direction after the local sweep: keep scanning
+            // instead of waiting indefinitely on a missing or enemy zone.
+            reason_="searching_own_zone";
+            scanSpin(tick);
+            tick.immediate_motion_stop=tick.motion.wz_rps==0;
             return;
         }
         // Only the first leg follows a fresh whole-zone bearing. Distance and
@@ -1920,7 +1892,7 @@ void PushTask::updatePixelCarry(TaskTick& tick) {
         q.heading=in.heading_rad; q.image_normal_valid=true;
         // One stationary confirmation authorizes the near-view push directly.
         q.stage=Stage::ColourAdvance;
-        d.approach_pitch_=t_.track_pitch_cdeg;
+        d.approach_pitch_=t_.near_pitch_cdeg;
         q.stopped_us=0; resetVisual();
         reason_="carry_pre_entry_aligned";
         return;

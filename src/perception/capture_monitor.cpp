@@ -398,10 +398,10 @@ void CaptureMonitor::update(PushObservation& in,
             }
             ++it;
         }
-        bool complete = in.pixel_grasp_target_valid, occlusion_free = true, followed = true;
+        bool complete = in.pixel_grasp_target_valid, followed = true;
         bool ambiguous = false;
         std::vector<const SegDetection*> frame_members;
-        std::vector<const SegDetection*> members;
+        std::vector<const SegDetection*> members, held_members;
         std::map<int, std::vector<cv::Point2f>> next;
         if (view_ != -2 || !in.gripper_closed_observed)
             history_.clear();
@@ -409,6 +409,7 @@ void CaptureMonitor::update(PushObservation& in,
         bool layout_complete = true;
         for (const auto* d : fresh) {
             const auto center = d->center();
+            const bool primary = d->track_id == in.target_id && d->label == in.label;
             // Split layout uses its own region; held evidence keeps the jaw calibration.
             const bool split_ordinary = labelOf(*d) == "ordinary_supply";
             if (split_ordinary)
@@ -420,11 +421,11 @@ void CaptureMonitor::update(PushObservation& in,
                 frame_members.push_back(d);
                 if (split_ordinary)
                     ++in.split_ordinary_count;
-                if (d->confidence < c_.min_confidence || d->box.x < 0 || d->box.y < 0 ||
-                    d->box.br().x >= ref.image_width_px || d->box.br().y >= ref.image_height_px)
+                if (d->confidence < c_.min_confidence || (!primary &&
+                    (d->box.x < 0 || d->box.y < 0 ||
+                     d->box.br().x >= ref.image_width_px || d->box.br().y >= ref.image_height_px)))
                     layout_complete = false;
             }
-            const bool primary = d->track_id == in.target_id && d->label == in.label;
             // Use the same bounded regions and feature as review and split selection.
             // A neighbour below the calibrated rear bound must not start an empty retreat.
             const bool swept = primary || layout_member ||
@@ -432,8 +433,8 @@ void CaptureMonitor::update(PushObservation& in,
             if (swept) {
                 in.corridor.add(labelOf(*d));
                 members.push_back(d);
-                if (d->box.x < 0 || d->box.y < 0 || d->box.br().x >= ref.image_width_px ||
-                    d->box.br().y >= ref.image_height_px)
+                if (!primary && (d->box.x < 0 || d->box.y < 0 ||
+                    d->box.br().x >= ref.image_width_px || d->box.br().y >= ref.image_height_px))
                     complete = false;
                 CorridorEntry e;
                 e.track_id = d->track_id; e.label = labelOf(*d); e.confidence = d->confidence;
@@ -450,6 +451,7 @@ void CaptureMonitor::update(PushObservation& in,
             if (d->box.x < 0 || d->box.y < 0 || d->box.br().x >= ref.image_width_px ||
                 d->box.br().y >= ref.image_height_px)
                 ambiguous = true;
+            held_members.push_back(d);
             in.held.add(labelOf(*d));
             in.held_objects.push_back({d->track_id, labelOf(*d), d->confidence});
             auto& history = next[d->track_id];
@@ -463,11 +465,16 @@ void CaptureMonitor::update(PushObservation& in,
                 still = still && cv::norm(point - center) <= c_.follow_tolerance_px;
             followed = followed && still;
         }
-        for (size_t i = 0; i < members.size(); ++i)
-            for (size_t j = i + 1; j < members.size(); ++j)
-                if (iou(members[i]->box, members[j]->box) > c_.occlusion_iou &&
-                    !(labelOf(*members[i]) == "ordinary_supply" && labelOf(*members[j]) == "ordinary_supply"))
-                    occlusion_free = false;
+        const auto occlusionFree = [&](const std::vector<const SegDetection*>& objects) {
+            for (size_t i = 0; i < objects.size(); ++i)
+                for (size_t j = i + 1; j < objects.size(); ++j)
+                    if (iou(objects[i]->box, objects[j]->box) > c_.occlusion_iou &&
+                        !(labelOf(*objects[i]) == "ordinary_supply" &&
+                          labelOf(*objects[j]) == "ordinary_supply"))
+                        return false;
+            return true;
+        };
+        const bool occlusion_free = occlusionFree(members);
         int horizontal_pairs = 0;
         for (size_t i = 0; i < frame_members.size(); ++i)
             for (size_t j = i + 1; j < frame_members.size(); ++j) {
@@ -487,7 +494,8 @@ void CaptureMonitor::update(PushObservation& in,
         history_ = std::move(next);
         in.hold_observable = in.gripper_closed_observed;
         in.captured = in.hold_observable && in.held.total() > 0 && followed;
-        in.held_complete = in.captured && !ambiguous && occlusion_free &&
+        // Path/scene boxes outside the jaw do not invalidate held-image evidence.
+        in.held_complete = in.captured && !ambiguous && occlusionFree(held_members) &&
                            (!in.capture_dangerous_side_pending || in.held.dangerous > 0);
         in.corridor_complete = complete && !in.capture_dangerous_side_pending;
         in.corridor_occlusion_free = in.corridor_complete && occlusion_free;

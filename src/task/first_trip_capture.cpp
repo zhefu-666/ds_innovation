@@ -59,7 +59,7 @@ void PushTask::resumePixelSplitSearch(TaskTick& tick, const char* why, bool rest
     trip_context_.pending_ = {};
     search_entry_ = {};
     pixel_alignment_ = {};
-    search_phase_.view_handoff_ = {};
+    capture_phase_.view_handoff_ = {};
     search_phase_.far_target_recovery_ = {};
     search_phase_.pixel_approach_started_us_ = 0;
     search_phase_.pixel_reselection_ = {};
@@ -184,7 +184,7 @@ bool PushTask::reviewCaptureLoad(TaskTick& tick) {
     for (const auto& object : in.capture_image_objects)
         if ((in.splitInventoryOverlaps(object.box, object.label) ||
              in.capturePathOverlaps(object.box, object.label)) &&
-            (!object.complete || targetKind(object.label) == TargetKind::UNKNOWN))
+            ((!object.complete && object.id != in.target_id) || targetKind(object.label) == TargetKind::UNKNOWN))
             return wait("capture_score_incomplete_inventory");
     if (plan.reobserve_after_us) {
         if (!plan.stopped_us)
@@ -223,7 +223,8 @@ bool PushTask::reviewCaptureLoad(TaskTick& tick) {
                     match = &object;
                     ++matches;
                 }
-        if (matches != 1 || !match || !match->complete || used.count(match->id)) {
+        if (matches != 1 || !match ||
+            (!match->complete && match->id != in.target_id) || used.count(match->id)) {
             if (in.captureInventoryOverlaps(old.box, old.label))
                 return wait("capture_score_member_missing");
             continue; // It was visibly outside before disappearing.
@@ -320,7 +321,7 @@ bool PushTask::pixelCaptureReady(const PushObservation& in) const {
     for (const auto& object : in.capture_image_objects) {
         if (!in.captureInventoryOverlaps(object.box, object.label))
             continue;
-        if (!object.complete)
+        if (!object.complete && object.id != in.target_id)
             return false;
         inventory.add(object.label);
         target_inside |= object.id == in.target_id && object.label == trip_context_.label_;
@@ -379,7 +380,7 @@ PushTask::CaptureSceneVerdict PushTask::evaluateCaptureScene(const PushObservati
     const auto selected = std::find_if(current.begin(), current.end(), [&](const auto& object) {
         return object.id == in.target_id;
     });
-    if (selected == current.end() || !selected->complete)
+    if (selected == current.end() || selected->box.empty())
         return incomplete("target_box_incomplete");
     if (selected->label != in.label || !targetSelectable(selected->label, first_))
         return incomplete("target_class_not_selectable");
@@ -408,7 +409,7 @@ PushTask::CaptureSceneVerdict PushTask::evaluateCaptureScene(const PushObservati
                 match = &object;
                 ++matches;
             }
-            if (matches != 1 || !match || (region_relevant(*match) && !match->complete) ||
+            if (matches != 1 || !match || (match->id != in.target_id && region_relevant(*match) && !match->complete) ||
                 !used.insert(match->id).second) {
                 scene.blocker_id = old.id;
                 scene.blocker_box = match ? match->box : old.box;
@@ -442,7 +443,7 @@ PushTask::CaptureSceneVerdict PushTask::evaluateCaptureScene(const PushObservati
             in.capturePathOverlaps(object.box, object.label);
         if (!inside && !in_path)
             continue;
-        if (!object.complete) {
+        if (!object.complete && object.id != in.target_id) {
             scene.blocker_id = object.id;
             scene.blocker_box = object.box;
             scene.association = "clipped";

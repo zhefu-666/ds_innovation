@@ -787,13 +787,13 @@ struct JawRig {
             assert(out.state == PushState::CARRY && out.motion.gripper_offset == 20);
             aligned |= out.reason == "carry_entry_image_align" || out.reason == "carry_entry_pose_imu_align" ||
                        out.reason == "carry_entry_forward_correction";
-            if (out.motion.vx_mps > 0 && rig.task.desiredPitch()==0) {
+            if (out.motion.vx_mps > 0 && rig.task.desiredPitch()==2000) {
                 assert(aligned && std::abs(yaw) <= std::atan(.60f)+.00001f);
-                assert(rig.task.desiredPitch() == 0);
+                assert(rig.task.desiredPitch() == 2000);
                 return;
             }
         }
-        assert(false && "entry normal alignment did not reach UI120 advance");
+        assert(false && "entry normal alignment did not reach UI140 advance");
     }
 };
 // The selected half remains usable when the whole-zone consensus is invalid.
@@ -863,7 +863,7 @@ void offsetImageCannotStartATurnAwayFromTheSelectedHalf() {
     std::cout<<"PASS logged off-centre left/right halves hold without reversing or turning away\n";
 }
 
-// Requested flow: one stationary confirmation, then switch directly to UI120.
+// Requested flow: one stationary confirmation, then switch directly to UI140.
 void confirmedAlignmentDirectlyStartsNearViewPush() {
     using Stage=TransportPhaseData::JawSequence::Stage;
     for (bool injured : {false,true}) for (float side : {-1.f,1.f})
@@ -884,7 +884,7 @@ void confirmedAlignmentDirectlyStartsNearViewPush() {
                     assert(offset<.10f);
                     assert(p.rig.input.now_us>=1360000);
                     assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
-                    assert(p.rig.task.desiredPitch()==0);
+                    assert(p.rig.task.desiredPitch()==2000);
                     assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
                     accepted=true; break;
                 }
@@ -900,23 +900,20 @@ void confirmedAlignmentDirectlyStartsNearViewPush() {
             assert(p.step().motion.vx_mps==0);
             p.view=true; p.view_evidence=false; p.pose=false;
             p.fresh=false;
-            assert(p.step().motion.vx_mps==0);
+            assert(p.step().motion.vx_mps>0);
             p.fresh=true; p.region_inside=false;
             auto out=p.step();
-            assert(out.reason=="carry_ui120_region_advance");
+            assert(out.reason=="carry_ui140_surroundings_advance");
             assert(std::abs(out.motion.vx_mps-.06f)<1e-6f);
             assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
             p.region_inside=true;
             out=p.step();
-            for(int i=0;i<8;++i) {
-                assert(out.motion.vx_mps==.06f && out.reason=="carry_ui120_region_overrun");
-                out=p.step();
-            }
+            assert(out.reason=="carry_ui140_surroundings_stop");
             assert(out.motion.vx_mps==0 && out.immediate_motion_stop);
             assert(d.jaw_sequence_.stage==Stage::ColourStop);
             assert(out.motion.gripper_offset==20);
         }
-    std::cout<<"PASS strict <10% confirmation directly switches to UI120 push; no correction or box gate\n";
+    std::cout<<"PASS strict <10% confirmation directly switches to UI140 push; no correction or box gate\n";
 }
 
 void directNearViewPushKeepsColourSpeed() {
@@ -935,7 +932,7 @@ void directNearViewPushKeepsColourSpeed() {
             if(q.stage==Stage::ColourAdvance) { aligned=true; break; }
             assert(p.rig.task.desiredPitch()==-3000);
         }
-        assert(aligned && p.rig.task.desiredPitch()==0);
+        assert(aligned && p.rig.task.desiredPitch()==2000);
         p.view=false;
         assert(p.step().motion.vx_mps==0);
         p.view=true; p.region_inside=false;
@@ -943,20 +940,10 @@ void directNearViewPushKeepsColourSpeed() {
         assert(std::abs(out.motion.vx_mps-.06f)<1e-6f);
         p.region_inside=true;
         out=p.step();
-        const auto reached_us=p.rig.input.now_us;
-        for(int i=0;i<8;++i) {
-            assert(p.rig.input.now_us-reached_us<300000);
-            assert(out.motion.vx_mps==.06f && !out.immediate_motion_stop);
-            assert(out.motion.gripper_offset==20);
-            // Use a final 20 ms tick to check the exact 300 ms boundary.
-            if(i==7) p.rig.input.now_us-=20000;
-            out=p.step();
-        }
-        assert(p.rig.input.now_us-reached_us==300000);
-        assert(out.motion.vx_mps==0 && out.immediate_motion_stop);
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 && out.immediate_motion_stop);
         assert(q.stage==Stage::ColourStop && out.motion.gripper_offset==20);
     }
-    std::cout << "PASS alignment switches to UI120 0.06m/s -> reached contour 0.06m/s for 0.3s -> brake\n";
+    std::cout << "PASS alignment switches to UI140 0.06m/s -> all cargo surrounded -> immediate brake\n";
 }
 
 void transportScanUsesConfiguredAngularSpeed() {
@@ -994,7 +981,7 @@ void tiltedImageConvergesThroughSenderRamp() {
             const auto out=p.step();
             assert(out.motion.vx_mps>=0);
             effective |= std::abs(p.wire.wz_rps)>.25f;
-            if(p.rig.task.desiredPitch()==0) {
+            if(p.rig.task.desiredPitch()==2000) {
                 assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f); reached=true;break;
             }
         }
@@ -1178,7 +1165,7 @@ void stableImageConflictFallsBackFromBiasedMetricNormal() {
             p.gap-=std::cos(p.yaw)*p.out.motion.vx_mps*kDt;
             const auto out=p.step();
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
-            if(p.rig.task.desiredPitch()==0) {
+            if(p.rig.task.desiredPitch()==2000) {
                 assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f); reached=true; break;
             }
         }
@@ -1217,7 +1204,7 @@ void poseNormalExpiresAndStillNeedsFreshCentring() {
     for(int i=0;i<600;++i) {
         p.gap-=p.out.motion.vx_mps*.04f;
         p.step();
-        if(p.rig.task.desiredPitch()==0) { resumed=true; break; }
+        if(p.rig.task.desiredPitch()==2000) { resumed=true; break; }
     }
     assert(resumed);
     // A new trip must discard the previous trip's heading reference.
@@ -1288,7 +1275,7 @@ void imageAlignmentIgnoresMetricYawAndSurvivesMappingLoss() {
                 assert(out.motion.wz_rps*p.yaw<0);
                 turned=true;
             }
-            if(p.rig.task.desiredPitch()==0) {
+            if(p.rig.task.desiredPitch()==2000) {
                 assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f);
                 advanced=true; break;
             }
@@ -1364,7 +1351,7 @@ void selectedHalfAloneCanRecoverAndAlign() {
             assert(aligned.recovery == Recovery::Idle);
         }
         assert(aligned.stage == Stage::ColourAdvance);
-        assert(alignment.rig.task.desiredPitch()==0);
+        assert(alignment.rig.task.desiredPitch()==2000);
         assert(alignment.step().motion.vx_mps>0);
         // Seeing only the other half cannot authorize recovery completion.
         JawRig wrong;
@@ -1461,31 +1448,30 @@ void twentyCentimetreEntryAndColourRelease() {
     plant.region_inside=false;
     for (int i=0;i<10;++i) assert(plant.step().motion.vx_mps > 0);
     plant.fresh = false;
-    out = plant.step(); assert(out.motion.vx_mps == 0 && out.state == PushState::CARRY);
+    out = plant.step(); assert(out.motion.vx_mps > 0 && out.state == PushState::CARRY);
     plant.fresh = true; plant.region_inside=true;
-    for(int i=0;i<8;++i) {
-        out=plant.step();
-        assert(out.motion.vx_mps==.06f && out.motion.gripper_offset==20);
-    }
+    out=plant.step();
+    assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 && out.immediate_motion_stop);
+    assert(out.motion.gripper_offset==20);
     plant.force_sent = true; plant.forced_vx = .05f;
     for (int i=0;i<12;++i) {
         out = plant.step();
         assert(out.motion.vx_mps == 0 && out.motion.wz_rps == 0 && out.immediate_motion_stop);
         assert(out.state == PushState::CARRY && out.motion.gripper_offset == 20);
     }
-    plant.region_inside=false; // A lost extent revokes release confirmation.
+    plant.region_inside=false; // The entry hit survives losing floor evidence.
     plant.forced_vx=0;
     out=plant.step();
     assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
     plant.region_inside=true;
     plant.forced_vx = 0;
     for (int i=0;i<45 && out.state == PushState::CARRY;++i) out=plant.step();
-    assert(out.state == PushState::RAISE_RELEASE && plant.rig.task.desiredPitch()==0);
-    assert(out.reason == "carry_ui120_region_stopped");
+    assert(out.state == PushState::RAISE_RELEASE && plant.rig.task.desiredPitch()==2000);
+    assert(out.reason == "carry_ui140_surroundings_stopped");
     out=plant.step(); assert(out.motion.gripper_offset==0 && out.state==PushState::RAISE_RELEASE);
     plant.rig.input.gripper_feedback_open=1;
     out=plant.step(); assert(out.state==PushState::BACK_OUT);
-    assert(plant.rig.task.desiredPitch()==0);
+    assert(plant.rig.task.desiredPitch()==2000);
     out=plant.step();
     assert(out.motion.vx_mps==0 && out.immediate_motion_stop);
     assert(out.reason=="jaw_retreat_stop_imu_calibrate");
@@ -1736,7 +1722,7 @@ void selectedSubzoneMustBeCentred() {
     p.view_evidence=true;
     for(int i=0;i<2;++i) { p.step(); assert(p.rig.task.desiredPitch()==-3000); }
     bool advanced=false;
-    for(int i=0;i<20;++i) { p.step(); advanced|=p.rig.task.desiredPitch()==0; }
+    for(int i=0;i<20;++i) { p.step(); advanced|=p.rig.task.desiredPitch()==2000; }
     assert(advanced);
 }
 // The 11:35 board trace repeatedly approached at yaw=-0.55 with the
@@ -1780,7 +1766,7 @@ void loggedOffsetApproachConvergesWithoutRetreatLoop() {
                 assert(out.motion.vx_mps>=-.05f && out.motion.wz_rps==0);
             }
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
-            if(p.rig.task.desiredPitch()==0) {
+            if(p.rig.task.desiredPitch()==2000) {
                 assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f && std::abs(p.image_error)<.10f);
                 advanced=true; break;
             }
@@ -1818,7 +1804,7 @@ void centredApproachClosedLoop() {
             const float by=-std::sin(next_yaw)*dx+std::cos(next_yaw)*depth;
             p.image_error=bx/by*.625f; // simulated 800 px focal length / 1280 width
             auto o=p.step();
-            if(p.rig.task.desiredPitch()==0) {
+            if(p.rig.task.desiredPitch()==2000) {
                 assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f && std::abs(p.image_error)<.10f);
                 advanced=true;break;
             }
@@ -1837,7 +1823,7 @@ void centredApproachClosedLoop() {
     }
     p.pose=false; p.half_entrance=true;
     bool advanced=false;
-    for(int i=0;i<350;++i) {p.step();advanced|=p.rig.task.desiredPitch()==0;}
+    for(int i=0;i<350;++i) {p.step();advanced|=p.rig.task.desiredPitch()==2000;}
     assert(advanced);
     // Close-range landmark loss keeps the already-confirmed line and region extent endpoint.
     JawRig close;close.reachColourLeg();close.view_evidence=false;close.region_inside=true;
@@ -1847,7 +1833,7 @@ void centredApproachClosedLoop() {
         if(released.state==PushState::RAISE_RELEASE)break;
     }
     assert(released.state==PushState::RAISE_RELEASE);
-    // Near-view keypoint errors cannot veto the contour of the already-aligned half.
+    // Near-view keypoint errors cannot veto the cargo-surroundings endpoint.
     JawRig wrong;wrong.reachColourLeg();wrong.image_error=.10f;wrong.inside=false;wrong.region_inside=true;
     for(int i=0;i<30;++i) {
         auto o=wrong.step();
@@ -1971,7 +1957,7 @@ void retreatPreparationSurvivesReleaseAndRejectsOpeningMotion() {
         task.transport_phase_.placing_=false;
         task.transport_phase_.jaw_sequence_.stage=TransportPhaseData::JawSequence::Stage::ColourStop;
         task.transport_phase_.jaw_sequence_.heading=0;
-        task.pitch_cmd_=in.camera_pitch_cdeg=task.t_.track_pitch_cdeg;
+        task.pitch_cmd_=in.camera_pitch_cdeg=task.t_.near_pitch_cdeg;
         for(int i=0;i<40;++i) {
             in.transport_floor.valid=in.transport_floor.region_valid=in.transport_floor.inside=true;
             in.transport_floor.sample_us=in.now_us+40000;
@@ -2142,7 +2128,7 @@ void completeJawTransportLifecycle(bool inspected = false) {
         if(out.motion.gripper_offset==0 && !opened) {
             assert(before==PushState::RAISE_RELEASE);
             opened=true;release_position=plant.position;
-            assert(plant.position>.025f && in.camera_pitch_cdeg==0);
+            assert(plant.position>.025f && in.camera_pitch_cdeg==2000);
         }
         if(out.motion.vx_mps<0) {
             assert(opened && out.state==PushState::BACK_OUT && out.motion.wz_rps==0);
@@ -2153,7 +2139,7 @@ void completeJawTransportLifecycle(bool inspected = false) {
             assert(opened && reversed && verified);
             assert(plant.position-release_position<=-.145f);
             assert(task.total_==1 && out.motion.vx_mps==0 && out.motion.wz_rps==0);
-            std::cout<<"PASS complete 20cm -> IMU normal -> UI120 half contour -> open ack -> IMU15cm -> search"<<std::endl;
+            std::cout<<"PASS complete 20cm -> IMU normal -> UI140 cargo surroundings -> open ack -> IMU15cm -> search"<<std::endl;
             return;
         }
     }
@@ -2275,7 +2261,7 @@ void intermittentHalfApproachConvergesThroughSender() {
             p.bearing=-.5f*side; // opposing box direction must not steal a short dropout
             const auto out=p.step();
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
-            if(p.rig.task.desiredPitch()==0) {
+            if(p.rig.task.desiredPitch()==2000) {
                 assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f && std::abs(p.image_error)<.10f);
                 advanced=true;break;
             }
@@ -2393,7 +2379,7 @@ void outOfToleranceEntryCentresWithoutForwardCorrection() {
                 assert(out.motion.vx_mps==0);
                 if(out.reason=="carry_pre_entry_aligned") {accepted=true;break;}
             }
-            assert(accepted && p.rig.task.desiredPitch()==0);
+            assert(accepted && p.rig.task.desiredPitch()==2000);
         }
     std::cout<<"PASS persistent >=10% entry centres without forward correction\n";
 }
@@ -2509,7 +2495,7 @@ void loggedSteeringDropoutsConvergeWithoutRetreatLoop() {
                 assert(out.motion.vx_mps>=-.05f && out.motion.wz_rps==0);
             }
             assert(out.state==PushState::CARRY && out.motion.gripper_offset==20);
-            if(p.rig.task.desiredPitch()==0) {
+            if(p.rig.task.desiredPitch()==2000) {
                 assert(std::abs(p.yaw)<=std::atan(.60f)+.00001f && std::abs(p.image_error)<.10f);
                 advanced=true;break;
             }
@@ -2536,7 +2522,7 @@ void preEntryAlignmentCompletesAndHoldsItsTarget() {
             const auto out=p.step();
             assert(out.motion.vx_mps==0);
             if(out.reason=="carry_pre_entry_aligned") {
-                assert(p.gap>.2f && p.rig.task.desiredPitch()==0);
+                assert(p.gap>.2f && p.rig.task.desiredPitch()==2000);
                 aligned=true;break;
             }
         }
@@ -2548,7 +2534,7 @@ void preEntryAlignmentCompletesAndHoldsItsTarget() {
             const auto out=p.step();
             assert(std::abs(out.motion.vx_mps-.06f)<1e-6f && out.motion.wz_rps==0);
             assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
-            assert(p.rig.task.desiredPitch()==0);
+            assert(p.rig.task.desiredPitch()==2000);
         }
     }
     std::cout<<"PASS one stationary alignment starts near-view push and holds its target\n";
@@ -2737,7 +2723,7 @@ void unalignedEntryCentresWithoutTranslation() {
                 const auto out=transient.step();
                 confirmed |= out.reason=="carry_pre_entry_aligned";
             }
-            assert(confirmed && transient.rig.task.desiredPitch()==0);
+            assert(confirmed && transient.rig.task.desiredPitch()==2000);
         }
     std::cout<<"PASS unaligned entry centres without translation; fresh confirmation permits entry\n";
 }
@@ -3154,40 +3140,61 @@ void loggedDeliverableEntryStartsNearViewPush() {
             assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
             if(out.reason=="carry_pre_entry_aligned") {
                 assert(p.rig.input.now_us>=1400000);
-                assert(q.stage==Stage::ColourAdvance && p.rig.task.desiredPitch()==0);
+                assert(q.stage==Stage::ColourAdvance && p.rig.task.desiredPitch()==2000);
                 accepted=true;break;
             }
         }
         assert(accepted && "17:13 deliverable entry must pass stationary confirmation");
         const auto out=p.step();
-        assert(out.reason=="carry_ui120_region_advance" && out.motion.vx_mps>0);
+        assert(out.reason=="carry_ui140_surroundings_advance" && out.motion.vx_mps>0);
         assert(out.motion.gripper_offset==20);
     }
     std::cout<<"PASS 17:13 entry offset confirms and advances for both halves and sides\n";
 }
 
-void nearContourNeedsDistinctStoppedCaptures() {
+void nearPushContinuesUntilEntryThenReleases() {
     using Stage=TransportPhaseData::JawSequence::Stage;
-    JawRig p;p.yaw=0;p.reachColourLeg();p.region_inside=true;
-    for(int i=0;i<9;++i)p.step();
-    assert(p.rig.task.transport_phase_.jaw_sequence_.stage==Stage::ColourStop);
-    p.force_sent=true;p.forced_vx=.04f;
-    for(int i=0;i<20;++i)assert(p.step().state==PushState::CARRY);
-    p.forced_vx=0;
-    for(int i=0;i<9;++i)p.step();
-    assert(p.out.state==PushState::CARRY);
-    p.repeat_region_frame=true;
-    for(int i=0;i<4;++i)assert(p.step().state==PushState::CARRY);
-    p.fresh=false;assert(p.step().state==PushState::CARRY);
-    p.fresh=true;p.repeat_region_frame=false;
-    for(int i=0;i<30;++i) {
-        if(p.step().state==PushState::RAISE_RELEASE)break;
+    JawRig p;p.yaw=0;p.reachColourLeg();
+    // Replay observable/missing floor alternation from 05:06:59 without speed pulses.
+    for(int i=0;i<20;++i) {
+        p.region_found=i%2==0;
+        p.fresh=i%3!=0;
+        const auto out=p.step();
+        assert(out.state==PushState::CARRY && !out.immediate_motion_stop);
+        assert(std::abs(out.motion.vx_mps-.06f)<1e-6f);
+        assert(out.motion.gripper_offset==20);
     }
-    assert(p.out.state==PushState::RAISE_RELEASE);
-    JawRig missing;missing.yaw=0;missing.reachColourLeg();
-    missing.region_inside=true;missing.region_found=false;
-    for(int i=0;i<15;++i)assert(missing.step().state==PushState::CARRY);
-    std::cout<<"PASS UI120 extent requires a found region, stopped sender and distinct fresh captures\n";
+    // Old or incomplete evidence cannot claim entry, but does not stop pushing.
+    p.region_inside=true;p.fresh=false;p.region_found=true;
+    assert(p.step().motion.vx_mps>0);
+    p.fresh=true;p.region_found=false;
+    assert(p.step().motion.vx_mps>0);
+    p.region_found=true;
+    auto out=p.step();
+    assert(out.immediate_motion_stop && out.motion.vx_mps==0);
+    assert(p.rig.task.transport_phase_.jaw_sequence_.stage==Stage::ColourStop);
+    // Entry is latched. Losing all floor evidence cannot restart travel or revoke release.
+    p.region_inside=false;p.region_found=false;p.fresh=false;
+    p.force_sent=true;p.forced_vx=.04f;
+    for(int i=0;i<12;++i) {
+        out=p.step();
+        assert(out.state==PushState::CARRY && out.motion.vx_mps==0);
+        assert(out.motion.gripper_offset==20);
+    }
+    p.forced_vx=0;
+    const auto stopped_at=p.rig.input.now_us;
+    for(int i=0;i<12;++i) {
+        out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+        if(out.state==PushState::RAISE_RELEASE)break;
+        assert(out.motion.gripper_offset==20);
+    }
+    assert(out.state==PushState::RAISE_RELEASE);
+    assert(p.rig.input.now_us-stopped_at>=250000);
+    out=p.step();assert(out.motion.gripper_offset==0);
+    p.rig.input.gripper_feedback_open=1;
+    out=p.step();assert(out.state==PushState::BACK_OUT);
+    std::cout<<"PASS UI140 pushes through missing floor, latches fresh entry, stops then opens and retreats without visual reconfirmation\n";
 }
 
 
@@ -3455,23 +3462,46 @@ void lostHalfFindsFreshZoneAndBrakesBeforeResuming() {
     std::cout<<"PASS missing half turns toward fresh zone and requires a stopped fresh-image handoff\n";
 }
 
-void halfSearchIsBoundedWhenZoneDisappears() {
-    for(float response : {1.f,6.f}) for(float heading_offset : {-3.f,0.f,3.f}) {
+void halfSearchContinuesScanningWhenZoneDisappears() {
+    for(float response : {1.f,6.f}) for(float heading_offset : {-3.f,0.f,3.f})
+        for(bool enemy_visible : {false,true}) {
         JawRig p;p.yaw=0;p.gap=.8f;p.imu_offset=heading_offset;
         p.ramped_dead_zone=true;p.angular_response=response;
         p.rig.task.t_.transport_scan_wz=.9f;
         p.rig.task.t_.transport_align_min_wz=.9f;
         for(int i=0;i<6;++i)p.step();
-        p.pose=p.view_evidence=p.sight=false;
+        p.pose=p.view_evidence=false;
+        p.sight=p.enemy=enemy_visible;
         const float initial=p.yaw;
+        auto& q=p.rig.task.transport_phase_.jaw_sequence_;
+        bool scanning=false;
         for(int i=0;i<300;++i) {
             const auto out=p.step();
             assert(out.state==PushState::CARRY && out.motion.vx_mps>=0);
+            if(out.reason=="searching_own_zone") {scanning=true;break;}
             assert(std::abs(wrapAngle(p.yaw-initial))<.85f);
         }
-        assert(p.out.motion.vx_mps==0 && p.out.motion.wz_rps==0);
+        assert(scanning && q.half_search_leg>=3 &&
+               "exhausted local search must resume scanning instead of waiting");
+        for(int i=0;i<80;++i) {
+            const auto out=p.step();
+            assert(out.reason=="searching_own_zone" && out.motion.vx_mps==0);
+            assert(out.motion.wz_rps>0 && !out.immediate_motion_stop);
+            assert(out.motion.gripper_offset==20);
+        }
+        assert(p.wire.wz_rps>.25f && "continuous search must pass the sender dead zone");
+        p.rig.input.directional_clearance_valid=true;
+        p.rig.input.turn_safe=false;
+        auto out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 && out.immediate_motion_stop);
+        p.rig.input.turn_safe=true;p.heading=false;
+        out=p.step();
+        assert(out.motion.vx_mps==0 && out.motion.wz_rps==0 && out.immediate_motion_stop);
+        p.heading=true;
+        out=p.step();
+        assert(out.reason=="searching_own_zone" && out.motion.wz_rps>0 && !out.immediate_motion_stop);
     }
-    std::cout<<"PASS selected-half search is bounded with 0.9 rad/s, fast yaw response and heading wrap\n";
+    std::cout<<"PASS local search falls back to continuous scanning with missing/enemy zones, sender ramp, heading wrap and clearance gates\n";
 }
 
 // 20:24 trace: isolated entrance detections repeatedly killed the search ramp.
@@ -3552,7 +3582,7 @@ void forwardEntryRegression() {
     shortParkingEntryUsesStationaryAlignment();
     approachRepositionsBeforeReachingParkingLine();
     lostHalfFindsFreshZoneAndBrakesBeforeResuming();
-    halfSearchIsBoundedWhenZoneDisappears();
+    halfSearchContinuesScanningWhenZoneDisappears();
 }
 
 
@@ -3774,7 +3804,7 @@ void loggedPreBackoffPostureHoldsAcrossFrameNoise() {
         assert(p.rig.input.now_us-started>=250000);
         assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
         out=p.step();
-        assert(out.reason=="carry_ui120_region_advance" && out.motion.vx_mps>0);
+        assert(out.reason=="carry_ui140_surroundings_advance" && out.motion.vx_mps>0);
         assert(out.motion.gripper_offset==20);
     }
     std::cout<<"PASS logged first deliverable posture holds frame jitter and advances without backoff on both halves/sides\n";
@@ -4152,7 +4182,7 @@ void loggedNearEntryTurnsWithoutRetreat() {
             }
         }
         assert(accepted && "logged near entrance must align by turning, without retreat");
-        assert(p.step().motion.vx_mps>0 && p.rig.task.desiredPitch()==0);
+        assert(p.step().motion.vx_mps>0 && p.rig.task.desiredPitch()==2000);
     }
     std::cout<<"PASS logged 37.7 cm entry turns in place and confirms for both halves/sides\n";
 }
@@ -4313,7 +4343,7 @@ void requestedRelaxedEntryPostures() {
                 if(out.reason=="carry_pre_entry_aligned") {
                     assert(p.rig.input.now_us>=1360000);
                     assert(d.jaw_sequence_.stage==Stage::ColourAdvance);
-                    assert(p.rig.task.desiredPitch()==0);
+                    assert(p.rig.task.desiredPitch()==2000);
                     accepted=true;break;
                 }
                 assert(p.rig.task.desiredPitch()==-3000);
@@ -4388,13 +4418,15 @@ void unstableRangeLossTurnsTowardOwnZone() {
         out=p.step(); assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
         p.heading=true;
         if (!image_only) {
-            // Exhausted local search still follows a fresh zone box; a stale
-            // box pauses it, and a new box restores it without an external reset.
+            // Exhausted local search follows a fresh zone box; a stale box
+            // resumes scanning, and a new box restores directional steering.
             q.half_search_leg=3;
             out=p.step();
             assert(out.motion.vx_mps==0 && out.motion.wz_rps*side>0);
             p.stale_sight=true;
-            out=p.step(); assert(out.motion.vx_mps==0 && out.motion.wz_rps==0);
+            out=p.step();
+            assert(out.reason=="searching_own_zone" && out.motion.vx_mps==0 &&
+                   out.motion.wz_rps>0 && !out.immediate_motion_stop);
             p.stale_sight=false;
             out=p.step(); assert(out.motion.vx_mps==0 && out.motion.wz_rps*side>0);
         }
@@ -4411,6 +4443,9 @@ void unstableRangeLossTurnsTowardOwnZone() {
 }
 
 int main(int argc, char** argv) {
+    if(argc==2 && std::string(argv[1])=="--half-search-fallback") {
+        halfSearchContinuesScanningWhenZoneDisappears();return 0;
+    }
     unstableRangeLossTurnsTowardOwnZone();
     if(argc==2 && std::string(argv[1])=="--unstable-range-loss") return 0;
     if(argc==2 && std::string(argv[1])=="--retreat-timing") {
@@ -4478,14 +4513,14 @@ int main(int argc, char** argv) {
     if(argc==2 && std::string(argv[1])=="--entry-range-review") {entryRangeReviewAndForwardReposition();return 0;}
     entryRangeReviewAndForwardReposition();
 
-    if(argc==2 && std::string(argv[1])=="--ui120-region") {
+    if(argc==2 && (std::string(argv[1])=="--ui140-surroundings" || std::string(argv[1])=="--ui120-region")) {
         directNearViewPushKeepsColourSpeed();
-        nearContourNeedsDistinctStoppedCaptures();
+        nearPushContinuesUntilEntryThenReleases();
         twentyCentimetreEntryAndColourRelease();
         completeJawTransportLifecycle();
         return 0;
     }
-    nearContourNeedsDistinctStoppedCaptures();
+    nearPushContinuesUntilEntryThenReleases();
     if(argc==2 && std::string(argv[1])=="--logged-deliverable-entry") {
         loggedDeliverableEntryStartsNearViewPush();return 0;
     }

@@ -110,7 +110,7 @@ target_link_libraries(rescue_first_trip_capture_review_tests PRIVATE
 # Large scenario fixture: avoid GCC IPA optimizer failures; production stays at Release settings.
 target_compile_options(rescue_first_trip_capture_review_tests PRIVATE -O0 -UNDEBUG -Wall -Wextra)
 foreach(scenario dangerous-front-risk supplied-grasp-ranges injured-removal postsplit-search search-view-selection
-                 front-split-recovery upper-corner-motion corner-imu-drift corner-turn-brake capture-checkpoint postsplit-approach split-preempt retreat-overshoot retreat-continuity startup-first-grab)
+                 front-split-recovery upper-corner-motion corner-imu-drift corner-turn-brake capture-checkpoint postsplit-approach split-preempt retreat-overshoot retreat-continuity startup-first-grab postclose-held-only)
     add_test(NAME rescue_capture_${scenario}
         COMMAND rescue_first_trip_capture_review_tests
             ${PROJECT_SOURCE_DIR}/tests/fixtures/first_trip_20261029_212327_boxes.txt ${scenario})
@@ -162,6 +162,8 @@ set_tests_properties(rescue_observation_builder_zone_sight_tests PROPERTIES TIME
 
 
 rescue_add_task_test(rescue_task_phase_tests task/integration/task_phase_tests.cpp)
+add_test(NAME rescue_search_capture_boundary_tests COMMAND rescue_task_phase_tests --search-capture-boundary)
+set_tests_properties(rescue_search_capture_boundary_tests PROPERTIES TIMEOUT 10 LABELS "integration;task")
 add_test(NAME rescue_search_ui120_speed_tests COMMAND rescue_task_phase_tests --search-ui120-speed)
 add_test(NAME rescue_search_ui120_handoff_tests COMMAND rescue_task_phase_tests --search-ui120-handoff)
 set_tests_properties(rescue_search_ui120_speed_tests rescue_search_ui120_handoff_tests

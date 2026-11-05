@@ -146,9 +146,13 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                     split.corner_turn_heading = in.heading_rad;
                     if (!sampled) split.corner_stopped_us = 0;
                     const bool moving = sampled && std::abs(rate) > quiet_rate;
+                    // Ignore opposing drift smaller than the angular tolerance over
+                    // the braking horizon; it must not latch a far-from-goal stop.
+                    const float braking_travel = .15f * std::abs(rate);
+                    const bool opposing_motion = rate * error < 0 && braking_travel > tolerance;
                     split.corner_turn_braking |= std::abs(error) <= tolerance ||
-                        (moving && (rate * error < 0 ||
-                            std::abs(error) <= tolerance + .15f * std::abs(rate)));
+                        (moving && (opposing_motion ||
+                            std::abs(error) <= tolerance + braking_travel));
                     if (!split.corner_turn_braking) {
                         reason_ = split.recovery_direction > 0 ? "injured_split_turn_left"
                                                                : "injured_split_turn_right";
@@ -217,9 +221,13 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                         split.corner_turn_heading = in.heading_rad;
                         if (!sampled) split.corner_stopped_us = 0;
                         const bool moving = sampled && std::abs(rate) > quiet_rate;
+                        // Ignore opposing drift smaller than the angular tolerance over
+                        // the braking horizon; it must not latch a far-from-goal stop.
+                        const float braking_travel = .15f * std::abs(rate);
+                        const bool opposing_motion = rate * error < 0 && braking_travel > tolerance;
                         split.corner_turn_braking |= std::abs(error) <= tolerance ||
-                            (moving && (rate * error < 0 ||
-                                std::abs(error) <= tolerance + .15f * std::abs(rate)));
+                            (moving && (opposing_motion ||
+                                std::abs(error) <= tolerance + braking_travel));
                         if (split.corner_turn_braking) {
                             // Sent zero is insufficient: also require a quiet heading
                             // spanning 250 ms, with at most 0.005 rad total drift.
@@ -662,7 +670,7 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                         in.splitInventoryOverlaps(object.box, object.label) ||
                         in.capturePathOverlaps(object.box, object.label);
                     if (relevant &&
-                        (!object.complete || targetKind(object.label) == TargetKind::UNKNOWN))
+                        ((!object.complete && object.id != in.target_id) || targetKind(object.label) == TargetKind::UNKNOWN))
                         uncertain = true;
                 }
                 if (uncertain) {
@@ -709,7 +717,7 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                     break;
                 }
                 if (split.target_reselecting || !in.target_valid || target == objects.end() ||
-                    !target->complete || in.target_id != trip_context_.target_id_) {
+                    target->box.empty() || in.target_id != trip_context_.target_id_) {
                     if (!split.target_reselecting) {
                         split.target_reselecting = true;
                         trip_context_.target_id_ = trip_context_.capture_target_id_ = -1;
@@ -729,7 +737,7 @@ void PushTask::updateRecoveryPhase(TaskTick& tick) {
                                   : "first_trip_split_target_confirm_wait";
                     if (split.target_candidate_id < 0 || !in.target_valid ||
                         in.target_id != split.target_candidate_id || target == objects.end() ||
-                        !target->complete || (in.pixel_selection_managed && !in.pixel_locked))
+                        target->box.empty() || (in.pixel_selection_managed && !in.pixel_locked))
                         break;
                     trip_context_.target_id_ = trip_context_.capture_target_id_ = in.target_id;
                     trip_context_.label_ = target->label;

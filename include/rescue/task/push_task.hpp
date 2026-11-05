@@ -1003,15 +1003,6 @@ struct SearchPhaseData {
     bool approach_rebind_ = false;
     uint64_t pixel_approach_started_us_ = 0; // one budget across view changes and re-ID
     uint64_t far_region_wait_started_us_ = 0; // visible lock waiting for zone membership
-    // Search UI120 -> UI140 is a committed stop, independent of the old target's visibility.
-    struct ViewHandoff {
-        bool near = false;
-        uint64_t started_us = 0, sample_us = 0, stable_us = 0;
-        int frames = 0;
-        float retry_height = 0; // normalized UI120 centre plus existing image-motion tolerance
-    } view_handoff_;
-    // Keep the failed-view progress requirement across UI120 recovery and tracker re-IDs.
-    float pixel_handoff_retry_height_ = 0;
     struct PixelReselection {
         bool observing = false, missing = false;
         int target_id = -1, gaps = 0, frames = 0;
@@ -1072,6 +1063,19 @@ struct SearchPhaseData {
     int corridor_retries_ = 0;
 };
 struct CapturePhaseData {
+    // Capture owns the near-view handshake after Search commits a stopped close target.
+    struct ViewHandoff {
+        bool near = false;
+        uint64_t started_us = 0, sample_us = 0, stable_us = 0;
+        uint64_t confirmation_started_us = 0;
+        int frames = 0;
+        float retry_height = 0; // normalized UI120 centre plus existing image-motion tolerance
+        cv::Rect near_box;
+        std::string near_label; // spatial continuity survives a selector-confirmed tracker re-ID
+    } view_handoff_;
+    // Keep the failed-view progress requirement across UI120 recovery and tracker re-IDs.
+    float pixel_handoff_retry_height_ = 0;
+    int16_t prepare_pitch_ = kCameraPitchInvalid;
     CaptureAction action = CaptureAction::Advance;
     ActionProgress progress;
     CaptureEvidence evidence = CaptureEvidence::None;
@@ -1107,7 +1111,7 @@ struct TransportPhaseData {
     int16_t approach_pitch_ = kCameraPitchInvalid;
     struct JawSequence {
         // Preserve diagnostic numbers for the remaining stages.
-        enum class Stage { Approach = 0, EntryStop = 2, Align, AlignStop, ColourAdvance = 6, ColourStop, ColourOverrun, BackoffReview = 9, BackoffAlign, BackoffReady, Backoff, BackoffBrake };
+        enum class Stage { Approach = 0, EntryStop = 2, Align, AlignStop, ColourAdvance = 6, ColourStop, BackoffReview = 9, BackoffAlign, BackoffReady, Backoff, BackoffBrake };
         Stage stage = Stage::Approach;
         enum class Recovery { Idle, Turn, Calibrate, Advance, Brake, Return, Search };
         Recovery recovery = Recovery::Idle;
@@ -1125,8 +1129,6 @@ struct TransportPhaseData {
             ImuTranslation imu;
         } prepush;
         bool active = false;
-        uint64_t colour_overrun_us = 0;
-        float colour_overrun_wz = 0;
         uint64_t stopped_us = 0, visual_last_us = 0, diagnostic_us = 0;
         uint64_t own_zone_seen_us = 0, own_zone_sample_us = 0, enemy_zone_sample_us = 0;
         int own_zone_frames = 0, enemy_zone_frames = 0;
@@ -1410,6 +1412,7 @@ class PushTask {
     void scanAfterClear(TaskTick& tick, const char* why);
     bool reselectPixelApproach(TaskTick& tick);
     bool updateSearchViewHandoff(TaskTick& tick);
+    bool updateCaptureViewHandoff(TaskTick& tick);
     cv::Point2f targetBody(TaskTick& tick);
     void drive(TaskTick& tick, float vx, float wz, bool pixel_align = false);
     bool pixelLateralAccepted(const PushObservation& in) const;

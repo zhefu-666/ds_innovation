@@ -119,8 +119,10 @@ void PushTask::applyPhaseOutcome(uint64_t now) {
         case PhaseOutcome::CaptureReady: {
             const float limit = actionProgress().travel_limit;
             // Startup already reached the calibrated close position at UI140.
-            enter(phase_ == TaskPhase::Startup && startup_first_capture_
-                      ? PushState::LOWER_FRAME : PushState::RUSH,
+            enter(phase_ == TaskPhase::Search && t_.pixel_grasp_enabled
+                      ? PushState::PREPARE
+                      : phase_ == TaskPhase::Startup && startup_first_capture_
+                          ? PushState::LOWER_FRAME : PushState::RUSH,
                   now, phase_outcome_reason_.c_str());
             actionProgress().travel_limit = limit;
             break;
@@ -151,13 +153,14 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
         s == PushState::ABORT_DROP || s == PushState::SAFE_STOP)
         startup_first_capture_ = false;
     search_phase_.far_region_wait_started_us_ = 0;
-    if (s != PushState::APPROACH && s != PushState::MID_APPROACH && s != PushState::WAIT_START) {
-        search_phase_.view_handoff_ = {};
-        search_phase_.pixel_handoff_retry_height_ = 0;
+    if (s != PushState::APPROACH && s != PushState::MID_APPROACH && s != PushState::WAIT_START &&
+        !(s == PushState::PREPARE && t_.pixel_grasp_enabled)) {
+        capture_phase_.view_handoff_ = {};
+        capture_phase_.pixel_handoff_retry_height_ = 0;
     }
     if (s == PushState::WAIT_START) {
-        search_phase_.view_handoff_.frames = 0;
-        search_phase_.view_handoff_.sample_us = search_phase_.view_handoff_.stable_us = 0;
+        capture_phase_.view_handoff_.frames = 0;
+        capture_phase_.view_handoff_.sample_us = capture_phase_.view_handoff_.stable_us = 0;
     }
     if (s == PushState::CAPTURE_FAIL || s == PushState::ABORT_DROP) {
         invalidateEntryPosition();
@@ -180,7 +183,7 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
     // The deadline belongs only to image approach/reacquisition, not later sweep/carry work.
     if (s != PushState::APPROACH && s != PushState::MID_APPROACH && s != PushState::MID_REACQUIRE &&
         s != PushState::NEAR_REACQUIRE && s != PushState::SELECT_CARGO &&
-        s != PushState::LOST_SEARCH)
+        s != PushState::LOST_SEARCH && !(s == PushState::PREPARE && t_.pixel_grasp_enabled))
         search_phase_.pixel_approach_started_us_ = 0;
     if ((s == PushState::CAPTURE_FAIL || s == PushState::LOST_HOLD || s == PushState::ABORT_DROP) &&
         !search_phase_.first_trip_split_.pending)
@@ -235,8 +238,16 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
                 search_phase_.action = SearchAction::Approach;
                 break;
             case PushState::PREPARE:
-                phase_ = TaskPhase::Search;
-                search_phase_.action = SearchAction::Prepare;
+                if (t_.pixel_grasp_enabled) {
+                    phase_ = TaskPhase::Capture;
+                    capture_phase_.action = CaptureAction::Prepare;
+                    if (capture_phase_.prepare_pitch_ == kCameraPitchInvalid ||
+                        !capture_phase_.view_handoff_.started_us)
+                        capture_phase_.prepare_pitch_ = t_.near_pitch_cdeg;
+                } else {
+                    phase_ = TaskPhase::Search;
+                    search_phase_.action = SearchAction::Prepare;
+                }
                 break;
             case PushState::TURN_SCAN:
                 phase_ = TaskPhase::Search;
@@ -375,8 +386,9 @@ void PushTask::enter(PushState s, uint64_t now, const char* why) {
 }
 void PushTask::clearTrip() {
     startup_first_capture_ = false;
-    search_phase_.view_handoff_ = {};
-    search_phase_.pixel_handoff_retry_height_ = 0;
+    capture_phase_.view_handoff_ = {};
+    capture_phase_.pixel_handoff_retry_height_ = 0;
+    capture_phase_.prepare_pitch_ = kCameraPitchInvalid;
     startup_handoff_ = {};
     search_entry_ = {};
     auto& split = search_phase_.first_trip_split_;
@@ -685,6 +697,9 @@ int16_t PushTask::desiredPitch() const {
         // TEMP_ASSUMPTION：开框由MCU完成标志确认，不需要为此下压到40°；货物贴近时在40°画面顶边会被截断（box_at_image_edge），
         // 所以PREPARE/RUSH沿用接近阶段已经到位的角度，不再单独切NEAR/TRACK。
         case PushState::PREPARE:
+            if (t_.pixel_grasp_enabled && capture_phase_.prepare_pitch_ != kCameraPitchInvalid)
+                return capture_phase_.prepare_pitch_;
+            [[fallthrough]];
         case PushState::RUSH:
             if (t_.pixel_grasp_enabled)
                 return t_.near_pitch_cdeg;
@@ -697,7 +712,7 @@ int16_t PushTask::desiredPitch() const {
                                                                               : t_.track_pitch_cdeg;
         case PushState::RAISE_RELEASE:
             if (t_.pixel_grasp_enabled && carryLogic())
-                return transport_phase_.jaw_sequence_.active ? t_.track_pitch_cdeg : t_.far_pitch_cdeg;
+                return transport_phase_.jaw_sequence_.active ? t_.near_pitch_cdeg : t_.far_pitch_cdeg;
             return assumeView() ? t_.assume_view_pitch_cdeg : t_.track_pitch_cdeg;
         case PushState::LOWER_FRAME:
             return t_.near_pitch_cdeg;
@@ -1265,7 +1280,9 @@ PushOutput PushTask::update(const PushObservation& in) {
             ((phase_ == TaskPhase::Search && (search_phase_.action == SearchAction::MidApproach ||
                                               search_phase_.action == SearchAction::Approach ||
                                               search_phase_.action == SearchAction::Prepare)) ||
-             (phase_ == TaskPhase::Capture && capture_phase_.action == CaptureAction::Advance));
+             (phase_ == TaskPhase::Capture &&
+              (capture_phase_.action == CaptureAction::Advance ||
+               capture_phase_.action == CaptureAction::Prepare)));
         const bool carrying = run_status_ == RunStatus::Running && !recovering_ &&
                               phase_ == TaskPhase::Transport &&
                               transport_phase_.action == TransportAction::Carry;
@@ -1440,6 +1457,7 @@ PushOutput PushTask::update(const PushObservation& in) {
               ((phase_ == TaskPhase::Search && search_phase_.pixel_approach_started_us_) ||
                (phase_ == TaskPhase::Capture &&
                 (capture_phase_.action == CaptureAction::Advance ||
+                 capture_phase_.action == CaptureAction::Prepare ||
                  capture_phase_.action == CaptureAction::LowerFrame)))));
         out.motion = motion;
         using SplitStage = SearchPhaseData::FirstTripSplit::RecoveryStage;
@@ -1530,6 +1548,16 @@ PushOutput PushTask::update(const PushObservation& in) {
             const auto waited = now >= phase_wait_started_us_ ? now - phase_wait_started_us_ : 0;
             if (attempt_started_)
                 attempt_started_ += waited;
+            if (phase_outcome_ == PhaseOutcome::CaptureReady &&
+                search_phase_.pixel_approach_started_us_)
+                search_phase_.pixel_approach_started_us_ += waited;
+            auto& handoff = capture_phase_.view_handoff_;
+            if (handoff.started_us) {
+                handoff.started_us += waited;
+                handoff.confirmation_started_us = 0;
+                handoff.frames = 0;
+                handoff.sample_us = handoff.stable_us = 0;
+            }
             phase_waiting_ = false;
             applyPhaseOutcome(now);
             if (phase_ == TaskPhase::Transport) {
@@ -1762,16 +1790,33 @@ PushOutput PushTask::update(const PushObservation& in) {
     }
     // Search follows the wanted cargo confirmed in the current view. IDs remain
     // short-lived steering references, not a contract with the previous view.
-    if (t_.pixel_grasp_enabled && phase_ == TaskPhase::Search && !recovering_ &&
-        search_phase_.action != SearchAction::Prepare &&
-        search_phase_.action != SearchAction::TurnAway &&
-        search_phase_.action != SearchAction::Recover && !search_entry_.handoff &&
+    const bool capture_preparing = phase_ == TaskPhase::Capture &&
+        capture_phase_.action == CaptureAction::Prepare && !recovering_;
+    // One approach deadline precedes pitch/target waits and survives view handoffs.
+    if (t_.pixel_grasp_enabled && !recovering_ &&
+        ((phase_ == TaskPhase::Search && search_phase_.action != SearchAction::Prepare) ||
+         capture_preparing) && search_phase_.pixel_approach_started_us_ &&
+        now - search_phase_.pixel_approach_started_us_ > t_.approach_budget_us) {
+        tick.immediate_motion_stop = true;
+        if (capture_preparing || (!first_ && targetKind(trip_context_.label_) == TargetKind::ORDINARY)) {
+            capture_scene_.stage = "approach";
+            enter(PushState::CAPTURE_FAIL, now, "pixel_approach_timeout");
+        } else
+            scanAfterClear(tick, "pixel_approach_timeout");
+        return result();
+    }
+    if (t_.pixel_grasp_enabled &&
+        (phase_ == TaskPhase::Search || capture_preparing) && !recovering_ &&
+        (!capture_preparing || in.label == trip_context_.label_) &&
+        (capture_preparing || (search_phase_.action != SearchAction::Prepare &&
+         search_phase_.action != SearchAction::TurnAway &&
+         search_phase_.action != SearchAction::Recover)) && !search_entry_.handoff &&
         !search_phase_.first_trip_split_.active && !search_phase_.first_trip_split_.pending &&
         !search_phase_.first_trip_split_.target_reselecting &&
         in.pixel_selection_managed && in.pixel_locked && candidate(in, now) &&
         in.pixel_grasp_sample_us && in.pixel_grasp_sample_us <= now &&
         now - in.pixel_grasp_sample_us <= t_.frame_timeout_us &&
-        (trip_context_.target_id_ >= 0 || search_phase_.view_handoff_.started_us) &&
+        (trip_context_.target_id_ >= 0 || capture_phase_.view_handoff_.started_us) &&
         (in.target_id != trip_context_.target_id_ || in.label != trip_context_.label_)) {
         trip_context_.target_id_ = trip_context_.capture_target_id_ = in.target_id;
         trip_context_.label_ = in.label;
@@ -1782,15 +1827,20 @@ PushOutput PushTask::update(const PushObservation& in) {
         capture_scene_ = {};
         actionProgress().confirmations = 0;
         tick.immediate_motion_stop = true;
-        reason_ = "search_view_target_selected";
+        reason_ = capture_preparing ? "capture_view_target_selected" : "search_view_target_selected";
         return result(); // Recheck alignment and inventory before any movement.
     }
     // Keep a committed view change, but let the normal stopped near-view path
     // acknowledge a confirmed new cargo ID before checking its alignment.
     const bool handoff_reselected = in.pixel_grasp_near_view &&
         in.pixel_reselected_from >= 0 && in.pixel_reselected_from == trip_context_.target_id_;
-    if (search_phase_.view_handoff_.started_us && !handoff_reselected && updateSearchViewHandoff(tick))
-        return result();
+    if (capture_preparing && capture_phase_.view_handoff_.started_us &&
+        capture_phase_.view_handoff_.near && !handoff_reselected) {
+        if (updateCaptureViewHandoff(tick) &&
+            !(search_phase_.pixel_approach_started_us_ &&
+              now-search_phase_.pixel_approach_started_us_ > t_.approach_budget_us))
+            return result();
+    }
     if (capture_load_.active && !search_phase_.first_trip_split_.pending &&
         search_phase_.first_trip_split_.target_reselecting) {
         tick.immediate_motion_stop = true;
@@ -1800,7 +1850,7 @@ PushOutput PushTask::update(const PushObservation& in) {
             return result(); // bounded observation recovery also owns this expired wait
         const auto target = std::find_if(in.capture_image_objects.begin(),
             in.capture_image_objects.end(), [&](const auto& object) {
-                return object.id == split.target_candidate_id && object.complete &&
+                return object.id == split.target_candidate_id && !object.box.empty() &&
                     object.selectable && captureLoadAllows(object.label) && object.label == in.label;
             });
         if (in.target_valid && in.target_id == split.target_candidate_id &&
@@ -1884,18 +1934,6 @@ PushOutput PushTask::update(const PushObservation& in) {
         in.opponent_zone_clear && (in.directional_clearance_valid ? in.turn_safe : in.path_safe);
     tick.observed_zone = zoneOk(in) && in.zone_estimate.source != ZoneEstimate::Source::PREDICTED;
     tick.elapsed = now - actionProgress().started_us;
-    // One approach deadline precedes pitch/target waits and survives view handoffs.
-    if (t_.pixel_grasp_enabled && phase_ == TaskPhase::Search && !recovering_ &&
-        search_phase_.action != SearchAction::Prepare && search_phase_.pixel_approach_started_us_ &&
-        now - search_phase_.pixel_approach_started_us_ > t_.approach_budget_us) {
-        tick.immediate_motion_stop = true;
-        if (!first_ && targetKind(trip_context_.label_) == TargetKind::ORDINARY) {
-            capture_scene_.stage = "approach";
-            enter(PushState::CAPTURE_FAIL, now, "pixel_approach_timeout");
-        } else
-            scanAfterClear(tick, "pixel_approach_timeout");
-        return result();
-    }
     // Grasp timing uses the detected box centre projected at block mid-height.
     // Legacy replay observations without a centre retain their supplied range.
     tick.target_forward_m = in.target_center_valid ? in.target_center_body.y
@@ -1984,11 +2022,13 @@ PushOutput PushTask::update(const PushObservation& in) {
     const bool pixel_identity_phase =
         phase_ == TaskPhase::Search ||
         (phase_ == TaskPhase::Capture &&
-         (capture_phase_.action == CaptureAction::Advance ||
+         (capture_phase_.action == CaptureAction::Prepare ||
+          capture_phase_.action == CaptureAction::Advance ||
           (capture_phase_.action == CaptureAction::LowerFrame && frame_raised_ != 0)));
     if (t_.pixel_grasp_enabled && in.pixel_selection_managed && pixel_identity_phase &&
         !recovering_ && trip_context_.target_id_ >= 0) {
-        if (in.pixel_released_id == trip_context_.target_id_ &&
+        if (!capture_preparing && !capture_phase_.view_handoff_.started_us &&
+            in.pixel_released_id == trip_context_.target_id_ &&
             (state_ == PushState::RUSH ||
              !(t_.pixel_grasp_enabled && targetSelectable(trip_context_.label_, first_) &&
                !capture_scene_.objects.empty()))) {

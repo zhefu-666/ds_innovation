@@ -1,7 +1,9 @@
 #include "rescue/perception/pushboard_floor.hpp"
+#include "rescue/perception/capture_monitor.hpp"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <cassert>
+#include <cmath>
 #include <iostream>
 using namespace rescue;
 namespace {
@@ -11,6 +13,138 @@ cv::Scalar bgr(int h, int s, int v) {
     auto p = rgb.at<cv::Vec3b>(0, 0);
     return {double(p[0]), double(p[1]), double(p[2])};
 }
+}
+void cargoSurroundings() {
+    PushboardFloorConfig c;
+    const std::vector<GraspCenterRange> ranges{
+        {"ordinary_supply",2000,1280,720,{209,226,1071,489},{647.5f,337},true},
+        {"core_supply",2000,1280,720,{268,236,1017,555},{647.5f,337},true},
+        {"injured_person",2000,1280,720,{268,236,1017,555},{647.5f,337},true}
+    };
+    cv::Mat frame(720,1280,CV_8UC3);
+    SegDetection cargo;cargo.label="ordinary_supply";cargo.confidence=.95f;
+    cargo.box={550,280,160,160};
+    const auto see = [&](const std::string& team, std::vector<SegDetection> objects, int expected=1,
+                         bool stable=true) {
+        return observeTransportFloor(frame,objects,c,team,stable,1000000,ranges,expected);
+    };
+    for (const std::string team : {"red","blue"}) {
+        const auto own=team=="red" ? bgr(179,180,160) : bgr(100,180,160);
+        const auto enemy=team=="red" ? bgr(100,180,160) : bgr(179,180,160);
+        frame.setTo(own);frame(cargo.box).setTo(bgr(55,180,160));
+        auto full=see(team,{cargo});
+        assert(full.valid && full.region_valid && full.inside && full.cargo_count==1);
+        assert(full.windows.size()==4);
+        assert(!see(team,{cargo},1,false).valid);
+        // No cargo, missing batch member, or a box outside the measured jaw is not arrival.
+        assert(!see(team,{}).region_valid);
+        assert(!see(team,{cargo},2).inside);
+        auto outside=cargo;outside.box={30,50,100,100};
+        assert(!see(team,{outside}).region_valid);
+        // Only the immediate floor is required. A narrow half and a centre divider elsewhere
+        // must not recreate the obsolete full-image width/height endpoint.
+        frame.setTo(cv::Scalar(150,150,150));
+        for(const auto& w:full.windows) frame(w.roi).setTo(own);
+        frame(cargo.box).setTo(bgr(55,180,160));
+        assert(see(team,{cargo}).inside);
+        for(size_t side=0;side<4;++side) {
+            for(const auto& other : {cv::Scalar(150,150,150),bgr(145,180,150),
+                                    bgr(0,0,20),enemy,bgr(80,180,150)}) {
+                frame(full.windows[side].roi).setTo(other);
+                const auto partial=see(team,{cargo});
+                assert(partial.region_valid && !partial.inside);
+                frame(full.windows[side].roi).setTo(own);
+            }
+        }
+        // A same-colour load does not count as surrounding floor on white ground.
+        frame.setTo(cv::Scalar(150,150,150));frame(cargo.box).setTo(own);
+        assert(!see(team,{cargo}).inside);
+        // Neighbour occlusion must leave enough visible ground on every side.
+        frame.setTo(own);
+        auto occluder=cargo;occluder.label="dangerous_object";
+        occluder.box=full.windows[0].roi;
+        assert(!see(team,{cargo,occluder}).region_valid);
+        // All held cargo, with different foreground colours, must independently qualify.
+        std::vector<SegDetection> load(3,cargo);
+        for(int i=0;i<3;++i) {
+            load[i].label=i==0?"ordinary_supply":i==1?"core_supply":"injured_person";
+            load[i].box={280+i*280,300,120,120};
+            frame(load[i].box).setTo(i==0?bgr(55,180,160):i==1?bgr(0,0,20):bgr(15,180,160));
+        }
+        auto all=see(team,load,3);
+        assert(all.inside && all.cargo_count==3 && all.windows.size()==12);
+        frame(all.windows[9].roi).setTo(cv::Scalar(150,150,150));
+        assert(!see(team,load,3).inside);
+        frame.setTo(own);
+        auto edge=cargo;edge.box={600,50,100,600};
+        // Use a test range reaching the image edge; clipping cannot satisfy a missing side.
+        auto edge_ranges=ranges;edge_ranges[0].area={0,0,1279,719};
+        edge.box={600,0,100,200};
+        assert(!observeTransportFloor(frame,{edge},c,team,true,1000000,edge_ranges,1).region_valid);
+        frame(cargo.box).setTo(bgr(55,180,160));
+        cv::Mat small;cv::resize(frame,small,{640,360},0,0,cv::INTER_NEAREST);
+        auto scaled_cargo=cargo;scaled_cargo.box={275,140,80,80};
+        auto scaled=observeTransportFloor(small,{scaled_cargo},c,team,true,1000000,ranges,1);
+        assert(scaled.inside && scaled.cargo_count==1);
+    }
+    std::cout << "PASS red/blue, four sides, white/purple/divider/enemy, all cargo, occlusion and scaling\n";
+}
+void cargoSurroundingsTolerateInternalMarkings() {
+    PushboardFloorConfig c;
+    const std::vector<GraspCenterRange> ranges{
+        {"ordinary_supply",2000,1280,720,{209,226,1071,500},{647.5f,337},true}
+    };
+    cv::Mat frame(720,1280,CV_8UC3);
+    SegDetection cargo;cargo.label="ordinary_supply";cargo.confidence=.95f;
+    for(const std::string team : {"red","blue"}) {
+        const auto own=team=="red" ? bgr(179,180,160) : bgr(100,180,160);
+        const auto see=[&](const std::vector<SegDetection>& load,int expected=1) {
+            return observeTransportFloor(frame,load,c,team,true,1000000,ranges,expected);
+        };
+        const auto paint=[&](const cv::Rect& roi,int count) {
+            frame(roi).setTo(cv::Scalar(150,150,150));
+            for(int i=0;i<count;++i)
+                frame.at<cv::Vec3b>(roi.y+i/roi.width,roi.x+i%roi.width)=
+                    cv::Vec3b(own[0],own[1],own[2]);
+        };
+        const auto scene=[&](cv::Rect box,std::array<float,4> fractions) {
+            cargo.box=box;frame.setTo(own);
+            const auto reference=see({cargo});
+            for(size_t i=0;i<4;++i)
+                paint(reference.windows[i].roi,cvRound(fractions[i]*reference.windows[i].roi.area()));
+            return see({cargo});
+        };
+        // 05:14 trace: top ~55%, rear ~100%, left ~84%, right 100%.
+        auto observed=scene({390,165,274,285},{.55f,1.f,.84f,1.f});
+        assert(observed.region_valid && observed.inside);
+        assert(observed.own_fraction>.84f && observed.own_fraction<.85f);
+        assert(!scene({390,165,274,285},{0,0,0,0}).inside); // outside on white
+        assert(!scene({390,165,274,285},{1,0,.5f,.5f}).inside); // crossing entrance
+        assert(!scene({390,165,274,285},{.49f,1,1,1}).inside); // side gate despite high total
+        // Long boxes distinguish pixel weighting from averaging four percentages.
+        assert(!scene({400,300,400,80},{1,.5f,1,1}).inside); // mean 87.5%, pixels 79.3%
+        assert(scene({400,300,400,80},{1,1,.5f,.5f}).inside); // mean 75%, pixels 91.4%
+        // Exact inclusive thresholds: 50% on top and 80% over all 19200 pixels.
+        cargo.box={550,280,160,160};frame.setTo(own);
+        const auto reference=see({cargo});
+        const int own_pixels[]={2688,5376,3648,3648};
+        for(size_t i=0;i<4;++i)paint(reference.windows[i].roi,own_pixels[i]);
+        auto boundary=see({cargo});
+        assert(boundary.inside && boundary.windows[0].own==.5f);
+        assert(std::abs(boundary.own_fraction-.8f)<1e-6f);
+        paint(reference.windows[1].roi,5375);
+        assert(!see({cargo}).inside); // one pixel below 80%
+        // Strong cargo cannot compensate for another cargo below its combined gate.
+        std::vector<SegDetection> load(3,cargo);
+        for(int i=0;i<3;++i)load[i].box={280+i*280,300,120,120};
+        frame.setTo(own);
+        const auto all=see(load,3);
+        assert(all.inside);
+        for(size_t i=4;i<8;++i)paint(all.windows[i].roi,cvRound(.7f*all.windows[i].roi.area()));
+        const auto partial=see(load,3);
+        assert(partial.region_valid && partial.own_fraction>.8f && !partial.inside);
+    }
+    std::cout<<"PASS logged red/blue entry, outside/crossing, weighted 50%/80% boundaries and each cargo independently\n";
 }
 int main(int argc, char** argv) {
     PushboardFloorConfig c; c.enabled = true;
@@ -67,71 +201,7 @@ int main(int argc, char** argv) {
         std::cout << "screenshots inside=" << a.windows[0].own << "," << a.windows[1].own
                   << " outside-white=" << b.windows[0].white << "," << b.windows[1].white << "\n";
     }
-    // UI120 uses one aligned half's outer extent, independent of interior cargo.
-    for (const std::string team : {"blue", "red"}) {
-        const auto color = team=="blue" ? bgr(100,180,160) : bgr(179,180,160);
-        frame.setTo(cv::Scalar(150,150,150));
-        const std::vector<cv::Point> half{{170,240},{800,240},{1040,719},{60,719}};
-        cv::fillConvexPoly(frame,half,color);
-        auto base=observeTransportFloor(frame,{},c,team,true,1000000);
-        assert(base.valid && base.region_valid && base.inside);
-        assert(base.width_fraction>.75f && base.height_fraction>.66f);
-        // More than half the floor can be cargo without changing its visible boundary.
-        std::vector<SegDetection> cargo;
-        for (int i=0;i<3;++i) {
-            SegDetection d;d.label=i==0?"ordinary_supply":i==1?"injured_person":"core_supply";
-            d.confidence=.9f;d.box={250+i*160,300,140,340};
-            frame(d.box).setTo(i==0?bgr(55,180,160):i==1?bgr(15,180,160):bgr(0,0,20));
-            cargo.push_back(d);
-        }
-        auto loaded=observeTransportFloor(frame,cargo,c,team,true,1000000);
-        assert(loaded.inside && loaded.region_box==base.region_box);
-        assert(loaded.own_fraction<.40f); // Old full-image 70% would reject this case.
-        assert(!observeTransportFloor(frame,cargo,c,team,false,1000000).valid);
-        auto enemy=observeTransportFloor(frame,cargo,c,team=="blue"?"red":"blue",true,1000000);
-        assert(!enemy.region_valid && !enemy.inside);
-        cv::Mat small;cv::resize(frame,small,{640,360},0,0,cv::INTER_NEAREST);
-        auto scaled=observeTransportFloor(small,{},c,team,true,1000000);
-        assert(scaled.inside && std::abs(scaled.width_fraction-loaded.width_fraction)<.01f);
-        // A wide but shallow half must not release.
-        frame.setTo(cv::Scalar(150,150,150));
-        frame(cv::Rect(0,500,1100,220)).setTo(color);
-        assert(!observeTransportFloor(frame,{},c,team,true,1000000).inside);
-        // Neither two separate halves nor a purple connecting wall may be merged.
-        frame.setTo(cv::Scalar(150,150,150));
-        frame(cv::Rect(450,240,320,480)).setTo(color);
-        frame(cv::Rect(850,240,430,480)).setTo(color);
-        frame(cv::Rect(450,210,830,30)).setTo(bgr(121,180,120));
-        auto split=observeTransportFloor(frame,{},c,team,true,1000000);
-        assert(split.region_valid && !split.inside && split.region_box.width==320);
-        // Width and height without sufficient depth in the image still reject.
-        frame.setTo(cv::Scalar(150,150,150));
-        frame(cv::Rect(100,100,1000,450)).setTo(color);
-        assert(!observeTransportFloor(frame,{},c,team,true,1000000).inside);
-        // A same-colour object alone is never a floor region.
-        frame.setTo(cv::Scalar(150,150,150));
-        SegDetection object;object.label="core_supply";object.confidence=.9f;
-        object.box={100,240,1000,480};frame(object.box).setTo(color);
-        assert(!observeTransportFloor(frame,{object},c,team,true,1000000).region_valid);
-    }
-    if ((argc==3 || argc==4) && std::string(argv[1])=="--ui120-reference") {
-        auto image=cv::imread(argv[2]);assert(!image.empty());
-        std::vector<SegDetection> cargo(2);
-        cargo[0].label=cargo[1].label="ordinary_supply";
-        cargo[0].confidence=cargo[1].confidence=.9f;
-        cargo[0].box={672,539,244,173};cargo[1].box={627,317,143,183};
-        const auto f=observeTransportFloor(image,cargo,c,"blue",true,1000000);
-        assert(f.region_valid && f.inside && f.region_box.x+f.region_box.width<image.cols);
-        if (argc==4) {
-            cv::polylines(image,std::vector<std::vector<cv::Point>>{f.region_contour},true,{0,255,0},3);
-            const std::string label="UI120 HALF W="+std::to_string(int(f.width_fraction*100))+
-                "% H="+std::to_string(int(f.height_fraction*100))+
-                "% B="+std::to_string(int(f.bottom_fraction*100))+"% - STOP/CONFIRM";
-            cv::putText(image,label,{25,40},cv::FONT_HERSHEY_SIMPLEX,.75,{0,255,0},2);
-            assert(cv::imwrite(argv[3],image));
-        }
-        std::cout<<"REFERENCE width="<<f.width_fraction<<" height="<<f.height_fraction
-                 <<" bottom="<<f.bottom_fraction<<" blue="<<f.own_fraction<<" box="<<f.region_box<<"\n";
-    }
-    std::cout << "PASS floor colours, UI120 half contour, mixed cargo, divider and depth thresholds\n";
+    cargoSurroundingsTolerateInternalMarkings();
+    cargoSurroundings();
+    std::cout << "PASS UI140 fixed windows and per-cargo surrounding floor\n";
 }
